@@ -524,3 +524,8 @@ export const useMCPServerConnectionStatusQuery = (
     },
   );
 };
+
+/* Session State (Python Code Execution) */
+export const useResetSessionStateMutation = (): UseMutationResult<void, unknown, string> => {
+  return useMutation((sessionId: string) => dataService.resetSessionState(sessionId));
+};

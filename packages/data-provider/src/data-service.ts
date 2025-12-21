@@ -1046,3 +1046,21 @@ export interface ActiveJobsResponse {
 export const getActiveJobs = (): Promise<ActiveJobsResponse> => {
   return request.get(endpoints.activeJobs());
 };
+
+/* Session State (Python Code Execution) */
+export interface SessionStateInfo {
+  session_id: string;
+  conversationId?: string;
+  bytes: number;
+  hash: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export function getSessionState(sessionId: string): Promise<SessionStateInfo> {
+  return request.get(endpoints.sessionState(sessionId));
+}
+
+export function resetSessionState(sessionId: string): Promise<void> {
+  return request.delete(endpoints.deleteSessionState(sessionId));
+}

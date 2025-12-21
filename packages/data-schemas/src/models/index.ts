@@ -11,6 +11,7 @@ import { createRoleModel } from './role';
 import { createActionModel } from './action';
 import { createAssistantModel } from './assistant';
 import { createFileModel } from './file';
+import { createSessionStateModel } from './sessionState';
 import { createBannerModel } from './banner';
 import { createProjectModel } from './project';
 import { createKeyModel } from './key';
@@ -45,6 +46,7 @@ export function createModels(mongoose: typeof import('mongoose')) {
     Action: createActionModel(mongoose),
     Assistant: createAssistantModel(mongoose),
     File: createFileModel(mongoose),
+    SessionState: createSessionStateModel(mongoose),
     Banner: createBannerModel(mongoose),
     Project: createProjectModel(mongoose),
     Key: createKeyModel(mongoose),

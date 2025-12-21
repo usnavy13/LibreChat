@@ -13,6 +13,7 @@ const {
 } = require('@librechat/agents');
 const { processFileCitations } = require('~/server/services/Files/Citations');
 const { processCodeOutput } = require('~/server/services/Files/Code/process');
+const { processSessionState } = require('~/server/services/Files/Code/state');
 const { loadAuthValues } = require('~/server/services/Tools/credentials');
 const { saveBase64Image } = require('~/server/services/Files/process');
 
@@ -483,6 +484,43 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null }) 
           logger.error('Error processing code output:', error);
           return null;
         }),
+      );
+    }
+
+    // Process Python session state if present
+    if (output.artifact.has_state && output.artifact.lang === 'py') {
+      artifactPromises.push(
+        (async () => {
+          try {
+            const result = await loadAuthValues({
+              userId: req.user.id,
+              authFields: [EnvVar.CODE_API_KEY],
+            });
+            const stateResult = await processSessionState({
+              req,
+              session_id: output.artifact.session_id,
+              conversationId: metadata.thread_id,
+              state_size: output.artifact.state_size,
+              state_hash: output.artifact.state_hash,
+              apiKey: result[EnvVar.CODE_API_KEY],
+            });
+
+            // Emit session state event for frontend
+            if (stateResult.cached) {
+              emitEvent(res, streamId, {
+                event: 'session_state',
+                data: {
+                  session_id: output.artifact.session_id,
+                  hasState: true,
+                  bytes: stateResult.bytes,
+                  hash: stateResult.hash,
+                },
+              });
+            }
+          } catch (error) {
+            logger.error('Error processing session state:', error);
+          }
+        })(),
       );
     }
   };

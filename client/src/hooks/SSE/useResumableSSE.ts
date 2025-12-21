@@ -15,6 +15,7 @@ import type { TMessage, TPayload, TSubmission, EventSubmission } from 'librechat
 import type { EventHandlerParams } from './useEventHandlers';
 import { useGetStartupConfig, useGetUserBalance, queueTitleGeneration } from '~/data-provider';
 import type { ActiveJobsResponse } from '~/data-provider';
+import useSessionStateHandler from './useSessionStateHandler';
 import { useAuthContext } from '~/hooks/AuthContext';
 import useEventHandlers from './useEventHandlers';
 import store from '~/store';
@@ -129,6 +130,8 @@ export default function useResumableSSE(
     resetLatestMessage,
   });
 
+  const sessionStateHandler = useSessionStateHandler();
+
   const { data: startupConfig } = useGetStartupConfig();
   const balanceQuery = useGetUserBalance({
     enabled: !!isAuthenticated && startupConfig?.balance?.enabled,
@@ -155,7 +158,6 @@ export default function useResumableSSE(
       sseRef.current = sse;
 
       sse.addEventListener('open', () => {
-        console.log('[ResumableSSE] Stream connected');
         setAbortScroll(false);
         // Restore UI state on successful connection (including reconnection)
         setIsSubmitting(true);
@@ -168,11 +170,6 @@ export default function useResumableSSE(
           const data = JSON.parse(e.data);
 
           if (data.final != null) {
-            console.log('[ResumableSSE] Received FINAL event', {
-              aborted: data.aborted,
-              conversationId: data.conversation?.conversationId,
-              hasResponseMessage: !!data.responseMessage,
-            });
             clearDraft(currentSubmission.conversation?.conversationId);
             try {
               finalHandler(data, currentSubmission as EventSubmission);
@@ -192,10 +189,6 @@ export default function useResumableSSE(
           }
 
           if (data.created != null) {
-            console.log('[ResumableSSE] Received CREATED event', {
-              messageId: data.message?.messageId,
-              conversationId: data.message?.conversationId,
-            });
             const runId = v4();
             setActiveRunId(runId);
             userMessage = {
@@ -209,6 +202,14 @@ export default function useResumableSSE(
 
           if (data.event === 'attachment' && data.data) {
             attachmentHandler({
+              data: data.data,
+              submission: currentSubmission as EventSubmission,
+            });
+            return;
+          }
+
+          if (data.event === 'session_state' && data.data) {
+            sessionStateHandler({
               data: data.data,
               submission: currentSubmission as EventSubmission,
             });
@@ -469,6 +470,7 @@ export default function useResumableSSE(
       finalHandler,
       createdHandler,
       attachmentHandler,
+      sessionStateHandler,
       stepHandler,
       contentHandler,
       resetContentHandler,

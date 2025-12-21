@@ -38,6 +38,8 @@ const {
   createOpenAIImageTools,
 } = require('../');
 const { primeFiles: primeCodeFiles } = require('~/server/services/Files/Code/process');
+const { primeState } = require('~/server/services/Files/Code/state');
+const { getSessionStatesByConversation } = require('~/models');
 const { createFileSearchTool, primeFiles: primeSearchFiles } = require('./fileSearch');
 const { getUserPluginAuthValue } = require('~/server/services/PluginService');
 const { createMCPTool, createMCPTools } = require('~/server/services/MCP');
@@ -265,6 +267,35 @@ const loadTools = async ({
         if (toolContext) {
           toolContextMap[tool] = toolContext;
         }
+
+        // Prime Python session state
+        let session_id = files?.[0]?.session_id;
+        const conversationId = options.req?.body?.conversationId;
+
+        if (!session_id && conversationId) {
+          // Look up session_id from cached state if no files
+          try {
+            const cachedStates = await getSessionStatesByConversation(conversationId);
+            if (cachedStates?.length > 0) {
+              session_id = cachedStates[0].session_id;
+              logger.debug(`[handleTools] Using session_id from cached state: ${session_id}`);
+            }
+          } catch (dbError) {
+            logger.error(`[handleTools] Error querying session states:`, dbError);
+          }
+        }
+
+        if (session_id) {
+          const stateResult = await primeState({ session_id, req: options.req }, codeApiKey);
+          logger.debug(`[handleTools] primeState result: ${JSON.stringify(stateResult)}`);
+          if (stateResult.warning) {
+            const warningContext = `- Warning: ${stateResult.warning}`;
+            toolContextMap[tool] = toolContextMap[tool]
+              ? `${toolContextMap[tool]}\n${warningContext}`
+              : warningContext;
+          }
+        }
+
         const CodeExecutionTool = createCodeExecutionTool({
           user_id: user,
           files,

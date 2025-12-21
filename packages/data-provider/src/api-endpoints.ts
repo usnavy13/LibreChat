@@ -395,3 +395,7 @@ export const getAllEffectivePermissions = (resourceType: ResourceType) =>
 // SharePoint Graph API Token
 export const graphToken = (scopes: string) =>
   `${BASE_URL}/api/auth/graph-token?scopes=${encodeURIComponent(scopes)}`;
+
+/* Session State (Python Code Execution) */
+export const sessionState = (sessionId: string) => `${BASE_URL}/api/session-state/${sessionId}`;
+export const deleteSessionState = (sessionId: string) => sessionState(sessionId);

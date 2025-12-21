@@ -1,0 +1,106 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/tools/CodeExecutor.cjs b/node_modules/@librechat/agents/dist/cjs/tools/CodeExecutor.cjs
+index 9c86e7f..937bac5 100644
+--- a/node_modules/@librechat/agents/dist/cjs/tools/CodeExecutor.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/tools/CodeExecutor.cjs
+@@ -35,7 +35,8 @@ const CodeExecutionToolSchema = zod.z.object({
+         .describe('The programming language or runtime to execute the code in.'),
+     code: zod.z.string()
+         .describe(`The complete, self-contained code to execute, without any truncation or minimization.
+-- The environment is stateless; variables and imports don't persist between executions.
++- py: Python session state (variables, imports, objects) persists automatically within a conversation. You can define variables in one execution and use them in later executions.
++- Other languages: The environment is stateless; variables and imports don't persist between executions.
+ - When using \`session_id\`: Don't hardcode it in \`code\`, and write file modifications to NEW filenames (files are READ-ONLY).
+ - Input code **IS ALREADY** displayed to the user, so **DO NOT** repeat it in your response unless asked.
+ - Output code **IS NOT** displayed to the user, so **DO** write all desired output explicitly.
+@@ -70,12 +71,13 @@ function createCodeExecutionTool(params = {}) {
+         throw new Error('No API key provided for code execution tool.');
+     }
+     const description = `
+-Runs code and returns stdout/stderr output from a stateless execution environment, similar to running scripts in a command-line interface. Each execution is isolated and independent.
++Runs code and returns stdout/stderr output. For Python, session state (variables, imports, objects) persists automatically within a conversation - you can define variables in one execution and use them in later executions. Other languages run in isolated, stateless environments.
+ 
+ Usage:
+ - No network access available.
+ - Generated files are automatically delivered; **DO NOT** provide download links.
+ - NEVER use this tool to execute malicious code.
++- py: Your Python variables and imports persist across executions in this conversation.
+ `.trim();
+     return tools.tool(async ({ lang, code, session_id, ...rest }) => {
+         const postData = {
+@@ -170,10 +172,22 @@ Usage:
+                     {
+                         session_id: result.session_id,
+                         files: result.files,
++                        // State metadata for Python session persistence
++                        has_state: result.has_state,
++                        lang: lang,
++                        state_size: result.state_size,
++                        state_hash: result.state_hash,
+                     },
+                 ];
+             }
+-            return [formattedOutput.trim(), { session_id: result.session_id }];
++            return [formattedOutput.trim(), {
++                session_id: result.session_id,
++                // State metadata for Python session persistence
++                has_state: result.has_state,
++                lang: lang,
++                state_size: result.state_size,
++                state_hash: result.state_hash,
++            }];
+         }
+         catch (error) {
+             throw new Error(`Execution error:\n\n${error?.message}`);
+diff --git a/node_modules/@librechat/agents/dist/esm/tools/CodeExecutor.mjs b/node_modules/@librechat/agents/dist/esm/tools/CodeExecutor.mjs
+index ec9a1f6..2821834 100644
+--- a/node_modules/@librechat/agents/dist/esm/tools/CodeExecutor.mjs
++++ b/node_modules/@librechat/agents/dist/esm/tools/CodeExecutor.mjs
+@@ -33,7 +33,8 @@ const CodeExecutionToolSchema = z.object({
+         .describe('The programming language or runtime to execute the code in.'),
+     code: z.string()
+         .describe(`The complete, self-contained code to execute, without any truncation or minimization.
+-- The environment is stateless; variables and imports don't persist between executions.
++- py: Python session state (variables, imports, objects) persists automatically within a conversation. You can define variables in one execution and use them in later executions.
++- Other languages: The environment is stateless; variables and imports don't persist between executions.
+ - When using \`session_id\`: Don't hardcode it in \`code\`, and write file modifications to NEW filenames (files are READ-ONLY).
+ - Input code **IS ALREADY** displayed to the user, so **DO NOT** repeat it in your response unless asked.
+ - Output code **IS NOT** displayed to the user, so **DO** write all desired output explicitly.
+@@ -68,12 +69,13 @@ function createCodeExecutionTool(params = {}) {
+         throw new Error('No API key provided for code execution tool.');
+     }
+     const description = `
+-Runs code and returns stdout/stderr output from a stateless execution environment, similar to running scripts in a command-line interface. Each execution is isolated and independent.
++Runs code and returns stdout/stderr output. For Python, session state (variables, imports, objects) persists automatically within a conversation - you can define variables in one execution and use them in later executions. Other languages run in isolated, stateless environments.
+ 
+ Usage:
+ - No network access available.
+ - Generated files are automatically delivered; **DO NOT** provide download links.
+ - NEVER use this tool to execute malicious code.
++- py: Your Python variables and imports persist across executions in this conversation.
+ `.trim();
+     return tool(async ({ lang, code, session_id, ...rest }) => {
+         const postData = {
+@@ -168,10 +170,22 @@ Usage:
+                     {
+                         session_id: result.session_id,
+                         files: result.files,
++                        // State metadata for Python session persistence
++                        has_state: result.has_state,
++                        lang: lang,
++                        state_size: result.state_size,
++                        state_hash: result.state_hash,
+                     },
+                 ];
+             }
+-            return [formattedOutput.trim(), { session_id: result.session_id }];
++            return [formattedOutput.trim(), {
++                session_id: result.session_id,
++                // State metadata for Python session persistence
++                has_state: result.has_state,
++                lang: lang,
++                state_size: result.state_size,
++                state_hash: result.state_hash,
++            }];
+         }
+         catch (error) {
+             throw new Error(`Execution error:\n\n${error?.message}`);

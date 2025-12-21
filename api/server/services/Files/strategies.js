@@ -272,6 +272,8 @@ const getStrategyFunctions = (fileSource) => {
     return vertexMistralOCRStrategy();
   } else if (fileSource === FileSources.text) {
     return localStrategy(); // Text files use local strategy
+  } else if (fileSource === FileSources.code_state) {
+    return localStrategy(); // Code state files use local strategy by default
   } else {
     throw new Error(
       `Invalid file source: ${fileSource}. Available sources: ${Object.values(FileSources).join(', ')}`,

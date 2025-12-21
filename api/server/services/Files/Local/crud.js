@@ -67,7 +67,8 @@ async function saveLocalBuffer({ userId, buffer, fileName, basePath = 'images' }
   try {
     const { publicPath, uploads } = paths;
 
-    const directoryPath = path.join(basePath === 'images' ? publicPath : uploads, basePath, userId);
+    const isImages = basePath === 'images';
+    const directoryPath = path.join(isImages ? publicPath : uploads, basePath, userId);
 
     if (!fs.existsSync(directoryPath)) {
       fs.mkdirSync(directoryPath, { recursive: true });
@@ -75,7 +76,10 @@ async function saveLocalBuffer({ userId, buffer, fileName, basePath = 'images' }
 
     fs.writeFileSync(path.join(directoryPath, fileName), buffer);
 
-    const filePath = path.posix.join('/', basePath, userId, fileName);
+    // For non-image basePaths, include /uploads/ prefix so getLocalFileStream can find it
+    const filePath = isImages
+      ? path.posix.join('/', basePath, userId, fileName)
+      : path.posix.join('/uploads', basePath, userId, fileName);
 
     return filePath;
   } catch (error) {

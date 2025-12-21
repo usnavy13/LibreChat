@@ -15,6 +15,7 @@ export * from './role';
 export * from './action';
 export * from './assistant';
 export * from './file';
+export * from './sessionState';
 export * from './share';
 export * from './pluginAuth';
 /* Memories */

@@ -14,6 +14,7 @@ import type { TMessage, TPayload, TSubmission, EventSubmission } from 'librechat
 import type { EventHandlerParams } from './useEventHandlers';
 import type { TResData } from '~/common';
 import { useGetStartupConfig, useGetUserBalance } from '~/data-provider';
+import useSessionStateHandler from './useSessionStateHandler';
 import { useAuthContext } from '~/hooks/AuthContext';
 import useEventHandlers from './useEventHandlers';
 import store from '~/store';
@@ -83,6 +84,8 @@ export default function useSSE(
     resetLatestMessage,
   });
 
+  const sessionStateHandler = useSessionStateHandler();
+
   const { data: startupConfig } = useGetStartupConfig();
   const balanceQuery = useGetUserBalance({
     enabled: !!isAuthenticated && startupConfig?.balance?.enabled,
@@ -116,6 +119,15 @@ export default function useSSE(
       }
     });
 
+    sse.addEventListener('session_state', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        sessionStateHandler({ data, submission: submission as EventSubmission });
+      } catch (error) {
+        console.error(error);
+      }
+    });
+
     sse.addEventListener('message', (e: MessageEvent) => {
       const data = JSON.parse(e.data);
 
@@ -141,6 +153,9 @@ export default function useSSE(
         };
 
         createdHandler(data, { ...submission, userMessage } as EventSubmission);
+      } else if (data.event === 'session_state') {
+        // Handle Python session state updates
+        sessionStateHandler({ data: data.data, submission: submission as EventSubmission });
       } else if (data.event != null) {
         stepHandler(data, { ...submission, userMessage } as EventSubmission);
       } else if (data.sync != null) {

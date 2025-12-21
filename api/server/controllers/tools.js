@@ -11,6 +11,7 @@ const {
 } = require('librechat-data-provider');
 const { processFileURL, uploadImageBuffer } = require('~/server/services/Files/process');
 const { processCodeOutput } = require('~/server/services/Files/Code/process');
+const { processSessionState } = require('~/server/services/Files/Code/state');
 const { createToolCall, getToolCallsByConvo } = require('~/models/ToolCall');
 const { loadAuthValues } = require('~/server/services/Tools/credentials');
 const { loadTools } = require('~/app/clients/tools/util');
@@ -219,15 +220,53 @@ const callTool = async (req, res) => {
         }),
       );
     }
+
+    // Process Python session state if present
+    let sessionState = null;
+    if (artifact.has_state && artifact.lang === 'py') {
+      artifactPromises.push(
+        (async () => {
+          try {
+            const stateResult = await processSessionState({
+              req,
+              session_id: artifact.session_id,
+              conversationId,
+              state_size: artifact.state_size,
+              state_hash: artifact.state_hash,
+              apiKey: tool.apiKey,
+            });
+
+            if (stateResult.cached) {
+              sessionState = {
+                session_id: artifact.session_id,
+                hasState: true,
+                bytes: stateResult.bytes,
+                hash: stateResult.hash,
+              };
+            }
+          } catch (error) {
+            logger.error('Error processing session state:', error);
+          }
+        })(),
+      );
+    }
+
     const attachments = await Promise.all(artifactPromises);
     toolCallData.attachments = attachments;
     createToolCall(toolCallData).catch((error) => {
       logger.error(`Error creating tool call: ${error.message}`);
     });
-    res.status(200).json({
+
+    const response = {
       result: content,
       attachments,
-    });
+    };
+
+    if (sessionState) {
+      response.sessionState = sessionState;
+    }
+
+    res.status(200).json(response);
   } catch (error) {
     logger.error('Error calling tool', error);
     res.status(500).json({ message: 'Error calling tool' });

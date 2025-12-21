@@ -253,6 +253,11 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           !wasAbortedBeforeComplete;
 
         if (!wasAbortedBeforeComplete) {
+          // Await artifact promises (including session_state events) before sending final
+          if (client.artifactPromises && client.artifactPromises.length > 0) {
+            await Promise.all(client.artifactPromises);
+          }
+
           const finalEvent = {
             final: true,
             conversation,
@@ -590,6 +595,11 @@ const _LegacyAgentController = async (req, res, next, initializeClient, addTitle
 
     // Only send if not aborted
     if (!job.abortController.signal.aborted) {
+      // Await artifact promises (including session_state events) before sending final
+      if (client.artifactPromises && client.artifactPromises.length > 0) {
+        await Promise.all(client.artifactPromises);
+      }
+
       // Create a new response object with minimal copies
       const finalResponse = { ...response };
 

@@ -9,6 +9,7 @@ export enum FileSources {
   s3 = 's3',
   vectordb = 'vectordb',
   execute_code = 'execute_code',
+  code_state = 'code_state',
   mistral_ocr = 'mistral_ocr',
   azure_mistral_ocr = 'azure_mistral_ocr',
   vertexai_mistral_ocr = 'vertexai_mistral_ocr',
