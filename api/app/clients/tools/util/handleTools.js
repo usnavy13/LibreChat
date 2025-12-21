@@ -299,6 +299,7 @@ const loadTools = async ({
         const CodeExecutionTool = createCodeExecutionTool({
           user_id: user,
           files,
+          session_id, // Pass cached session_id as default for Python state persistence
           ...authValues,
         });
         CodeExecutionTool.apiKey = codeApiKey;

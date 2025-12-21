@@ -448,46 +448,45 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null }) 
       }
     }
 
-    if (!output.artifact.files) {
-      return;
-    }
+    // Process files if present (don't return early - need to check session state after)
+    if (output.artifact.files && output.artifact.files.length > 0) {
+      for (const file of output.artifact.files) {
+        const { id, name } = file;
+        artifactPromises.push(
+          (async () => {
+            const result = await loadAuthValues({
+              userId: req.user.id,
+              authFields: [EnvVar.CODE_API_KEY],
+            });
+            const fileMetadata = await processCodeOutput({
+              req,
+              id,
+              name,
+              apiKey: result[EnvVar.CODE_API_KEY],
+              messageId: metadata.run_id,
+              toolCallId: output.tool_call_id,
+              conversationId: metadata.thread_id,
+              session_id: output.artifact.session_id,
+            });
+            if (!streamId && !res.headersSent) {
+              return fileMetadata;
+            }
 
-    for (const file of output.artifact.files) {
-      const { id, name } = file;
-      artifactPromises.push(
-        (async () => {
-          const result = await loadAuthValues({
-            userId: req.user.id,
-            authFields: [EnvVar.CODE_API_KEY],
-          });
-          const fileMetadata = await processCodeOutput({
-            req,
-            id,
-            name,
-            apiKey: result[EnvVar.CODE_API_KEY],
-            messageId: metadata.run_id,
-            toolCallId: output.tool_call_id,
-            conversationId: metadata.thread_id,
-            session_id: output.artifact.session_id,
-          });
-          if (!streamId && !res.headersSent) {
+            if (!fileMetadata) {
+              return null;
+            }
+
+            writeAttachment(res, streamId, fileMetadata);
             return fileMetadata;
-          }
-
-          if (!fileMetadata) {
+          })().catch((error) => {
+            logger.error('Error processing code output:', error);
             return null;
-          }
-
-          writeAttachment(res, streamId, fileMetadata);
-          return fileMetadata;
-        })().catch((error) => {
-          logger.error('Error processing code output:', error);
-          return null;
-        }),
-      );
+          }),
+        );
+      }
     }
 
-    // Process Python session state if present
+    // Process Python session state if present (runs even without files)
     if (output.artifact.has_state && output.artifact.lang === 'py') {
       artifactPromises.push(
         (async () => {
