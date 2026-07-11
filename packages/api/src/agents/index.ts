@@ -16,6 +16,7 @@ export * from './orphans';
 export * from './migration';
 export * from './parameters';
 export * from './openai';
+export * from './openaiResponses';
 export * from './transactions';
 export * from './usage';
 export * from './resources';

@@ -131,6 +131,7 @@ class AgentClient extends BaseClient {
       contentParts,
       collectedUsage,
       collectedThoughtSignatures,
+      collectedOpenAIResponses,
       artifactPromises,
       maxContextTokens,
       subagentAggregatorsByToolCallId,
@@ -160,6 +161,7 @@ class AgentClient extends BaseClient {
      *  keep tool round-trips valid across DB reconstruction.
      *  @type {Record<string, string> | undefined} */
     this.collectedThoughtSignatures = collectedThoughtSignatures;
+    this.collectedOpenAIResponses = collectedOpenAIResponses;
     /** @type {ArtifactPromises} */
     this.artifactPromises = artifactPromises;
     /** Per-request map of `createContentAggregator` instances keyed by
@@ -987,6 +989,7 @@ class AgentClient extends BaseClient {
    *   thoughtSignatures?: Record<string, string>,
    *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
    *   usage?: import('librechat-data-provider').TResponseUsage,
+   *   openAIResponses?: import('librechat-data-provider').TOpenAIResponsesState,
    * } | undefined}
    */
   buildResponseMetadata() {
@@ -994,11 +997,20 @@ class AgentClient extends BaseClient {
      *   thoughtSignatures?: Record<string, string>,
      *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
      *   usage?: import('librechat-data-provider').TResponseUsage,
+     *   openAIResponses?: import('librechat-data-provider').TOpenAIResponsesState,
      * }} */
     const metadata = {};
     const signatures = this.collectedThoughtSignatures;
     if (signatures && Object.keys(signatures).length > 0) {
       metadata.thoughtSignatures = signatures;
+    }
+    const openAIResponses = this.collectedOpenAIResponses;
+    const reasoningContext = this.options.agent?.model_parameters?.reasoning_context;
+    if (
+      reasoningContext !== 'current_turn' &&
+      (openAIResponses?.responseId || openAIResponses?.output?.length > 0)
+    ) {
+      metadata.openAIResponses = openAIResponses;
     }
     const usageEvents = this.usageEmitSink ?? [];
     /** Persist the breakdown only when the latest snapshot's OWN run completed —

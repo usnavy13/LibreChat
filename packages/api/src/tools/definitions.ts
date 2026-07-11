@@ -40,6 +40,7 @@ export interface LoadToolDefinitionsParams {
   programmaticToolsEnabled?: boolean;
   /** Whether code execution is enabled and requested by this agent */
   codeExecutionEnabled?: boolean;
+  programmaticToolCalling?: 'librechat' | 'native';
   /** Agent provider — Gemini/Vertex tool schemas get union-flattened for compatibility */
   provider?: Providers;
 }
@@ -86,6 +87,7 @@ export async function loadToolDefinitions(
     deferredToolsEnabled = false,
     programmaticToolsEnabled = false,
     codeExecutionEnabled = false,
+    programmaticToolCalling = 'librechat',
     provider,
   } = params;
   const { getOrFetchMCPServerTools, isBuiltInTool, getActionToolDefinitions } = deps;
@@ -217,6 +219,7 @@ export async function loadToolDefinitions(
     deferredToolsEnabled,
     programmaticToolsEnabled,
     codeExecutionEnabled,
+    programmaticToolCalling,
     definitionsOnly: true,
     agentToolOptions: toolOptions,
   });

@@ -191,6 +191,8 @@ export interface BuildToolClassificationParams {
   programmaticToolsEnabled?: boolean;
   /** Whether code execution is enabled and requested by this agent */
   codeExecutionEnabled?: boolean;
+  /** Selects LibreChat's local runner or OpenAI's native programmatic tool calling. */
+  programmaticToolCalling?: 'librechat' | 'native';
   /** When true, skip creating tool instances (for event-driven mode) */
   definitionsOnly?: boolean;
   /** Agent provider — Gemini/Vertex rejects union types, so injected tool schemas get sanitized */
@@ -264,6 +266,7 @@ export async function buildToolClassification(
     deferredToolsEnabled = true,
     programmaticToolsEnabled = false,
     codeExecutionEnabled = false,
+    programmaticToolCalling = 'librechat',
     authHeaders,
   } = params;
   const isGoogle = provider === Providers.GOOGLE || provider === Providers.VERTEXAI;
@@ -291,7 +294,9 @@ export async function buildToolClassification(
    * Only enable tool search if the agent has deferred tools AND the capability is enabled.
    */
   const hasProgrammaticTools =
-    programmaticToolsEnabled && codeExecutionEnabled && agentHasProgrammaticTools(toolRegistry);
+    programmaticToolsEnabled &&
+    (programmaticToolCalling === 'native' || codeExecutionEnabled) &&
+    agentHasProgrammaticTools(toolRegistry);
   const hasDeferredTools = deferredToolsEnabled && agentHasDeferredTools(toolRegistry);
 
   /** Clear defer_loading if capability disabled */
@@ -351,6 +356,13 @@ export async function buildToolClassification(
   }
 
   if (!hasProgrammaticTools) {
+    return { toolRegistry, toolDefinitions, additionalTools, hasDeferredTools };
+  }
+
+  if (programmaticToolCalling === 'native') {
+    logger.debug(
+      `[buildToolClassification] Native programmatic tool calling enabled for agent ${agentId}`,
+    );
     return { toolRegistry, toolDefinitions, additionalTools, hasDeferredTools };
   }
 

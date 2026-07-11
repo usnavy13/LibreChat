@@ -248,7 +248,8 @@ const formatAgentMessages = (payload) => {
     }
 
     if (currentContent.length > 0) {
-      messages.push(new AIMessage({ content: currentContent }));
+      lastAIMessage = new AIMessage({ content: currentContent });
+      messages.push(lastAIMessage);
     }
 
     /**
@@ -268,6 +269,77 @@ const formatAgentMessages = (payload) => {
           aiMsg.additional_kwargs ??= {};
           aiMsg.additional_kwargs.signatures = sigs;
         }
+      }
+    }
+
+    const openAIResponses = message.metadata?.openAIResponses;
+    const replayOutput = openAIResponses?.output;
+    if (Array.isArray(replayOutput) && replayOutput.length > 0) {
+      const reasoningItems = replayOutput.filter((item) => item?.type === 'reasoning');
+      const programOutputItems = replayOutput.filter((item) => item?.type === 'program_output');
+      const linkedProgramCallIds = new Set(
+        replayOutput
+          .filter((item) => item?.type === 'function_call')
+          .map((item) => item.caller?.caller_id)
+          .filter((callerId) => typeof callerId === 'string'),
+      );
+      const finalProgramItems = replayOutput.filter(
+        (item) => item?.type === 'program' && !linkedProgramCallIds.has(item.call_id),
+      );
+      for (let index = 0; index < toolBearingAIMessages.length; index++) {
+        const aiMsg = toolBearingAIMessages[index];
+        const toolCallIds = new Set(aiMsg.tool_calls.map((toolCall) => toolCall.id));
+        const functionCalls = replayOutput.filter(
+          (item) => item?.type === 'function_call' && toolCallIds.has(item.call_id),
+        );
+        const programCallIds = new Set(
+          functionCalls
+            .map((item) => item.caller?.caller_id)
+            .filter((callerId) => typeof callerId === 'string'),
+        );
+        const programItems = replayOutput.filter(
+          (item) => item?.type === 'program' && programCallIds.has(item.call_id),
+        );
+        const output = [
+          ...(reasoningItems[index] ? [reasoningItems[index]] : []),
+          ...programItems,
+          ...functionCalls,
+        ];
+        if (output.length > 0) {
+          aiMsg.response_metadata = {
+            ...aiMsg.response_metadata,
+            model_provider: 'openai',
+            output,
+          };
+        }
+      }
+
+      const latestReasoning =
+        reasoningItems[toolBearingAIMessages.length] ??
+        (toolBearingAIMessages.length === 0
+          ? reasoningItems[reasoningItems.length - 1]
+          : undefined);
+      const finalReplayItems = replayOutput.filter(
+        (item) =>
+          item === latestReasoning ||
+          programOutputItems.includes(item) ||
+          finalProgramItems.includes(item),
+      );
+      if (lastAIMessage && finalReplayItems.length > 0) {
+        lastAIMessage.response_metadata = {
+          ...lastAIMessage.response_metadata,
+          model_provider: 'openai',
+          output: finalReplayItems,
+        };
+      }
+      if (latestReasoning && lastAIMessage && (lastAIMessage.tool_calls?.length ?? 0) === 0) {
+        lastAIMessage.additional_kwargs ??= {};
+        lastAIMessage.additional_kwargs.reasoning = latestReasoning;
+        lastAIMessage.response_metadata = {
+          ...lastAIMessage.response_metadata,
+          model_provider: 'openai',
+          id: openAIResponses.responseId,
+        };
       }
     }
   }

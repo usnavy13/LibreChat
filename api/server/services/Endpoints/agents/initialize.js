@@ -133,6 +133,11 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
    * @type {Record<string, string>}
    */
   const collectedThoughtSignatures = {};
+  const collectedOpenAIResponses = {
+    responseId: undefined,
+    output: [],
+    truncated: false,
+  };
   /** @type {ArtifactPromises} */
   const artifactPromises = [];
   const { contentParts, aggregateContent } = createContentAggregator();
@@ -291,6 +296,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     toolEndCallback,
     collectedUsage,
     collectedThoughtSignatures,
+    collectedOpenAIResponses,
     streamId,
     subagentAggregatorsByToolCallId,
     usageCost,
@@ -962,6 +968,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     eventHandlers,
     collectedUsage,
     collectedThoughtSignatures,
+    collectedOpenAIResponses,
     aggregateContent,
     artifactPromises,
     primeInvokedSkills: handlePrimeInvokedSkills,

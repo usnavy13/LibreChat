@@ -511,4 +511,71 @@ describe('formatAgentMessages', () => {
       expect(assistant.additional_kwargs?.signatures).toBeUndefined();
     });
   });
+
+  describe('OpenAI Responses replay persistence', () => {
+    it('restores program linkage before tool output and program output before the final message', () => {
+      const reasoning = {
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: [{ type: 'summary_text', text: 'summary' }],
+        encrypted_content: 'encrypted',
+      };
+      const finalReasoning = {
+        type: 'reasoning',
+        id: 'rs_2',
+        summary: [{ type: 'summary_text', text: 'final summary' }],
+        encrypted_content: 'final-encrypted',
+      };
+      const program = {
+        type: 'program',
+        id: 'prog_1',
+        call_id: 'call_prog_1',
+        code: 'await tools.lookup({})',
+        fingerprint: 'fingerprint',
+      };
+      const functionCall = {
+        type: 'function_call',
+        id: 'fc_1',
+        call_id: 'call_1',
+        name: 'lookup',
+        arguments: '{}',
+        caller: { type: 'program', caller_id: 'call_prog_1' },
+      };
+      const programOutput = {
+        type: 'program_output',
+        id: 'prog_out_1',
+        call_id: 'call_prog_1',
+        result: '{"ok":true}',
+        status: 'completed',
+      };
+      const payload = [
+        { role: 'user', content: 'look it up' },
+        {
+          role: 'assistant',
+          metadata: {
+            openAIResponses: {
+              responseId: 'resp_1',
+              output: [reasoning, program, functionCall, programOutput, finalReasoning],
+            },
+          },
+          content: [
+            { type: ContentTypes.TEXT, [ContentTypes.TEXT]: '', tool_call_ids: ['call_1'] },
+            {
+              type: ContentTypes.TOOL_CALL,
+              tool_call: { id: 'call_1', name: 'lookup', args: '{}', output: '{"ok":true}' },
+            },
+            { type: ContentTypes.TEXT, [ContentTypes.TEXT]: 'Done.' },
+          ],
+        },
+      ];
+
+      const result = formatAgentMessages(payload);
+      const aiMessages = result.filter((message) => message instanceof AIMessage);
+      expect(aiMessages).toHaveLength(2);
+      expect(aiMessages[0].response_metadata.output).toEqual([reasoning, program, functionCall]);
+      expect(aiMessages[1].response_metadata.output).toEqual([programOutput, finalReasoning]);
+      expect(aiMessages[1].response_metadata.id).toBe('resp_1');
+      expect(aiMessages[1].additional_kwargs.reasoning).toEqual(finalReasoning);
+    });
+  });
 });
