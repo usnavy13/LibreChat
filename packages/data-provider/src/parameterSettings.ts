@@ -8,8 +8,11 @@ import {
   googleSettings,
   Providers,
   ReasoningEffort,
+  ReasoningMode,
+  ReasoningContext,
   AnthropicEffort,
   ReasoningSummary,
+  ProgrammaticToolCalling,
   BedrockProviders,
   anthropicSettings,
 } from './types';
@@ -81,6 +84,7 @@ const baseDefinitions: Record<string, SettingDefinition> = {
       [ImageDetail.low]: 'com_ui_low',
       [ImageDetail.auto]: 'com_ui_auto',
       [ImageDetail.high]: 'com_ui_high',
+      [ImageDetail.original]: 'com_ui_original',
     },
     optionType: 'conversation',
     columnSpan: 2,
@@ -305,6 +309,84 @@ const openAIParams: Record<string, SettingDefinition> = {
       [ReasoningSummary.auto]: 'com_ui_auto',
       [ReasoningSummary.concise]: 'com_ui_concise',
       [ReasoningSummary.detailed]: 'com_ui_detailed',
+    },
+    optionType: 'model',
+    columnSpan: 4,
+  },
+  reasoning_mode: {
+    key: 'reasoning_mode',
+    label: 'com_endpoint_reasoning_mode',
+    labelCode: true,
+    description: 'com_endpoint_openai_reasoning_mode',
+    descriptionCode: true,
+    type: 'enum',
+    default: ReasoningMode.standard,
+    component: 'slider',
+    options: [ReasoningMode.standard, ReasoningMode.pro],
+    enumMappings: {
+      [ReasoningMode.standard]: 'com_ui_standard',
+      [ReasoningMode.pro]: 'com_ui_pro',
+    },
+    optionType: 'model',
+    columnSpan: 4,
+  },
+  reasoning_context: {
+    key: 'reasoning_context',
+    label: 'com_endpoint_reasoning_context',
+    labelCode: true,
+    description: 'com_endpoint_openai_reasoning_context',
+    descriptionCode: true,
+    type: 'enum',
+    default: ReasoningContext.auto,
+    component: 'slider',
+    options: [ReasoningContext.auto, ReasoningContext.currentTurn, ReasoningContext.allTurns],
+    enumMappings: {
+      [ReasoningContext.auto]: 'com_ui_auto',
+      [ReasoningContext.currentTurn]: 'com_ui_current_turn',
+      [ReasoningContext.allTurns]: 'com_ui_all_turns',
+    },
+    optionType: 'model',
+    columnSpan: 4,
+  },
+  priorityProcessing: {
+    key: 'priorityProcessing',
+    label: 'com_endpoint_priority_processing',
+    labelCode: true,
+    description: 'com_endpoint_openai_priority_processing',
+    descriptionCode: true,
+    type: 'boolean',
+    default: false,
+    component: 'switch',
+    optionType: 'model',
+    showDefault: false,
+    columnSpan: 2,
+  },
+  promptCache: {
+    key: 'promptCache',
+    label: 'com_endpoint_prompt_cache',
+    labelCode: true,
+    description: 'com_endpoint_openai_prompt_cache',
+    descriptionCode: true,
+    type: 'boolean',
+    default: false,
+    component: 'switch',
+    optionType: 'conversation',
+    showDefault: false,
+    columnSpan: 2,
+  },
+  programmaticToolCalling: {
+    key: 'programmaticToolCalling',
+    label: 'com_endpoint_programmatic_tool_calling',
+    labelCode: true,
+    description: 'com_endpoint_openai_programmatic_tool_calling',
+    descriptionCode: true,
+    type: 'enum',
+    default: ProgrammaticToolCalling.librechat,
+    component: 'slider',
+    options: [ProgrammaticToolCalling.librechat, ProgrammaticToolCalling.native],
+    enumMappings: {
+      [ProgrammaticToolCalling.librechat]: 'com_ui_librechat',
+      [ProgrammaticToolCalling.native]: 'com_ui_native',
     },
     optionType: 'model',
     columnSpan: 4,
@@ -836,6 +918,11 @@ const openAI: SettingsConfiguration = [
   openAIParams.reasoning_effort,
   openAIParams.useResponsesApi,
   openAIParams.reasoning_summary,
+  openAIParams.reasoning_mode,
+  openAIParams.reasoning_context,
+  openAIParams.priorityProcessing,
+  openAIParams.promptCache,
+  openAIParams.programmaticToolCalling,
   openAIParams.verbosity,
   openAIParams.disableStreaming,
   librechat.fileTokenLimit,
@@ -865,6 +952,11 @@ const openAICol2: SettingsConfiguration = [
   baseDefinitions.imageDetail,
   openAIParams.reasoning_effort,
   openAIParams.reasoning_summary,
+  openAIParams.reasoning_mode,
+  openAIParams.reasoning_context,
+  openAIParams.priorityProcessing,
+  openAIParams.promptCache,
+  openAIParams.programmaticToolCalling,
   openAIParams.verbosity,
   openAIParams.useResponsesApi,
   openAIParams.web_search,
@@ -1206,17 +1298,91 @@ export const agentParamSettings: Record<string, SettingsConfiguration | undefine
  * Google's `maxOutputTokens` default depends on the selected Gemini model so that
  * current models (2.5 and 3+) surface their 64K output limit instead of the legacy 8K value.
  */
+export interface ModelAwareSettingsOptions {
+  provider?: string;
+  useResponsesApi?: boolean;
+  priorityModels?: string[];
+  isAgent?: boolean;
+}
+
+const GPT_5_6_PATTERN = /^gpt-5\.6(?:-|$)/i;
+const GPT_5_6_ONLY_KEYS = new Set([
+  'reasoning_mode',
+  'reasoning_context',
+  'priorityProcessing',
+  'promptCache',
+  'programmaticToolCalling',
+]);
+const RESPONSES_ONLY_KEYS = new Set([
+  'reasoning_mode',
+  'reasoning_context',
+  'programmaticToolCalling',
+]);
+
 export function applyModelAwareDefaults(
   settings: SettingsConfiguration,
   endpoint: string,
   model?: string,
+  options: ModelAwareSettingsOptions = {},
 ): SettingsConfiguration {
-  if (endpoint !== EModelEndpoint.google || !model) {
+  if (endpoint === EModelEndpoint.google && model) {
+    return settings.map((setting) =>
+      setting.key === 'maxOutputTokens'
+        ? { ...setting, default: googleSettings.maxOutputTokens.reset(model) }
+        : setting,
+    );
+  }
+
+  const openAIEndpoint =
+    endpoint === EModelEndpoint.openAI ||
+    endpoint === EModelEndpoint.azureOpenAI ||
+    endpoint === EModelEndpoint.custom;
+  if (!openAIEndpoint || !model) {
     return settings;
   }
-  return settings.map((setting) =>
-    setting.key === 'maxOutputTokens'
-      ? { ...setting, default: googleSettings.maxOutputTokens.reset(model) }
-      : setting,
-  );
+
+  const isGPT56 = GPT_5_6_PATTERN.test(model);
+  const provider = options.provider ?? endpoint;
+  const isFirstPartyOpenAI =
+    provider === EModelEndpoint.openAI || provider === EModelEndpoint.azureOpenAI;
+  const supportsGPT56 = isGPT56 && isFirstPartyOpenAI;
+  const supportsPriority =
+    provider === EModelEndpoint.openAI ||
+    (provider === EModelEndpoint.azureOpenAI && options.priorityModels?.includes(model) === true);
+
+  return settings.flatMap((setting) => {
+    if (GPT_5_6_ONLY_KEYS.has(setting.key) && !supportsGPT56) {
+      return [];
+    }
+    if (RESPONSES_ONLY_KEYS.has(setting.key) && options.useResponsesApi !== true) {
+      return [];
+    }
+    if (setting.key === 'programmaticToolCalling' && options.isAgent !== true) {
+      return [];
+    }
+    if (setting.key === 'priorityProcessing' && !supportsPriority) {
+      return [];
+    }
+    if (setting.key === 'reasoning_effort') {
+      return [
+        {
+          ...setting,
+          options: supportsGPT56
+            ? setting.options
+            : setting.options?.filter((value) => value !== ReasoningEffort.max),
+        },
+      ];
+    }
+    if (setting.key === 'imageDetail') {
+      return [
+        {
+          ...setting,
+          options: supportsGPT56
+            ? [ImageDetail.low, ImageDetail.auto, ImageDetail.high, ImageDetail.original]
+            : [ImageDetail.low, ImageDetail.auto, ImageDetail.high],
+        },
+      ];
+    }
+    return [setting];
+  });
 }

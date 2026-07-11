@@ -192,6 +192,7 @@ export enum ImageDetail {
   low = 'low',
   auto = 'auto',
   high = 'high',
+  original = 'original',
 }
 
 export enum ReasoningEffort {
@@ -260,6 +261,22 @@ export enum ReasoningSummary {
   detailed = 'detailed',
 }
 
+export enum ReasoningMode {
+  standard = 'standard',
+  pro = 'pro',
+}
+
+export enum ReasoningContext {
+  auto = 'auto',
+  currentTurn = 'current_turn',
+  allTurns = 'all_turns',
+}
+
+export enum ProgrammaticToolCalling {
+  librechat = 'librechat',
+  native = 'native',
+}
+
 export enum Verbosity {
   none = '',
   low = 'low',
@@ -279,12 +296,14 @@ export const imageDetailNumeric = {
   [ImageDetail.low]: 0,
   [ImageDetail.auto]: 1,
   [ImageDetail.high]: 2,
+  [ImageDetail.original]: 3,
 };
 
 export const imageDetailValue = {
   0: ImageDetail.low,
   1: ImageDetail.auto,
   2: ImageDetail.high,
+  3: ImageDetail.original,
 };
 
 export const eImageDetailSchema = z.nativeEnum(ImageDetail);
@@ -294,6 +313,9 @@ export const eReasoningResponseKeySchema = z.nativeEnum(ReasoningResponseKey);
 export const eAnthropicEffortSchema = z.nativeEnum(AnthropicEffort);
 export const eThinkingDisplaySchema = z.nativeEnum(ThinkingDisplay);
 export const eReasoningSummarySchema = z.nativeEnum(ReasoningSummary);
+export const eReasoningModeSchema = z.nativeEnum(ReasoningMode);
+export const eReasoningContextSchema = z.nativeEnum(ReasoningContext);
+export const eProgrammaticToolCallingSchema = z.nativeEnum(ProgrammaticToolCalling);
 export const eVerbositySchema = z.nativeEnum(Verbosity);
 export const eThinkingLevelSchema = z.nativeEnum(ThinkingLevel);
 
@@ -756,6 +778,100 @@ export const tExampleSchema = z.object({
 
 export type TExample = z.infer<typeof tExampleSchema>;
 
+const openAIReplayCallerSchema = z
+  .object({
+    type: z.literal('program'),
+    caller_id: z.string(),
+  })
+  .strict();
+
+const openAIReasoningReplayItemSchema = z
+  .object({
+    type: z.literal('reasoning'),
+    id: z.string(),
+    summary: z
+      .array(
+        z
+          .object({
+            type: z.literal('summary_text'),
+            text: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+    content: z
+      .array(
+        z
+          .object({
+            type: z.literal('reasoning_text'),
+            text: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+    encrypted_content: z.string().nullable().optional(),
+    status: z.enum(['in_progress', 'completed', 'incomplete']).optional(),
+  })
+  .strict();
+
+const openAIProgramReplayItemSchema = z
+  .object({
+    type: z.literal('program'),
+    id: z.string(),
+    call_id: z.string(),
+    code: z.string(),
+    fingerprint: z.string(),
+  })
+  .strict();
+
+const openAIProgramOutputReplayItemSchema = z
+  .object({
+    type: z.literal('program_output'),
+    id: z.string(),
+    call_id: z.string(),
+    result: z.string(),
+    status: z.enum(['completed', 'incomplete']),
+  })
+  .strict();
+
+const openAIFunctionCallReplayItemSchema = z
+  .object({
+    type: z.literal('function_call'),
+    call_id: z.string(),
+    name: z.string(),
+    arguments: z.string(),
+    id: z.string().optional(),
+    caller: openAIReplayCallerSchema,
+    namespace: z.string().optional(),
+    status: z.enum(['in_progress', 'completed', 'incomplete']).optional(),
+  })
+  .strict();
+
+export const openAIReplayItemSchema = z.discriminatedUnion('type', [
+  openAIReasoningReplayItemSchema,
+  openAIProgramReplayItemSchema,
+  openAIProgramOutputReplayItemSchema,
+  openAIFunctionCallReplayItemSchema,
+]);
+
+export type TOpenAIReplayItem = z.infer<typeof openAIReplayItemSchema>;
+
+export const openAIResponsesStateSchema = z
+  .object({
+    responseId: z.string().optional(),
+    output: z.array(openAIReplayItemSchema),
+    truncated: z.boolean().optional(),
+  })
+  .strict();
+
+export type TOpenAIResponsesState = z.infer<typeof openAIResponsesStateSchema>;
+
+const messageMetadataSchema = z
+  .object({
+    openAIResponses: openAIResponsesStateSchema.optional(),
+  })
+  .catchall(z.unknown());
+
 export const tMessageSchema = z.object({
   messageId: z.string(),
   endpoint: z.string().optional(),
@@ -794,7 +910,7 @@ export const tMessageSchema = z.object({
   iconURL: z.string().nullable().optional(),
   feedback: feedbackSchema.optional(),
   /** metadata */
-  metadata: z.record(z.unknown()).optional(),
+  metadata: messageMetadataSchema.optional(),
   /** Output tokens for assistant messages, calibrated prompt-side estimate for user messages */
   tokenCount: z.number().optional(),
   contextMeta: z
@@ -973,6 +1089,10 @@ export const tConversationSchema = z.object({
   /* OpenAI: Reasoning models only */
   reasoning_effort: eReasoningEffortSchema.optional().nullable(),
   reasoning_summary: eReasoningSummarySchema.optional().nullable(),
+  reasoning_mode: eReasoningModeSchema.optional().nullable(),
+  reasoning_context: eReasoningContextSchema.optional().nullable(),
+  priorityProcessing: z.boolean().optional(),
+  programmaticToolCalling: eProgrammaticToolCallingSchema.optional().nullable(),
   /* OpenAI: Verbosity control */
   verbosity: eVerbositySchema.optional().nullable(),
   /* OpenAI: use Responses API */
@@ -1172,7 +1292,7 @@ export type TPreset = z.infer<typeof tPresetSchema>;
 
 export type TSetOption = (
   param: number | string,
-) => (newValue: number | string | boolean | string[] | Partial<TPreset>) => void;
+) => (newValue: number | string | boolean | string[] | Partial<TPreset> | null | undefined) => void;
 
 export type TConversation = z.infer<typeof tConversationSchema> & {
   presetOverride?: Partial<TPreset>;
@@ -1404,6 +1524,11 @@ export const openAIBaseSchema = tConversationSchema.pick({
   max_tokens: true,
   reasoning_effort: true,
   reasoning_summary: true,
+  reasoning_mode: true,
+  reasoning_context: true,
+  priorityProcessing: true,
+  programmaticToolCalling: true,
+  promptCache: true,
   verbosity: true,
   useResponsesApi: true,
   web_search: true,

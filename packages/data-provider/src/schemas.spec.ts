@@ -1,11 +1,20 @@
 import {
   AnthropicEffort,
+  ImageDetail,
   ReasoningEffort,
+  ReasoningMode,
+  ReasoningContext,
+  ProgrammaticToolCalling,
   googleSettings,
   anthropicSettings,
   compactGoogleSchema,
   eAnthropicEffortSchema,
   eReasoningEffortSchema,
+  eImageDetailSchema,
+  eReasoningModeSchema,
+  eReasoningContextSchema,
+  eProgrammaticToolCallingSchema,
+  openAIResponsesStateSchema,
 } from './schemas';
 
 describe('anthropicSettings', () => {
@@ -584,5 +593,64 @@ describe('ReasoningEffort', () => {
 
   it('still rejects unknown effort values', () => {
     expect(() => eReasoningEffortSchema.parse('ultra')).toThrow();
+  });
+});
+
+describe('GPT-5.6 shared schemas', () => {
+  it('accepts the new parameter enum values', () => {
+    expect(eImageDetailSchema.parse(ImageDetail.original)).toBe('original');
+    expect(eReasoningModeSchema.parse(ReasoningMode.pro)).toBe('pro');
+    expect(eReasoningContextSchema.parse(ReasoningContext.allTurns)).toBe('all_turns');
+    expect(eProgrammaticToolCallingSchema.parse(ProgrammaticToolCalling.native)).toBe('native');
+  });
+
+  it('rejects unknown parameter enum values', () => {
+    expect(() => eReasoningModeSchema.parse('ultra')).toThrow();
+    expect(() => eReasoningContextSchema.parse('conversation')).toThrow();
+    expect(() => eProgrammaticToolCallingSchema.parse('automatic')).toThrow();
+    expect(() => eImageDetailSchema.parse('raw')).toThrow();
+  });
+
+  it('parses only the narrow Responses replay item union', () => {
+    const state = openAIResponsesStateSchema.parse({
+      responseId: 'resp_1',
+      output: [
+        {
+          type: 'reasoning',
+          id: 'rs_1',
+          summary: [{ type: 'summary_text', text: 'summary' }],
+          encrypted_content: 'encrypted',
+        },
+        {
+          type: 'program',
+          id: 'prog_1',
+          call_id: 'call_prog_1',
+          code: 'text("done")',
+          fingerprint: 'fingerprint',
+        },
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call_1',
+          name: 'lookup',
+          arguments: '{}',
+          caller: { type: 'program', caller_id: 'call_prog_1' },
+        },
+        {
+          type: 'program_output',
+          id: 'prog_out_1',
+          call_id: 'call_prog_1',
+          result: '{"ok":true}',
+          status: 'completed',
+        },
+      ],
+    });
+
+    expect(state.output).toHaveLength(4);
+    expect(() =>
+      openAIResponsesStateSchema.parse({
+        output: [{ type: 'message', id: 'msg_1', content: [] }],
+      }),
+    ).toThrow();
   });
 });
