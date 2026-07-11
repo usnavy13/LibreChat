@@ -44,6 +44,10 @@ export const knownOpenAIParams: Set<string> = new Set([
   'reasoning',
   'zdrEnabled',
   'service_tier',
+  'safety_identifier',
+  'promptCacheKey',
+  'promptCacheExplicit',
+  'nativeProgrammaticToolCalling',
   'supportsStrictToolCalling',
   'useResponsesApi',
   'configuration',
@@ -77,30 +81,48 @@ export const knownOpenAIParams: Set<string> = new Set([
 function hasReasoningParams({
   reasoning_effort,
   reasoning_summary,
+  reasoning_mode,
+  reasoning_context,
 }: {
   reasoning_effort?: string | null;
   reasoning_summary?: string | null;
+  reasoning_mode?: string | null;
+  reasoning_context?: string | null;
 }): boolean {
   return (
     (reasoning_effort != null && reasoning_effort !== '') ||
-    (reasoning_summary != null && reasoning_summary !== '')
+    (reasoning_summary != null && reasoning_summary !== '') ||
+    reasoning_mode === 'pro' ||
+    (reasoning_context != null && reasoning_context !== '')
   );
 }
 
 function getReasoningObject({
+  reasoningMode,
+  reasoningContext,
   reasoningEffort,
   reasoningSummary,
 }: {
+  reasoningMode?: 'standard' | 'pro' | null;
+  reasoningContext?: 'auto' | 'current_turn' | 'all_turns' | null;
   reasoningEffort?: OpenAILLMConfig['reasoning_effort'];
   reasoningSummary?: OpenAILLMConfig['reasoning_summary'];
-}): OpenAI.Reasoning {
+}): OpenAI.Reasoning & {
+  mode?: 'pro';
+  context?: 'auto' | 'current_turn' | 'all_turns';
+} {
   return removeNullishValues(
     {
       effort: reasoningEffort,
       summary: reasoningSummary,
+      mode: reasoningMode === 'pro' ? reasoningMode : undefined,
+      context: reasoningContext,
     },
     true,
-  ) as OpenAI.Reasoning;
+  ) as OpenAI.Reasoning & {
+    mode?: 'pro';
+    context?: 'auto' | 'current_turn' | 'all_turns';
+  };
 }
 
 function isOpenAIEndpoint(endpoint?: EModelEndpoint | string | null): boolean {
@@ -285,6 +307,8 @@ function applyReasoningConfig({
   reasoningEffort,
   reasoningFormat,
   reasoningSummary,
+  reasoningMode,
+  reasoningContext,
 }: {
   endpoint?: EModelEndpoint | string | null;
   llmConfig: OpenAILLMConfig;
@@ -292,17 +316,26 @@ function applyReasoningConfig({
   reasoningEffort?: OpenAILLMConfig['reasoning_effort'];
   reasoningFormat?: ReasoningParameterFormat;
   reasoningSummary?: OpenAILLMConfig['reasoning_summary'];
+  reasoningMode?: 'standard' | 'pro' | null;
+  reasoningContext?: 'auto' | 'current_turn' | 'all_turns' | null;
 }): boolean {
   if (
     !hasReasoningParams({
       reasoning_effort: reasoningEffort,
       reasoning_summary: reasoningSummary,
+      reasoning_mode: reasoningMode,
+      reasoning_context: reasoningContext,
     })
   ) {
     return false;
   }
 
-  const reasoning = getReasoningObject({ reasoningEffort, reasoningSummary });
+  const reasoning = getReasoningObject({
+    reasoningMode,
+    reasoningContext,
+    reasoningEffort,
+    reasoningSummary,
+  });
   if (reasoningFormat === ReasoningParameterFormat.disabled) {
     return false;
   }
@@ -452,6 +485,11 @@ export function getOpenAILLMConfig({
   const {
     reasoning_effort,
     reasoning_summary,
+    reasoning_mode,
+    reasoning_context,
+    priorityProcessing,
+    programmaticToolCalling,
+    firstPartyOpenAI,
     verbosity,
     web_search,
     promptCache,
@@ -482,6 +520,8 @@ export function getOpenAILLMConfig({
   let hasModelKwargs = false;
   let reasoningEffort = reasoning_effort;
   let reasoningSummary = reasoning_summary;
+  let reasoningMode = reasoning_mode;
+  let reasoningContext = reasoning_context;
 
   if (verbosity != null && verbosity !== '' && useOpenRouter) {
     llmConfig.verbosity = verbosity;
@@ -524,6 +564,21 @@ export function getOpenAILLMConfig({
       if (key === 'reasoning_summary') {
         if (!reasoningSummary && typeof value === 'string') {
           reasoningSummary = value as OpenAILLMConfig['reasoning_summary'];
+        }
+        continue;
+      }
+      if (key === 'reasoning_mode') {
+        if (!reasoningMode && (value === 'standard' || value === 'pro')) {
+          reasoningMode = value;
+        }
+        continue;
+      }
+      if (key === 'reasoning_context') {
+        if (
+          !reasoningContext &&
+          (value === 'auto' || value === 'current_turn' || value === 'all_turns')
+        ) {
+          reasoningContext = value;
         }
         continue;
       }
@@ -584,6 +639,23 @@ export function getOpenAILLMConfig({
         }
         continue;
       }
+      if (key === 'reasoning_mode') {
+        if (value === 'standard' || value === 'pro' || value == null) {
+          reasoningMode = value;
+        }
+        continue;
+      }
+      if (key === 'reasoning_context') {
+        if (
+          value === 'auto' ||
+          value === 'current_turn' ||
+          value === 'all_turns' ||
+          value == null
+        ) {
+          reasoningContext = value;
+        }
+        continue;
+      }
       if (key === 'verbosity') {
         hasModelKwargs =
           applyVerbosityParam({
@@ -620,6 +692,35 @@ export function getOpenAILLMConfig({
       }) || hasModelKwargs;
   }
 
+  const isGPT56 = /^gpt-5\.6(?:-|$)/i.test(modelOptions.model ?? '');
+  const supportsGPT56 = isOpenAIEndpoint(endpoint) && firstPartyOpenAI === true && isGPT56;
+  const supportsGPT56Responses = supportsGPT56 && llmConfig.useResponsesApi === true;
+  if (!supportsGPT56Responses) {
+    reasoningMode = undefined;
+    reasoningContext = undefined;
+  }
+  if (!supportsGPT56 && reasoningEffort === 'max') {
+    reasoningEffort = undefined;
+  }
+  if (
+    programmaticToolCalling === 'native' &&
+    (!isOpenAIEndpoint(endpoint) ||
+      firstPartyOpenAI !== true ||
+      !isGPT56 ||
+      llmConfig.useResponsesApi !== true)
+  ) {
+    throw new Error(
+      'Native programmatic tool calling requires GPT-5.6 on an OpenAI or Azure OpenAI Responses endpoint.',
+    );
+  }
+
+  if (supportsGPT56) {
+    llmConfig.service_tier = priorityProcessing === true ? 'priority' : 'default';
+    if (llmConfig.useResponsesApi === true && programmaticToolCalling === 'native') {
+      llmConfig.nativeProgrammaticToolCalling = true;
+    }
+  }
+
   if (llmConfig.max_tokens != null) {
     llmConfig.maxTokens = llmConfig.max_tokens;
     delete llmConfig.max_tokens;
@@ -653,6 +754,13 @@ export function getOpenAILLMConfig({
     if (promptCacheTtlValue != null) {
       llmConfig.promptCacheTtl = promptCacheTtlValue;
     }
+  } else if (
+    enablePromptCache === true &&
+    isOpenAIEndpoint(endpoint) &&
+    firstPartyOpenAI === true &&
+    /^gpt-5\.6(?:-|$)/i.test(modelOptions.model ?? '')
+  ) {
+    llmConfig.promptCache = true;
   }
 
   if (!useOpenRouter) {
@@ -664,6 +772,8 @@ export function getOpenAILLMConfig({
         reasoningFormat,
         reasoningEffort,
         reasoningSummary,
+        reasoningMode,
+        reasoningContext,
       }) || hasModelKwargs;
   }
 

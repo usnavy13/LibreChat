@@ -43,6 +43,123 @@ describe('getOpenAIConfig', () => {
     expect((result.llmConfig as Record<string, unknown>).max_tokens).toBeUndefined();
   });
 
+  describe('GPT-5.6 first-party request fields', () => {
+    it('maps priority, Pro mode, reasoning context, cache, and native PTC', () => {
+      const modelOptions = {
+        model: 'gpt-5.6-sol',
+        useResponsesApi: true,
+        firstPartyOpenAI: true,
+        priorityProcessing: true,
+        reasoning_mode: 'pro',
+        reasoning_context: 'all_turns',
+        promptCache: true,
+        programmaticToolCalling: 'native',
+      } as Partial<OpenAIParameters> & {
+        firstPartyOpenAI: boolean;
+        priorityProcessing: boolean;
+        reasoning_mode: 'pro';
+        reasoning_context: 'all_turns';
+        promptCache: boolean;
+        programmaticToolCalling: 'native';
+      };
+
+      const result = getOpenAIConfig(mockApiKey, { modelOptions }, EModelEndpoint.openAI);
+
+      expect(result.llmConfig).toMatchObject({
+        service_tier: 'priority',
+        promptCache: true,
+        nativeProgrammaticToolCalling: true,
+        reasoning: {
+          mode: 'pro',
+          context: 'all_turns',
+        },
+      });
+      expect(result.llmConfig).not.toHaveProperty('firstPartyOpenAI');
+      expect(result.llmConfig).not.toHaveProperty('priorityProcessing');
+    });
+
+    it('explicitly requests the default tier when priority is off', () => {
+      const result = getOpenAIConfig(
+        mockApiKey,
+        {
+          modelOptions: {
+            model: 'gpt-5.6',
+            firstPartyOpenAI: true,
+            priorityProcessing: false,
+          } as Partial<OpenAIParameters> & {
+            firstPartyOpenAI: boolean;
+            priorityProcessing: boolean;
+          },
+        },
+        EModelEndpoint.openAI,
+      );
+
+      expect(result.llmConfig.service_tier).toBe('default');
+    });
+
+    it('rejects native PTC and omits managed fields for compatible proxies', () => {
+      expect(() =>
+        getOpenAIConfig(
+          mockApiKey,
+          {
+            modelOptions: {
+              model: 'gpt-5.6',
+              useResponsesApi: true,
+              firstPartyOpenAI: false,
+              programmaticToolCalling: 'native',
+            } as Partial<OpenAIParameters> & {
+              firstPartyOpenAI: boolean;
+              programmaticToolCalling: 'native';
+            },
+          },
+          EModelEndpoint.openAI,
+        ),
+      ).toThrow('Native programmatic tool calling requires GPT-5.6');
+
+      const result = getOpenAIConfig(
+        mockApiKey,
+        {
+          modelOptions: {
+            model: 'gpt-5.6',
+            firstPartyOpenAI: false,
+            priorityProcessing: true,
+            promptCache: true,
+          } as Partial<OpenAIParameters> & {
+            firstPartyOpenAI: boolean;
+            priorityProcessing: boolean;
+            promptCache: boolean;
+          },
+        },
+        EModelEndpoint.openAI,
+      );
+      expect(result.llmConfig).not.toHaveProperty('service_tier');
+      expect(result.llmConfig).not.toHaveProperty('promptCache');
+    });
+
+    it('removes GPT-5.6-only reasoning fields from older models', () => {
+      const result = getOpenAIConfig(
+        mockApiKey,
+        {
+          modelOptions: {
+            model: 'gpt-5.4',
+            useResponsesApi: true,
+            firstPartyOpenAI: true,
+            reasoning_effort: 'max',
+            reasoning_mode: 'pro',
+            reasoning_context: 'all_turns',
+          } as Partial<OpenAIParameters> & {
+            firstPartyOpenAI: boolean;
+            reasoning_mode: 'pro';
+            reasoning_context: 'all_turns';
+          },
+        },
+        EModelEndpoint.openAI,
+      );
+
+      expect(result.llmConfig).not.toHaveProperty('reasoning');
+    });
+  });
+
   it('should separate known and unknown params from addParams', () => {
     const addParams = {
       temperature: 0.5, // known param
