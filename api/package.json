@@ -46,7 +46,7 @@
     "@azure/storage-blob": "^12.30.0",
     "@google/genai": "^2.8.0",
     "@keyv/redis": "^4.3.3",
-    "@librechat/agents": "^3.2.61",
+    "@librechat/agents": "git+https://github.com/usnavy13/agents.git#ff20d5199f0b298dcbfddc31e26996b3f187c557",
     "@librechat/api": "*",
     "@librechat/data-schemas": "*",
     "@microsoft/microsoft-graph-client": "^3.0.7",
