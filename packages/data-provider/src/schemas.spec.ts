@@ -12,6 +12,7 @@ import {
   eImageDetailSchema,
   eReasoningModeSchema,
   eReasoningContextSchema,
+  openAIResponsesStateSchema,
 } from './schemas';
 
 describe('anthropicSettings', () => {
@@ -629,5 +630,26 @@ describe('GPT-5.6 image detail', () => {
   it('accepts original and rejects unknown values', () => {
     expect(eImageDetailSchema.parse(ImageDetail.original)).toBe('original');
     expect(() => eImageDetailSchema.parse('raw')).toThrow();
+  });
+
+  it('parses only persisted reasoning replay items', () => {
+    const state = openAIResponsesStateSchema.parse({
+      responseId: 'resp_1',
+      output: [
+        {
+          type: 'reasoning',
+          id: 'rs_1',
+          summary: [{ type: 'summary_text', text: 'summary' }],
+          encrypted_content: 'encrypted',
+        },
+      ],
+    });
+
+    expect(state.output).toHaveLength(1);
+    expect(() =>
+      openAIResponsesStateSchema.parse({
+        output: [{ type: 'message', id: 'msg_1', content: [] }],
+      }),
+    ).toThrow();
   });
 });

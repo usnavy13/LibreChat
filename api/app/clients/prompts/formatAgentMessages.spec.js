@@ -622,4 +622,49 @@ describe('formatAgentMessages', () => {
       expect(result[0].content).toEqual(media);
     });
   });
+
+  describe('OpenAI Responses replay persistence', () => {
+    it('restores persisted reasoning around a tool loop', () => {
+      const reasoning = {
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: [{ type: 'summary_text', text: 'summary' }],
+        encrypted_content: 'encrypted',
+      };
+      const finalReasoning = {
+        type: 'reasoning',
+        id: 'rs_2',
+        summary: [{ type: 'summary_text', text: 'final summary' }],
+        encrypted_content: 'final-encrypted',
+      };
+      const payload = [
+        { role: 'user', content: 'look it up' },
+        {
+          role: 'assistant',
+          metadata: {
+            openAIResponses: {
+              responseId: 'resp_1',
+              output: [reasoning, finalReasoning],
+            },
+          },
+          content: [
+            { type: ContentTypes.TEXT, [ContentTypes.TEXT]: '', tool_call_ids: ['call_1'] },
+            {
+              type: ContentTypes.TOOL_CALL,
+              tool_call: { id: 'call_1', name: 'lookup', args: '{}', output: '{"ok":true}' },
+            },
+            { type: ContentTypes.TEXT, [ContentTypes.TEXT]: 'Done.' },
+          ],
+        },
+      ];
+
+      const result = formatAgentMessages(payload);
+      const aiMessages = result.filter((message) => message instanceof AIMessage);
+      expect(aiMessages).toHaveLength(2);
+      expect(aiMessages[0].response_metadata.output).toEqual([reasoning]);
+      expect(aiMessages[1].response_metadata.output).toEqual([finalReasoning]);
+      expect(aiMessages[1].response_metadata.id).toBe('resp_1');
+      expect(aiMessages[1].additional_kwargs.reasoning).toEqual(finalReasoning);
+    });
+  });
 });

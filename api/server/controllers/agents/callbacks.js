@@ -18,6 +18,7 @@ const {
   sendEvent,
   computeUsageCostUSD,
   GenerationJobManager,
+  collectOpenAIResponsesState,
   writeAttachmentEvent,
   createToolExecuteHandler,
   createBackgroundCodeResultHandler: createCodeHarvestHandler,
@@ -55,13 +56,19 @@ class ModelEndHandler {
    * @param {(data: Record<string, unknown>) => Promise<void> | void} [emitUsage] Optional
    *   callback to stream per-call token usage to the client.
    */
-  constructor(collectedUsage, collectedThoughtSignatures = null, emitUsage = null) {
+  constructor(
+    collectedUsage,
+    collectedThoughtSignatures = null,
+    emitUsage = null,
+    collectedOpenAIResponses = null,
+  ) {
     if (!Array.isArray(collectedUsage)) {
       throw new Error('collectedUsage must be an array');
     }
     this.collectedUsage = collectedUsage;
     this.collectedThoughtSignatures = collectedThoughtSignatures;
     this.emitUsage = emitUsage;
+    this.collectedOpenAIResponses = collectedOpenAIResponses;
   }
 
   finalize(errorMessage) {
@@ -100,6 +107,13 @@ class ModelEndHandler {
           messageId: metadata.run_id,
           conversationId: metadata.thread_id,
         });
+      }
+
+      if (
+        this.collectedOpenAIResponses &&
+        collectOpenAIResponsesState(this.collectedOpenAIResponses, data?.output?.response_metadata)
+      ) {
+        logger.warn('[ModelEndHandler] OpenAI Responses replay state reached the 1 MiB limit');
       }
 
       const usage = data?.output?.usage_metadata;
@@ -355,6 +369,7 @@ function getDefaultHandlers({
   toolEndCallback,
   collectedUsage,
   collectedThoughtSignatures = null,
+  collectedOpenAIResponses = null,
   streamId = null,
   toolExecuteOptions = null,
   summarizationOptions = null,
@@ -405,6 +420,7 @@ function getDefaultHandlers({
       collectedUsage,
       collectedThoughtSignatures,
       emitTokenUsage,
+      collectedOpenAIResponses,
     ),
     [GraphEvents.TOOL_END]: new ToolEndHandler(toolEndCallback, logger),
     [GraphEvents.ON_RUN_STEP]: {

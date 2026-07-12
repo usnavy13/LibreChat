@@ -290,7 +290,8 @@ const formatAgentMessages = (payload) => {
     }
 
     if (currentContent.length > 0) {
-      messages.push(new AIMessage({ content: currentContent }));
+      lastAIMessage = new AIMessage({ content: currentContent });
+      messages.push(lastAIMessage);
     }
 
     /**
@@ -310,6 +311,45 @@ const formatAgentMessages = (payload) => {
           aiMsg.additional_kwargs ??= {};
           aiMsg.additional_kwargs.signatures = sigs;
         }
+      }
+    }
+
+    const openAIResponses = message.metadata?.openAIResponses;
+    const replayOutput = openAIResponses?.output;
+    if (Array.isArray(replayOutput) && replayOutput.length > 0) {
+      const reasoningItems = replayOutput.filter((item) => item?.type === 'reasoning');
+      for (let index = 0; index < toolBearingAIMessages.length; index++) {
+        const aiMsg = toolBearingAIMessages[index];
+        const reasoning = reasoningItems[index];
+        if (reasoning) {
+          aiMsg.response_metadata = {
+            ...aiMsg.response_metadata,
+            model_provider: 'openai',
+            output: [reasoning],
+          };
+        }
+      }
+
+      const latestReasoning =
+        reasoningItems[toolBearingAIMessages.length] ??
+        (toolBearingAIMessages.length === 0
+          ? reasoningItems[reasoningItems.length - 1]
+          : undefined);
+      if (lastAIMessage && latestReasoning) {
+        lastAIMessage.response_metadata = {
+          ...lastAIMessage.response_metadata,
+          model_provider: 'openai',
+          output: [latestReasoning],
+        };
+      }
+      if (latestReasoning && lastAIMessage && (lastAIMessage.tool_calls?.length ?? 0) === 0) {
+        lastAIMessage.additional_kwargs ??= {};
+        lastAIMessage.additional_kwargs.reasoning = latestReasoning;
+        lastAIMessage.response_metadata = {
+          ...lastAIMessage.response_metadata,
+          model_provider: 'openai',
+          id: openAIResponses.responseId,
+        };
       }
     }
   }

@@ -135,6 +135,11 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
    * @type {Record<string, string>}
    */
   const collectedThoughtSignatures = {};
+  const collectedOpenAIResponses = {
+    responseId: undefined,
+    output: [],
+    truncated: false,
+  };
   /** @type {ArtifactPromises} */
   const artifactPromises = [];
   /** @type {Map<string, import('@librechat/api').ToolInputValidationError>} */
@@ -308,6 +313,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     toolEndCallback,
     collectedUsage,
     collectedThoughtSignatures,
+    collectedOpenAIResponses,
     streamId,
     subagentAggregatorsByToolCallId,
     usageCost,
@@ -991,6 +997,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     eventHandlers,
     collectedUsage,
     collectedThoughtSignatures,
+    collectedOpenAIResponses,
     aggregateContent,
     artifactPromises,
     primeInvokedSkills: handlePrimeInvokedSkills,

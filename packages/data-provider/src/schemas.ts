@@ -776,6 +776,53 @@ export const tExampleSchema = z.object({
 
 export type TExample = z.infer<typeof tExampleSchema>;
 
+export const openAIReplayItemSchema = z
+  .object({
+    type: z.literal('reasoning'),
+    id: z.string(),
+    summary: z
+      .array(
+        z
+          .object({
+            type: z.literal('summary_text'),
+            text: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+    content: z
+      .array(
+        z
+          .object({
+            type: z.literal('reasoning_text'),
+            text: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+    encrypted_content: z.string().nullable().optional(),
+    status: z.enum(['in_progress', 'completed', 'incomplete']).optional(),
+  })
+  .strict();
+
+export type TOpenAIReplayItem = z.infer<typeof openAIReplayItemSchema>;
+
+export const openAIResponsesStateSchema = z
+  .object({
+    responseId: z.string().optional(),
+    output: z.array(openAIReplayItemSchema),
+    truncated: z.boolean().optional(),
+  })
+  .strict();
+
+export type TOpenAIResponsesState = z.infer<typeof openAIResponsesStateSchema>;
+
+const messageMetadataSchema = z
+  .object({
+    openAIResponses: openAIResponsesStateSchema.optional(),
+  })
+  .catchall(z.unknown());
+
 export const tMessageSchema = z.object({
   messageId: z.string(),
   endpoint: z.string().optional(),
@@ -814,7 +861,7 @@ export const tMessageSchema = z.object({
   iconURL: z.string().nullable().optional(),
   feedback: feedbackSchema.optional(),
   /** metadata */
-  metadata: z.record(z.unknown()).optional(),
+  metadata: messageMetadataSchema.optional(),
   /** Output tokens for assistant messages, calibrated prompt-side estimate for user messages */
   tokenCount: z.number().optional(),
   contextMeta: z
