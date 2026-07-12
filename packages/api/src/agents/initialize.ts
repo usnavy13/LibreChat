@@ -378,6 +378,7 @@ export interface InitializeAgentParams {
     agentId: string;
     tools: string[];
     model: string | null;
+    model_parameters: Agent['model_parameters'];
     tool_options: AgentToolOptions | undefined;
     tool_resources: AgentToolResources | undefined;
   }) => Promise<{
@@ -931,6 +932,7 @@ export async function initializeAgent(
       agentId: agent.id,
       tools,
       model: agent.model,
+      model_parameters: agent.model_parameters,
       tool_options: agent.tool_options,
       tool_resources,
     });

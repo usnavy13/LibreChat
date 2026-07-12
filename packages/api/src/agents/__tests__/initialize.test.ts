@@ -258,6 +258,34 @@ describe('initializeAgent — custom provider token lookup', () => {
     jest.clearAllMocks();
   });
 
+  it('passes model parameters to the tool loader', async () => {
+    const { agent, req, res, loadTools, db } = createMocks();
+    const modelParameters = {
+      model: agent.model,
+      programmaticToolCalling: 'native',
+    } as Agent['model_parameters'];
+    agent.model_parameters = modelParameters;
+
+    await initializeAgent(
+      {
+        req,
+        res,
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        isInitialAgent: true,
+      },
+      db,
+    );
+
+    expect(loadTools).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model_parameters: modelParameters,
+      }),
+    );
+  });
+
   it('passes the resolved provider endpoint to getModelMaxTokens, not the custom name', async () => {
     const { agent, req, res, loadTools, db } = createMocks({
       provider: CUSTOM_PROVIDER,

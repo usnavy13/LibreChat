@@ -87,10 +87,11 @@ function createToolLoader(signal, definitionsOnly = true) {
     model,
     agentId,
     provider,
+    model_parameters,
     tool_options,
     tool_resources,
   }) {
-    const agent = { id: agentId, tools, provider, model, tool_options };
+    const agent = { id: agentId, tools, provider, model, model_parameters, tool_options };
     try {
       return await loadAgentTools({
         req,
