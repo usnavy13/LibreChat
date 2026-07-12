@@ -318,14 +318,40 @@ const formatAgentMessages = (payload) => {
     const replayOutput = openAIResponses?.output;
     if (Array.isArray(replayOutput) && replayOutput.length > 0) {
       const reasoningItems = replayOutput.filter((item) => item?.type === 'reasoning');
+      const programOutputItems = replayOutput.filter((item) => item?.type === 'program_output');
+      const linkedProgramCallIds = new Set(
+        replayOutput
+          .filter((item) => item?.type === 'function_call')
+          .map((item) => item.caller?.caller_id)
+          .filter((callerId) => typeof callerId === 'string'),
+      );
+      const finalProgramItems = replayOutput.filter(
+        (item) => item?.type === 'program' && !linkedProgramCallIds.has(item.call_id),
+      );
       for (let index = 0; index < toolBearingAIMessages.length; index++) {
         const aiMsg = toolBearingAIMessages[index];
-        const reasoning = reasoningItems[index];
-        if (reasoning) {
+        const toolCallIds = new Set(aiMsg.tool_calls.map((toolCall) => toolCall.id));
+        const functionCalls = replayOutput.filter(
+          (item) => item?.type === 'function_call' && toolCallIds.has(item.call_id),
+        );
+        const programCallIds = new Set(
+          functionCalls
+            .map((item) => item.caller?.caller_id)
+            .filter((callerId) => typeof callerId === 'string'),
+        );
+        const programItems = replayOutput.filter(
+          (item) => item?.type === 'program' && programCallIds.has(item.call_id),
+        );
+        const output = [
+          ...(reasoningItems[index] ? [reasoningItems[index]] : []),
+          ...programItems,
+          ...functionCalls,
+        ];
+        if (output.length > 0) {
           aiMsg.response_metadata = {
             ...aiMsg.response_metadata,
             model_provider: 'openai',
-            output: [reasoning],
+            output,
           };
         }
       }
@@ -335,11 +361,17 @@ const formatAgentMessages = (payload) => {
         (toolBearingAIMessages.length === 0
           ? reasoningItems[reasoningItems.length - 1]
           : undefined);
-      if (lastAIMessage && latestReasoning) {
+      const finalReplayItems = replayOutput.filter(
+        (item) =>
+          item === latestReasoning ||
+          programOutputItems.includes(item) ||
+          finalProgramItems.includes(item),
+      );
+      if (lastAIMessage && finalReplayItems.length > 0) {
         lastAIMessage.response_metadata = {
           ...lastAIMessage.response_metadata,
           model_provider: 'openai',
-          output: [latestReasoning],
+          output: finalReplayItems,
         };
       }
       if (latestReasoning && lastAIMessage && (lastAIMessage.tool_calls?.length ?? 0) === 0) {

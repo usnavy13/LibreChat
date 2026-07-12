@@ -27,6 +27,7 @@ const modelAwareKeys: Array<keyof t.AgentModelParameters> = [
   'reasoning_context',
   'priorityProcessing',
   'promptCache',
+  'programmaticToolCalling',
 ];
 
 export default function ModelPanel({

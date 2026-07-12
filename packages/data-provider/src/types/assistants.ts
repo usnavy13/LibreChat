@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   AssistantsEndpoint,
   MemoryScope,
+  ProgrammaticToolCalling,
   ReasoningContext,
   ReasoningMode,
 } from 'src/schemas';
@@ -179,6 +180,7 @@ export type AgentModelParameters = {
   reasoning_context?: ReasoningContext | null;
   priorityProcessing?: boolean;
   promptCache?: boolean;
+  programmaticToolCalling?: ProgrammaticToolCalling | null;
   useResponsesApi?: boolean;
 };
 

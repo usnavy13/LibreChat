@@ -541,7 +541,14 @@ const isBuiltInTool = (toolName) =>
  * }>}
  */
 async function loadToolDefinitionsWrapper({ req, res, agent, streamId = null, tool_resources }) {
+  const programmaticToolCalling =
+    agent.model_parameters?.programmaticToolCalling === 'native' ? 'native' : 'librechat';
   if (!agent.tools || agent.tools.length === 0) {
+    if (programmaticToolCalling === 'native') {
+      throw new Error(
+        'Native programmatic tool calling requires an agent with programmatic tools enabled.',
+      );
+    }
     return { toolDefinitions: [] };
   }
 
@@ -560,6 +567,9 @@ async function loadToolDefinitionsWrapper({ req, res, agent, streamId = null, to
   const actionsEnabled = checkCapability(AgentCapabilities.actions);
   const deferredToolsEnabled = checkCapability(AgentCapabilities.deferred_tools);
   const programmaticToolsEnabled = enabledCapabilities.has(AgentCapabilities.programmatic_tools);
+  if (programmaticToolCalling === 'native' && !programmaticToolsEnabled) {
+    throw new Error('Native programmatic tool calling requires the programmatic_tools capability.');
+  }
   const codeExecutionEnabled =
     agent.tools?.includes(Tools.execute_code) === true &&
     enabledCapabilities.has(AgentCapabilities.execute_code);
@@ -870,6 +880,7 @@ async function loadToolDefinitionsWrapper({ req, res, agent, streamId = null, to
       deferredToolsEnabled,
       programmaticToolsEnabled,
       codeExecutionEnabled,
+      programmaticToolCalling,
       provider: agent.provider,
     },
     {
@@ -1195,6 +1206,11 @@ async function loadAgentTools({
   /** Build tool registry from MCP tools and create PTC/tool search tools if configured */
   const deferredToolsEnabled = checkCapability(AgentCapabilities.deferred_tools);
   const programmaticToolsEnabled = enabledCapabilities.has(AgentCapabilities.programmatic_tools);
+  const programmaticToolCalling =
+    agent.model_parameters?.programmaticToolCalling === 'native' ? 'native' : 'librechat';
+  if (programmaticToolCalling === 'native' && !programmaticToolsEnabled) {
+    throw new Error('Native programmatic tool calling requires the programmatic_tools capability.');
+  }
   const codeExecutionEnabled =
     agent.tools?.includes(Tools.execute_code) === true &&
     enabledCapabilities.has(AgentCapabilities.execute_code);
@@ -1208,6 +1224,7 @@ async function loadAgentTools({
       deferredToolsEnabled,
       programmaticToolsEnabled,
       codeExecutionEnabled,
+      programmaticToolCalling,
       authHeaders: () => getCodeApiAuthHeaders(req),
     });
 

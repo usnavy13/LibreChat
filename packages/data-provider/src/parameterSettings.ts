@@ -12,6 +12,7 @@ import {
   ReasoningSummary,
   ReasoningMode,
   ReasoningContext,
+  ProgrammaticToolCalling,
   BedrockProviders,
   anthropicSettings,
 } from './types';
@@ -379,6 +380,23 @@ const openAIParams: Record<string, SettingDefinition> = {
     optionType: 'conversation',
     showDefault: false,
     columnSpan: 2,
+  },
+  programmaticToolCalling: {
+    key: 'programmaticToolCalling',
+    label: 'com_endpoint_programmatic_tool_calling',
+    labelCode: true,
+    description: 'com_endpoint_openai_programmatic_tool_calling',
+    descriptionCode: true,
+    type: 'enum',
+    default: ProgrammaticToolCalling.librechat,
+    component: 'slider',
+    options: [ProgrammaticToolCalling.librechat, ProgrammaticToolCalling.native],
+    enumMappings: {
+      [ProgrammaticToolCalling.librechat]: 'com_ui_librechat',
+      [ProgrammaticToolCalling.native]: 'com_ui_native',
+    },
+    optionType: 'model',
+    columnSpan: 4,
   },
   verbosity: {
     key: 'verbosity',
@@ -911,6 +929,7 @@ const openAI: SettingsConfiguration = [
   openAIParams.reasoning_context,
   openAIParams.priorityProcessing,
   openAIParams.promptCache,
+  openAIParams.programmaticToolCalling,
   openAIParams.verbosity,
   openAIParams.disableStreaming,
   librechat.fileTokenLimit,
@@ -944,6 +963,7 @@ const openAICol2: SettingsConfiguration = [
   openAIParams.reasoning_context,
   openAIParams.priorityProcessing,
   openAIParams.promptCache,
+  openAIParams.programmaticToolCalling,
   openAIParams.verbosity,
   openAIParams.useResponsesApi,
   openAIParams.web_search,
@@ -1298,8 +1318,13 @@ const GPT_5_6_ONLY_KEYS = new Set([
   'reasoning_context',
   'priorityProcessing',
   'promptCache',
+  'programmaticToolCalling',
 ]);
-const RESPONSES_ONLY_KEYS = new Set(['reasoning_mode', 'reasoning_context']);
+const RESPONSES_ONLY_KEYS = new Set([
+  'reasoning_mode',
+  'reasoning_context',
+  'programmaticToolCalling',
+]);
 const MODEL_AWARE_OPTION_KEYS = new Set(['imageDetail', 'reasoning_effort']);
 
 export function getInvalidModelAwareKeys(
@@ -1355,6 +1380,9 @@ export function applyModelAwareDefaults(
       return [];
     }
     if (RESPONSES_ONLY_KEYS.has(setting.key) && options.useResponsesApi !== true) {
+      return [];
+    }
+    if (setting.key === 'programmaticToolCalling' && options.isAgent !== true) {
       return [];
     }
     if (setting.key === 'priorityProcessing' && !supportsPriority) {

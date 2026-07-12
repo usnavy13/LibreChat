@@ -72,6 +72,7 @@ describe('applyModelAwareDefaults', () => {
     expect(getParam(result, 'reasoning_context')).toBeDefined();
     expect(getParam(result, 'priorityProcessing')).toBeDefined();
     expect(getParam(result, 'promptCache')).toBeDefined();
+    expect(getParam(result, 'programmaticToolCalling')).toBeDefined();
     expect(getParam(result, 'reasoning_effort')?.options).toContain('max');
     expect(getParam(result, 'imageDetail')?.options).toContain('original');
   });
@@ -85,6 +86,7 @@ describe('applyModelAwareDefaults', () => {
 
     expect(getParam(result, 'reasoning_mode')).toBeUndefined();
     expect(getParam(result, 'reasoning_context')).toBeUndefined();
+    expect(getParam(result, 'programmaticToolCalling')).toBeUndefined();
     expect(getParam(result, 'priorityProcessing')).toBeDefined();
     expect(getParam(result, 'promptCache')).toBeDefined();
   });
@@ -115,6 +117,7 @@ describe('applyModelAwareDefaults', () => {
       'reasoning_context',
       'priorityProcessing',
       'promptCache',
+      'programmaticToolCalling',
     ]) {
       expect(getParam(result, key)).toBeUndefined();
     }

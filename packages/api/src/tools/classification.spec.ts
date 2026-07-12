@@ -454,6 +454,31 @@ describe('classification.ts', () => {
       expect(result.toolDefinitions.some((d) => d.name === 'run_tools_with_bash')).toBe(true);
     });
 
+    it('keeps eligible schemas but does not add LibreChat code tools in native mode', async () => {
+      const loadedTools: GenericTool[] = [createMCPTool('tool1')];
+      const result = await buildToolClassification({
+        loadedTools,
+        userId: 'user1',
+        agentId: 'agent1',
+        agentToolOptions: {
+          tool1: { allowed_callers: ['code_execution'] },
+        },
+        programmaticToolsEnabled: true,
+        codeExecutionEnabled: false,
+        programmaticToolCalling: 'native',
+      });
+
+      expect(result.toolDefinitions.find((definition) => definition.name === 'tool1')).toEqual(
+        expect.objectContaining({ allowed_callers: ['code_execution'] }),
+      );
+      expect(result.additionalTools.some((tool) => tool.name === 'run_tools_with_bash')).toBe(
+        false,
+      );
+      expect(
+        result.toolDefinitions.some((definition) => definition.name === 'run_tools_with_bash'),
+      ).toBe(false);
+    });
+
     it('should not add PTC when programmatic tools capability is disabled', async () => {
       const loadedTools: GenericTool[] = [createMCPTool('tool1')];
 

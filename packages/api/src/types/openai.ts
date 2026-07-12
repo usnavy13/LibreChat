@@ -39,6 +39,7 @@ export type OAIClientOptions = Omit<OpenAIClientOptions, 'verbosity'> & {
   promptCacheKey?: string;
   promptCacheExplicit?: boolean;
   safety_identifier?: string;
+  nativeProgrammaticToolCalling?: boolean;
   firstPartyOpenAI?: boolean;
   service_tier?: 'default' | 'priority';
   promptCacheTtl?: '5m' | '1h';

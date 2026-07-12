@@ -44,7 +44,7 @@ describe('getOpenAIConfig', () => {
   });
 
   describe('GPT-5.6 first-party request fields', () => {
-    it('maps priority, Pro mode, reasoning context, and cache', () => {
+    it('maps priority, Pro mode, reasoning context, cache, and native PTC', () => {
       const modelOptions = {
         model: 'gpt-5.6-sol',
         useResponsesApi: true,
@@ -53,12 +53,14 @@ describe('getOpenAIConfig', () => {
         reasoning_mode: 'pro',
         reasoning_context: 'all_turns',
         promptCache: true,
+        programmaticToolCalling: 'native',
       } as Partial<OpenAIParameters> & {
         firstPartyOpenAI: boolean;
         priorityProcessing: boolean;
         reasoning_mode: 'pro';
         reasoning_context: 'all_turns';
         promptCache: boolean;
+        programmaticToolCalling: 'native';
       };
 
       const result = getOpenAIConfig(mockApiKey, { modelOptions }, EModelEndpoint.openAI);
@@ -66,6 +68,7 @@ describe('getOpenAIConfig', () => {
       expect(result.llmConfig).toMatchObject({
         service_tier: 'priority',
         promptCache: true,
+        nativeProgrammaticToolCalling: true,
         reasoning: {
           mode: 'pro',
           context: 'all_turns',
@@ -94,7 +97,25 @@ describe('getOpenAIConfig', () => {
       expect(result.llmConfig.service_tier).toBe('default');
     });
 
-    it('omits managed fields for compatible proxies', () => {
+    it('rejects native PTC and omits managed fields for compatible proxies', () => {
+      expect(() =>
+        getOpenAIConfig(
+          mockApiKey,
+          {
+            modelOptions: {
+              model: 'gpt-5.6',
+              useResponsesApi: true,
+              firstPartyOpenAI: false,
+              programmaticToolCalling: 'native',
+            } as Partial<OpenAIParameters> & {
+              firstPartyOpenAI: boolean;
+              programmaticToolCalling: 'native';
+            },
+          },
+          EModelEndpoint.openAI,
+        ),
+      ).toThrow('Native programmatic tool calling requires GPT-5.6');
+
       const result = getOpenAIConfig(
         mockApiKey,
         {

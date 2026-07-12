@@ -4,6 +4,7 @@ import {
   ReasoningEffort,
   ReasoningMode,
   ReasoningContext,
+  ProgrammaticToolCalling,
   googleSettings,
   anthropicSettings,
   compactGoogleSchema,
@@ -12,6 +13,7 @@ import {
   eImageDetailSchema,
   eReasoningModeSchema,
   eReasoningContextSchema,
+  eProgrammaticToolCallingSchema,
   openAIResponsesStateSchema,
 } from './schemas';
 
@@ -626,6 +628,16 @@ describe('ReasoningContext', () => {
   });
 });
 
+describe('ProgrammaticToolCalling', () => {
+  it('accepts supported values and rejects unknown modes', () => {
+    expect(eProgrammaticToolCallingSchema.parse(ProgrammaticToolCalling.librechat)).toBe(
+      'librechat',
+    );
+    expect(eProgrammaticToolCallingSchema.parse(ProgrammaticToolCalling.native)).toBe('native');
+    expect(() => eProgrammaticToolCallingSchema.parse('automatic')).toThrow();
+  });
+});
+
 describe('GPT-5.6 image detail', () => {
   it('accepts original and rejects unknown values', () => {
     expect(eImageDetailSchema.parse(ImageDetail.original)).toBe('original');
@@ -642,10 +654,32 @@ describe('GPT-5.6 image detail', () => {
           summary: [{ type: 'summary_text', text: 'summary' }],
           encrypted_content: 'encrypted',
         },
+        {
+          type: 'program',
+          id: 'prog_1',
+          call_id: 'call_prog_1',
+          code: 'text("done")',
+          fingerprint: 'fingerprint',
+        },
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call_1',
+          name: 'lookup',
+          arguments: '{}',
+          caller: { type: 'program', caller_id: 'call_prog_1' },
+        },
+        {
+          type: 'program_output',
+          id: 'prog_out_1',
+          call_id: 'call_prog_1',
+          result: '{"ok":true}',
+          status: 'completed',
+        },
       ],
     });
 
-    expect(state.output).toHaveLength(1);
+    expect(state.output).toHaveLength(4);
     expect(() =>
       openAIResponsesStateSchema.parse({
         output: [{ type: 'message', id: 'msg_1', content: [] }],

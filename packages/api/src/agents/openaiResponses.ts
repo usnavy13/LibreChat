@@ -56,6 +56,68 @@ export function sanitizeOpenAIReplayItem(item: unknown): TOpenAIReplayItem | nul
   if (reasoning) {
     return reasoning;
   }
+  if (
+    record.type === 'program' &&
+    typeof record.id === 'string' &&
+    typeof record.call_id === 'string' &&
+    typeof record.code === 'string' &&
+    typeof record.fingerprint === 'string'
+  ) {
+    return {
+      type: 'program',
+      id: record.id,
+      call_id: record.call_id,
+      code: record.code,
+      fingerprint: record.fingerprint,
+    };
+  }
+  if (
+    record.type === 'program_output' &&
+    typeof record.id === 'string' &&
+    typeof record.call_id === 'string' &&
+    typeof record.result === 'string' &&
+    (record.status === 'completed' || record.status === 'incomplete')
+  ) {
+    return {
+      type: 'program_output',
+      id: record.id,
+      call_id: record.call_id,
+      result: record.result,
+      status: record.status,
+    };
+  }
+  if (
+    record.type === 'function_call' &&
+    typeof record.call_id === 'string' &&
+    typeof record.name === 'string' &&
+    typeof record.arguments === 'string' &&
+    typeof record.caller === 'object' &&
+    record.caller != null &&
+    'type' in record.caller &&
+    record.caller.type === 'program' &&
+    'caller_id' in record.caller &&
+    typeof record.caller.caller_id === 'string'
+  ) {
+    const status =
+      record.status === 'in_progress' ||
+      record.status === 'completed' ||
+      record.status === 'incomplete'
+        ? record.status
+        : undefined;
+    return {
+      type: 'function_call',
+      call_id: record.call_id,
+      name: record.name,
+      arguments: record.arguments,
+      caller: {
+        type: 'program',
+        caller_id: record.caller.caller_id,
+      },
+      ...(typeof record.id === 'string' && { id: record.id }),
+      ...(typeof record.namespace === 'string' && { namespace: record.namespace }),
+      ...(status && { status }),
+    };
+  }
   return null;
 }
 
@@ -95,12 +157,18 @@ function getReplayGroups(output: TOpenAIReplayItem[]): ReplayGroup[] {
   const groups = new Map<string, ReplayGroup>();
   for (let index = 0; index < output.length; index++) {
     const item = output[index];
+    let programCallId: string | undefined;
+    if (item.type === 'function_call') {
+      programCallId = item.caller.caller_id;
+    } else if (item.type === 'program' || item.type === 'program_output') {
+      programCallId = item.call_id;
+    }
+    const key = programCallId ? `program:${programCallId}` : `reasoning:${index}`;
     const hasEncryptedReasoning =
       item.type === 'reasoning' &&
       typeof item.encrypted_content === 'string' &&
       item.encrypted_content.length > 0;
-    const key = `reasoning:${index}`;
-    const priority = hasEncryptedReasoning ? 0 : 1;
+    const priority = programCallId != null || hasEncryptedReasoning ? 0 : 1;
     const group = groups.get(key);
     if (group) {
       group.indexes.push(index);

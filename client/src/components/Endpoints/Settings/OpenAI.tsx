@@ -15,6 +15,7 @@ const modelAwareKeys = [
   'reasoning_context',
   'priorityProcessing',
   'promptCache',
+  'programmaticToolCalling',
 ] as const;
 
 export default function OpenAISettings({

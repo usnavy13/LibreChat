@@ -48,6 +48,7 @@ export const knownOpenAIParams: Set<string> = new Set([
   'safety_identifier',
   'promptCacheKey',
   'promptCacheExplicit',
+  'nativeProgrammaticToolCalling',
   'supportsStrictToolCalling',
   'useResponsesApi',
   'configuration',
@@ -540,6 +541,7 @@ export function getOpenAILLMConfig({
     reasoning_mode,
     reasoning_context,
     priorityProcessing,
+    programmaticToolCalling,
     firstPartyOpenAI,
     verbosity,
     web_search,
@@ -746,8 +748,20 @@ export function getOpenAILLMConfig({
   if (firstPartyEndpoint && !supportsGPT56 && reasoningEffort === 'max') {
     reasoningEffort = undefined;
   }
+  if (
+    programmaticToolCalling === 'native' &&
+    (!supportsManagedGPT56 || llmConfig.useResponsesApi !== true)
+  ) {
+    throw new Error(
+      'Native programmatic tool calling requires GPT-5.6 on an OpenAI or Azure OpenAI Responses endpoint.',
+    );
+  }
+
   if (supportsManagedGPT56) {
     llmConfig.service_tier = priorityProcessing === true ? 'priority' : 'default';
+    if (llmConfig.useResponsesApi === true && programmaticToolCalling === 'native') {
+      llmConfig.nativeProgrammaticToolCalling = true;
+    }
   }
 
   if (llmConfig.max_tokens != null) {

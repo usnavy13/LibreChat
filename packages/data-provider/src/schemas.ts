@@ -261,6 +261,11 @@ export enum ReasoningSummary {
   detailed = 'detailed',
 }
 
+export enum ProgrammaticToolCalling {
+  librechat = 'librechat',
+  native = 'native',
+}
+
 export enum Verbosity {
   none = '',
   low = 'low',
@@ -312,6 +317,7 @@ export const eReasoningResponseKeySchema = z.nativeEnum(ReasoningResponseKey);
 export const eAnthropicEffortSchema = z.nativeEnum(AnthropicEffort);
 export const eThinkingDisplaySchema = z.nativeEnum(ThinkingDisplay);
 export const eReasoningSummarySchema = z.nativeEnum(ReasoningSummary);
+export const eProgrammaticToolCallingSchema = z.nativeEnum(ProgrammaticToolCalling);
 export const eVerbositySchema = z.nativeEnum(Verbosity);
 export const eThinkingLevelSchema = z.nativeEnum(ThinkingLevel);
 export const eReasoningModeSchema = z.nativeEnum(ReasoningMode);
@@ -776,7 +782,14 @@ export const tExampleSchema = z.object({
 
 export type TExample = z.infer<typeof tExampleSchema>;
 
-export const openAIReplayItemSchema = z
+const openAIReplayCallerSchema = z
+  .object({
+    type: z.literal('program'),
+    caller_id: z.string(),
+  })
+  .strict();
+
+const openAIReasoningReplayItemSchema = z
   .object({
     type: z.literal('reasoning'),
     id: z.string(),
@@ -804,6 +817,46 @@ export const openAIReplayItemSchema = z
     status: z.enum(['in_progress', 'completed', 'incomplete']).optional(),
   })
   .strict();
+
+const openAIProgramReplayItemSchema = z
+  .object({
+    type: z.literal('program'),
+    id: z.string(),
+    call_id: z.string(),
+    code: z.string(),
+    fingerprint: z.string(),
+  })
+  .strict();
+
+const openAIProgramOutputReplayItemSchema = z
+  .object({
+    type: z.literal('program_output'),
+    id: z.string(),
+    call_id: z.string(),
+    result: z.string(),
+    status: z.enum(['completed', 'incomplete']),
+  })
+  .strict();
+
+const openAIFunctionCallReplayItemSchema = z
+  .object({
+    type: z.literal('function_call'),
+    call_id: z.string(),
+    name: z.string(),
+    arguments: z.string(),
+    id: z.string().optional(),
+    caller: openAIReplayCallerSchema,
+    namespace: z.string().optional(),
+    status: z.enum(['in_progress', 'completed', 'incomplete']).optional(),
+  })
+  .strict();
+
+export const openAIReplayItemSchema = z.discriminatedUnion('type', [
+  openAIReasoningReplayItemSchema,
+  openAIProgramReplayItemSchema,
+  openAIProgramOutputReplayItemSchema,
+  openAIFunctionCallReplayItemSchema,
+]);
 
 export type TOpenAIReplayItem = z.infer<typeof openAIReplayItemSchema>;
 
@@ -1044,6 +1097,7 @@ export const tConversationSchema = z.object({
   reasoning_mode: eReasoningModeSchema.optional().nullable(),
   reasoning_context: eReasoningContextSchema.optional().nullable(),
   priorityProcessing: z.boolean().optional(),
+  programmaticToolCalling: eProgrammaticToolCallingSchema.optional().nullable(),
   /* OpenAI: Verbosity control */
   verbosity: eVerbositySchema.optional().nullable(),
   /* OpenAI: use Responses API */
@@ -1482,6 +1536,7 @@ export const openAIBaseSchema = tConversationSchema.pick({
   reasoning_mode: true,
   reasoning_context: true,
   priorityProcessing: true,
+  programmaticToolCalling: true,
   promptCache: true,
   verbosity: true,
   useResponsesApi: true,
