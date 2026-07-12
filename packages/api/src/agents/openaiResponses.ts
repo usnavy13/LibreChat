@@ -96,7 +96,9 @@ function getReplayGroups(output: TOpenAIReplayItem[]): ReplayGroup[] {
   for (let index = 0; index < output.length; index++) {
     const item = output[index];
     const hasEncryptedReasoning =
-      typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0;
+      item.type === 'reasoning' &&
+      typeof item.encrypted_content === 'string' &&
+      item.encrypted_content.length > 0;
     const key = `reasoning:${index}`;
     const priority = hasEncryptedReasoning ? 0 : 1;
     const group = groups.get(key);
