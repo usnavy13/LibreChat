@@ -1319,6 +1319,19 @@ export function applyModelAwareDefaults(
   if (!model) {
     return settings;
   }
+  if (
+    (endpoint === EModelEndpoint.openAI || endpoint === EModelEndpoint.azureOpenAI) &&
+    /^gpt-6-(?:sol|luna)(?:-|$)/i.test(model)
+  ) {
+    return settings.map((setting) =>
+      setting.key === 'reasoning_effort'
+        ? {
+            ...setting,
+            options: setting.options?.filter((option) => option !== ReasoningEffort.minimal),
+          }
+        : setting,
+    );
+  }
   if (/^grok-4[.-]7(?:$|[-:])/.test(model.split('/').pop() ?? '')) {
     return settings.map((setting) =>
       setting.key === 'reasoning_effort'

@@ -4,7 +4,7 @@ import {
   resolveDropParamsUIKeys,
   paramSettings,
 } from './parameterSettings';
-import { EModelEndpoint, Providers } from './types';
+import { EModelEndpoint, Providers, ReasoningEffort } from './types';
 
 const googleParams = paramSettings[EModelEndpoint.google] as SettingDefinition[];
 const anthropicParams = paramSettings[EModelEndpoint.anthropic] as SettingDefinition[];
@@ -17,6 +17,28 @@ const hasSetting = (params: SettingDefinition[], key: string) =>
   params.some((param) => param.key === key);
 
 describe('applyModelAwareDefaults', () => {
+  it.each(['gpt-6-sol', 'gpt-6-luna', 'gpt-6-sol-2026-09-22'])(
+    'offers the supported reasoning efforts for %s without changing shared settings',
+    (model) => {
+      const settings = paramSettings[EModelEndpoint.openAI] as SettingDefinition[];
+      const original = settings.find((setting) => setting.key === 'reasoning_effort');
+      for (const endpoint of [EModelEndpoint.openAI, EModelEndpoint.azureOpenAI]) {
+        const result = applyModelAwareDefaults(settings, endpoint, model);
+        expect(result.find((setting) => setting.key === 'reasoning_effort')?.options).toEqual([
+          ReasoningEffort.unset,
+          ReasoningEffort.none,
+          ReasoningEffort.low,
+          ReasoningEffort.medium,
+          ReasoningEffort.high,
+          ReasoningEffort.xhigh,
+          ReasoningEffort.max,
+        ]);
+      }
+      expect(original?.options).toContain(ReasoningEffort.minimal);
+      expect(applyModelAwareDefaults(settings, EModelEndpoint.custom, model)).toBe(settings);
+    },
+  );
+
   it('resolves the Google maxOutputTokens default for current Gemini models', () => {
     const result = applyModelAwareDefaults(googleParams, EModelEndpoint.google, 'gemini-2.5-pro');
     expect(maxOut(result)?.default).toBe(65535);

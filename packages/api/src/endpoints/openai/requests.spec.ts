@@ -148,6 +148,202 @@ describe('Azure Astra requests', () => {
   );
 });
 
+describe.each(['gpt-6-sol', 'gpt-6-luna'])('%s requests', (modelName) => {
+  it.each([EModelEndpoint.openAI, EModelEndpoint.azureOpenAI])(
+    'sends reasoning none when %s explicitly uses Chat Completions',
+    async (endpoint) => {
+      const requests: { url: URL; body: OpenAI.Chat.Completions.ChatCompletionCreateParams }[] = [];
+      const fetch: NonNullable<NonNullable<OpenAIConfiguration>['fetch']> = async (url, init) => {
+        requests.push({ url: new URL(String(url)), body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          id: 'chatcmpl_test',
+          object: 'chat.completion',
+          model: modelName,
+          choices: [
+            { index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+        });
+      };
+      const { llmConfig, configOptions } = getOpenAIConfig(
+        'test-api-key',
+        {
+          streaming: false,
+          azure:
+            endpoint === EModelEndpoint.azureOpenAI
+              ? {
+                  azureOpenAIApiInstanceName: 'test-instance.cognitiveservices.azure.com',
+                  azureOpenAIApiDeploymentName: 'production-deployment',
+                  azureOpenAIApiVersion: '2025-04-01-preview',
+                  azureOpenAIApiKey: 'test-api-key',
+                }
+              : undefined,
+          modelOptions: {
+            model: modelName,
+            useResponsesApi: false,
+            reasoning_effort: ReasoningEffort.none,
+            temperature: 0.7,
+            max_tokens: 128,
+          },
+        },
+        endpoint,
+      );
+      const model = initializeModel({
+        provider: endpoint === EModelEndpoint.azureOpenAI ? Providers.AZURE : Providers.OPENAI,
+        clientOptions: {
+          ...llmConfig,
+          verbosity: undefined,
+          configuration: { ...configOptions, fetch },
+        },
+      });
+      await model.invoke('Say OK.');
+      expect(requests).toHaveLength(1);
+      expect(requests[0].url.pathname).toMatch(/\/chat\/completions$/);
+      expect(requests[0].body).toMatchObject({
+        model: endpoint === EModelEndpoint.azureOpenAI ? 'production-deployment' : modelName,
+        reasoning_effort: 'none',
+        temperature: 0.7,
+        max_completion_tokens: 128,
+      });
+    },
+  );
+
+  describe.each([
+    { endpoint: EModelEndpoint.openAI, baseURL: 'https://api.openai.com/v1' },
+    {
+      endpoint: EModelEndpoint.azureOpenAI,
+      baseURL: 'https://test-instance.cognitiveservices.azure.com/',
+    },
+  ])('$endpoint', ({ endpoint, baseURL }) => {
+    it.each([undefined, ReasoningEffort.none, ReasoningEffort.minimal, ReasoningEffort.max])(
+      'uses Responses and supported parameters for effort %s',
+      async (effort) => {
+        const wireModel =
+          endpoint === EModelEndpoint.azureOpenAI ? 'production-deployment' : modelName;
+        const requests: {
+          url: URL;
+          headers: Headers;
+          body: OpenAI.Responses.ResponseCreateParams;
+        }[] = [];
+        const fetch: NonNullable<NonNullable<OpenAIConfiguration>['fetch']> = async (url, init) => {
+          requests.push({
+            url: new URL(String(url)),
+            headers: new Headers(init?.headers),
+            body: JSON.parse(String(init?.body)),
+          });
+          return Response.json({
+            id: 'resp_test',
+            object: 'response',
+            status: 'completed',
+            model: wireModel,
+            output: [
+              {
+                type: 'function_call',
+                id: 'fc_test',
+                call_id: 'call_test',
+                name: 'calculator',
+                arguments: '{"input":"2 + 2"}',
+                status: 'completed',
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          });
+        };
+        const { llmConfig, configOptions } = getOpenAIConfig(
+          'test-api-key',
+          {
+            streaming: false,
+            reverseProxyUrl: baseURL,
+            azure:
+              endpoint === EModelEndpoint.azureOpenAI
+                ? {
+                    azureOpenAIApiInstanceName: 'test-instance',
+                    azureOpenAIApiDeploymentName: wireModel,
+                    azureOpenAIApiVersion: '2025-04-01-preview',
+                    azureOpenAIApiKey: 'test-api-key',
+                  }
+                : undefined,
+            modelOptions: {
+              model: modelName,
+              reasoning_effort: effort,
+              max_tokens: 2048,
+              temperature: 0.7,
+              topP: 0.9,
+            },
+            addParams: {
+              store: false,
+              top_logprobs: 5,
+              include: ['web_search_call.action.sources', 'message.output_text.logprobs'],
+            },
+          },
+          endpoint,
+        );
+        const model = initializeModel({
+          provider: Providers.OPENAI,
+          clientOptions: {
+            ...llmConfig,
+            verbosity: undefined,
+            configuration: { ...configOptions, fetch },
+          },
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'calculator',
+                description: 'Compute arithmetic',
+                parameters: {
+                  type: 'object',
+                  properties: { input: { type: 'string' } },
+                  required: ['input'],
+                },
+              },
+            },
+          ],
+        });
+
+        const result = await model.invoke('Use the calculator to compute 2 + 2.');
+
+        expect(result.tool_calls).toEqual([
+          expect.objectContaining({ name: 'calculator', args: { input: '2 + 2' } }),
+        ]);
+        expect(requests).toHaveLength(1);
+        const { url, headers, body } = requests[0];
+        expect(url.origin + url.pathname).toBe(
+          endpoint === EModelEndpoint.azureOpenAI
+            ? 'https://test-instance.cognitiveservices.azure.com/openai/v1/responses'
+            : 'https://api.openai.com/v1/responses',
+        );
+        if (endpoint === EModelEndpoint.azureOpenAI) {
+          expect(headers.get('api-key')).toBe('test-api-key');
+        }
+        expect(body).toMatchObject({
+          model: wireModel,
+          max_output_tokens: 2048,
+          tools: [expect.objectContaining({ type: 'function', name: 'calculator' })],
+          include: expect.arrayContaining([
+            'reasoning.encrypted_content',
+            'web_search_call.action.sources',
+          ]),
+        });
+        expect(body.reasoning?.effort).toBe(
+          effort === ReasoningEffort.minimal ? ReasoningEffort.low : effort,
+        );
+        expect(body).not.toHaveProperty('max_tokens');
+        expect(body).not.toHaveProperty('max_completion_tokens');
+        if (effort === ReasoningEffort.none) {
+          expect(body).toMatchObject({ temperature: 0.7, top_p: 0.9, top_logprobs: 5 });
+          expect(body.include).toContain('message.output_text.logprobs');
+        } else {
+          for (const key of ['temperature', 'top_p', 'logprobs', 'top_logprobs']) {
+            expect(body).not.toHaveProperty(key);
+          }
+          expect(body.include).not.toContain('message.output_text.logprobs');
+        }
+      },
+    );
+  });
+});
+
 describe('Azure full-hostname instances', () => {
   it.each([
     {

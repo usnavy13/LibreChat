@@ -91,20 +91,22 @@ describe('Gemini 3.8 Flash', () => {
   });
 });
 
-describe('GPT-6 Astra', () => {
+describe.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'])('%s', (model) => {
   it('resolves 1.05M context and 128K output', () => {
-    expect(getModelMaxTokens('gpt-6-astra', EModelEndpoint.openAI)).toBe(1050000);
-    expect(getModelMaxOutputTokens('gpt-6-astra', EModelEndpoint.openAI)).toBe(128000);
+    expect(getModelMaxTokens(model, EModelEndpoint.openAI)).toBe(1050000);
+    expect(getModelMaxOutputTokens(model, EModelEndpoint.openAI)).toBe(128000);
   });
 
   it('matches its own key for snapshots and provider prefixes', () => {
-    for (const model of [
-      'gpt-6-astra-2026-04-30',
-      'openai/gpt-6-astra',
-      'gpt-6-astra-2026-04-30/openai',
+    for (const modelId of [
+      `${model}-2026-09-22`,
+      `openai/${model}`,
+      `${model}-2026-09-22/openai`,
     ]) {
-      expect(getModelMaxTokens(model, EModelEndpoint.openAI)).toBe(1050000);
-      expect(getModelMaxOutputTokens(model, EModelEndpoint.openAI)).toBe(128000);
+      expect(getModelMaxTokens(modelId, EModelEndpoint.openAI)).toBe(1050000);
+      expect(getModelMaxOutputTokens(modelId, EModelEndpoint.openAI)).toBe(128000);
+      expect(getModelMaxTokens(modelId, EModelEndpoint.azureOpenAI)).toBe(1050000);
+      expect(getModelMaxOutputTokens(modelId, EModelEndpoint.azureOpenAI)).toBe(128000);
     }
   });
 });

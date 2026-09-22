@@ -25,6 +25,7 @@ type OpenAILLMConfig = Omit<Partial<t.OAIClientOptions>, 'verbosity'> &
   Omit<Partial<t.OpenAIParameters>, 'verbosity'> &
   Omit<Partial<AzureOpenAIInput>, 'verbosity'> & {
     verbosity?: string | null;
+    include?: (OpenAI.Responses.ResponseIncludable | 'message.output_text.logprobs')[];
   };
 
 export const knownOpenAIParams: Set<string> = new Set([
@@ -139,8 +140,8 @@ const responsesApiRequiredPattern = /\bgpt-5\.6\b/;
 
 /**
  * Models that take the Responses API for every turn, not only reasoning ones.
- * OpenAI's guidance for GPT-6 Astra is to use Responses, and tool calls require
- * it outright.
+ * OpenAI recommends Responses for GPT-6. Astra requires it for all tool calls;
+ * Sol and Luna require it when reasoning is enabled, including their default.
  *
  * Decided here rather than in the agents SDK at invocation time: the max-tokens
  * field below is shaped from `useResponsesApi`, so a later switch would send
@@ -149,7 +150,7 @@ const responsesApiRequiredPattern = /\bgpt-5\.6\b/;
  * the deployment as the wire model, or becomes the deployment name outright.
  * @see https://developers.openai.com/api/docs/guides/latest-model
  */
-const responsesApiPreferredPattern = /^gpt-6-astra(?:-|$)/i;
+const responsesApiPreferredPattern = /^gpt-6-(?:astra|sol|luna)(?:-|$)/i;
 
 function prefersResponsesApi(model?: string): boolean {
   return typeof model === 'string' && responsesApiPreferredPattern.test(model);
@@ -885,7 +886,7 @@ export function getOpenAILLMConfig({
     (dropParams.includes('reasoning_effort') || dropParams.includes('useResponsesApi'));
   /**
    * The GPT-5.6 default above is reasoning-driven, so dropping `reasoning_effort`
-   * removes its reason to route. Astra's is not: it takes Responses for every
+   * removes its reason to route. GPT-6's is not: it takes Responses for every
    * turn, and a drop rule clearing an unsupported stored effort must not also
    * disable its routing. Only an explicit `useResponsesApi` drop does that.
    */
@@ -898,8 +899,8 @@ export function getOpenAILLMConfig({
     endpoint === EModelEndpoint.azureOpenAI &&
     isCanonicalAzureBaseURL(baseURL, azure);
   const firstPartyEndpoint = firstPartyOpenAI || firstPartyAzure;
-  /** Astra keeps its model identity on Azure, where the deployment becomes the wire model. */
-  const firstPartyAstra = firstPartyEndpoint && prefersResponsesApi(llmConfig.model);
+  /** Keep the model identity on Azure, where the deployment becomes the wire model. */
+  const firstPartyResponsesModel = firstPartyEndpoint && prefersResponsesApi(llmConfig.model);
   if (
     firstPartyOpenAI &&
     reasoningFormat !== ReasoningParameterFormat.disabled &&
@@ -911,11 +912,14 @@ export function getOpenAILLMConfig({
   }
 
   /**
-   * Route GPT-6 Astra to the Responses API for every turn. Unlike the GPT-5.6
-   * rule above this does not depend on reasoning params: Astra serves tool calls
-   * only from Responses on both OpenAI and Azure OpenAI.
+   * GPT-6 defaults to reasoning even when no effort is configured, so routing
+   * cannot depend on the presence of reasoning parameters.
    */
-  if (firstPartyAstra && llmConfig.useResponsesApi == null && !responsesApiExplicitlyOptedOut) {
+  if (
+    firstPartyResponsesModel &&
+    llmConfig.useResponsesApi == null &&
+    !responsesApiExplicitlyOptedOut
+  ) {
     llmConfig.useResponsesApi = true;
   }
 
@@ -1003,6 +1007,56 @@ export function getOpenAILLMConfig({
     dropParams.forEach((param) => deleteConfigParam({ param, llmConfig, modelKwargs }));
   }
 
+  if (firstPartyResponsesModel) {
+    /** LangChain reads constructor reasoning from the object on both APIs. */
+    if (llmConfig.reasoning_effort != null) {
+      llmConfig.reasoning = {
+        ...llmConfig.reasoning,
+        ...getReasoningObject({ reasoningEffort: llmConfig.reasoning_effort }),
+      };
+      delete llmConfig.reasoning_effort;
+    }
+    /** Keep stored efforts usable when switching from a model that accepts minimal. */
+    if (llmConfig.reasoning?.effort === ReasoningEffort.minimal) {
+      llmConfig.reasoning = { ...llmConfig.reasoning, effort: ReasoningEffort.low };
+    }
+
+    const effort = llmConfig.reasoning?.effort;
+    if (effort !== ReasoningEffort.none) {
+      for (const param of [
+        'temperature',
+        'topP',
+        'top_p',
+        'logprobs',
+        'topLogprobs',
+        'top_logprobs',
+      ]) {
+        deleteConfigParam({ param, llmConfig, modelKwargs });
+      }
+    }
+
+    if (llmConfig.useResponsesApi === true) {
+      const include = Array.isArray(llmConfig.include) ? llmConfig.include : [];
+      const supported = include.filter(
+        (value) => effort === ReasoningEffort.none || value !== 'message.output_text.logprobs',
+      );
+      /** Persisted reasoning must survive stateless requests and restored conversations. */
+      if (
+        !dropParams?.includes('include') &&
+        (modelKwargs.store === false ||
+          llmConfig.zdrEnabled === true ||
+          llmConfig.reasoning?.context !== 'current_turn')
+      ) {
+        supported.push('reasoning.encrypted_content');
+      }
+      if (supported.length > 0) {
+        modelKwargs.include = [...new Set(supported)];
+        hasModelKwargs = true;
+      }
+      delete llmConfig.include;
+    }
+  }
+
   hasModelKwargs =
     applyResponsesVerbosity({
       llmConfig,
@@ -1038,7 +1092,7 @@ export function getOpenAILLMConfig({
     ? sanitizeModelName(llmConfig.model || '')
     : azure.azureOpenAIApiDeploymentName ||
       getAzureDeploymentName(baseURL, azure) ||
-      (firstPartyAstra || llmConfig.useResponsesApi ? model : undefined);
+      (firstPartyResponsesModel || llmConfig.useResponsesApi ? model : undefined);
 
   if (process.env.AZURE_OPENAI_DEFAULT_MODEL) {
     llmConfig.model = process.env.AZURE_OPENAI_DEFAULT_MODEL;
@@ -1073,8 +1127,8 @@ export function getOpenAILLMConfig({
 
   constructAzureResponsesApi();
 
-  /** Keep Astra's identity for SDK constraints; only the wire model is a deployment alias. */
-  if (firstPartyAstra) {
+  /** Keep the model identity for SDK constraints; only the wire model is a deployment alias. */
+  if (firstPartyResponsesModel) {
     llmConfig.model = model;
     llmConfig.modelKwargs = {
       ...llmConfig.modelKwargs,

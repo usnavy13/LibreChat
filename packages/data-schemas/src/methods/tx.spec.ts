@@ -523,6 +523,34 @@ describe('getMultiplier', () => {
     expect(getMultiplier({ model, tokenType: 'completion', inputTokenCount: 272001 })).toBe(75);
   });
 
+  it.each([
+    { model: 'gpt-6-sol', prompt: 2, completion: 10 },
+    { model: 'gpt-6-luna', prompt: 0.1, completion: 0.5 },
+  ])(
+    'bills $model at its documented rates across the long-context boundary',
+    ({ model, prompt, completion }) => {
+      for (const modelId of [model, `${model}-2026-09-22`, `openai/${model}`, `${model}/openai`]) {
+        expect(getValueKey(modelId)).toBe(model);
+        for (const inputTokenCount of [271999, 272000, 272001]) {
+          const inputRate = prompt * (inputTokenCount > 272000 ? 2 : 1);
+          const outputRate = completion * (inputTokenCount > 272000 ? 1.5 : 1);
+          expect(
+            getMultiplier({ model: modelId, tokenType: 'prompt', inputTokenCount }),
+          ).toBeCloseTo(inputRate);
+          expect(
+            getMultiplier({ model: modelId, tokenType: 'completion', inputTokenCount }),
+          ).toBeCloseTo(outputRate);
+          expect(
+            getCacheMultiplier({ model: modelId, cacheType: 'read', inputTokenCount }),
+          ).toBeCloseTo(inputRate * 0.1);
+          expect(
+            getCacheMultiplier({ model: modelId, cacheType: 'write', inputTokenCount }),
+          ).toBeCloseTo(inputRate * 1.25);
+        }
+      }
+    },
+  );
+
   it('should use the documented gpt-5.6 pricing', () => {
     const expectedPricing = {
       'gpt-5.6': {

@@ -774,6 +774,95 @@ describe('getOpenAILLMConfig', () => {
     });
   });
 
+  describe.each(['gpt-6-sol', 'gpt-6-luna'])('%s configuration', (model) => {
+    const configFor = (overrides: Partial<Parameters<typeof getOpenAILLMConfig>[0]> = {}) =>
+      getOpenAILLMConfig({
+        apiKey: 'test-api-key',
+        streaming: true,
+        endpoint: EModelEndpoint.openAI,
+        modelOptions: { model, max_tokens: 2048, temperature: 0.7, top_p: 0.9 },
+        ...overrides,
+      }).llmConfig;
+
+    it.each([undefined, ReasoningEffort.unset, ReasoningEffort.low, ReasoningEffort.max])(
+      'routes reasoning effort %s through Responses with supported parameters',
+      (reasoning_effort) => {
+        const config = configFor({
+          addParams: { reasoning_effort, top_logprobs: 5, logprobs: true },
+        });
+        expect(config.useResponsesApi).toBe(true);
+        expect(config).not.toHaveProperty('temperature');
+        expect(config).not.toHaveProperty('top_p');
+        expect(config).not.toHaveProperty('logprobs');
+        expect(config.modelKwargs).toMatchObject({
+          max_output_tokens: 2048,
+          include: ['reasoning.encrypted_content'],
+        });
+        expect(config.modelKwargs).not.toHaveProperty('top_logprobs');
+        expect(config.modelKwargs).not.toHaveProperty('max_completion_tokens');
+      },
+    );
+
+    it('preserves none and sampling controls', () => {
+      const config = configFor({ addParams: { reasoning_effort: ReasoningEffort.none } });
+      expect(config.reasoning?.effort).toBe(ReasoningEffort.none);
+      expect(config.temperature).toBe(0.7);
+      expect(config).toHaveProperty('top_p', 0.9);
+    });
+
+    it.each([
+      { reasoning_effort: ReasoningEffort.minimal },
+      { reasoning: { effort: ReasoningEffort.minimal } },
+    ])('normalizes unsupported stored effort from %j', (addParams) => {
+      expect(configFor({ addParams }).reasoning?.effort).toBe(ReasoningEffort.low);
+    });
+
+    it('honors a Chat Completions opt-out with reasoning none', () => {
+      const config = configFor({
+        addParams: { useResponsesApi: false, reasoning_effort: ReasoningEffort.none },
+      });
+      expect(config.useResponsesApi).toBe(false);
+      expect(config.reasoning?.effort).toBe(ReasoningEffort.none);
+      expect(config.temperature).toBe(0.7);
+      expect(config.modelKwargs).toMatchObject({ max_completion_tokens: 2048 });
+      expect(config.modelKwargs).not.toHaveProperty('max_output_tokens');
+    });
+
+    it('keeps Responses routing when reasoning parameters are dropped', () => {
+      expect(configFor({ dropParams: ['reasoning_effort'] }).useResponsesApi).toBe(true);
+      expect(configFor({ dropParams: ['useResponsesApi'] }).useResponsesApi).not.toBe(true);
+    });
+
+    it('preserves other requested includes while removing reasoning-incompatible logprobs', () => {
+      expect(
+        configFor({
+          addParams: {
+            include: ['web_search_call.action.sources', 'message.output_text.logprobs'],
+          },
+        }).modelKwargs?.include,
+      ).toEqual(['web_search_call.action.sources', 'reasoning.encrypted_content']);
+    });
+
+    it.each([
+      { modelOptions: { model: `${model}-2026-09-22` } },
+      { modelOptions: { model: 'gpt-4.1' }, addParams: { model } },
+    ])('routes the effective model %j', (overrides) => {
+      expect(configFor(overrides).useResponsesApi).toBe(true);
+    });
+
+    it.each([
+      { baseURL: 'https://gateway.internal/v1' },
+      { endpoint: EModelEndpoint.custom },
+      { useOpenRouter: true },
+      { modelOptions: { model: 'gpt-6-solstice', temperature: 0.7 } },
+      { modelOptions: { model: `openai/${model}`, temperature: 0.7 } },
+    ])('leaves custom routing and sampling alone: %j', (overrides) => {
+      const config = configFor(overrides);
+      expect(config.useResponsesApi).not.toBe(true);
+      expect(config.temperature).toBe(0.7);
+    });
+  });
+
   describe('First-party endpoint declaration', () => {
     /**
      * The agents SDK gates its model-specific request constraints on this flag

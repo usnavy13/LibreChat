@@ -3171,13 +3171,13 @@ export const alternateName = {
 };
 
 /**
- * Models the Assistants endpoints cannot run. GPT-6 Astra serves tool calls only
- * from the Responses API, and the Assistants surface does not route through
- * `getOpenAILLMConfig`, so listing it there would offer a configuration the
+ * Models the Assistants endpoints cannot run. GPT-6 reasoning with tools requires
+ * the Responses API, and the Assistants surface does not route through
+ * `getOpenAILLMConfig`, so listing these models there would offer a configuration the
  * provider rejects. Kept out of `sharedOpenAIModels`, which both Assistants
  * catalogs consume.
  */
-const responsesOnlyOpenAIModels = ['gpt-6-astra'];
+const responsesOnlyOpenAIModels = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'];
 
 const sharedOpenAIModels = [
   'gpt-5.6',
@@ -3328,7 +3328,7 @@ const openAIModels = defaultModels[EModelEndpoint.openAI];
 /**
  * Preserve Azure's fallback default selection when the OpenAI catalog gains
  * Responses-preferred models. Configured Azure deployments supply their own
- * model list, including Astra when deployed.
+ * model list, including GPT-6 models when deployed.
  */
 const nonResponsesOnlyOpenAIModels = openAIModels.filter(
   (model) => !responsesOnlyOpenAIModels.includes(model),

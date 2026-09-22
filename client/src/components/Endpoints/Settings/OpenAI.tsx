@@ -1,9 +1,8 @@
 import { useMemo } from 'react';
-import { getSettingsKeys } from 'librechat-data-provider';
+import { presetSettings, getSettingsKeys, applyModelAwareDefaults } from 'librechat-data-provider';
 import type { SettingDefinition } from 'librechat-data-provider';
 import type { TModelSelectProps } from '~/common';
 import { componentMapping } from '~/components/SidePanel/Parameters/components';
-import { presetSettings } from 'librechat-data-provider';
 
 export default function OpenAISettings({
   conversation,
@@ -16,7 +15,14 @@ export default function OpenAISettings({
       conversation?.endpointType ?? conversation?.endpoint ?? '',
       conversation?.model ?? '',
     );
-    return presetSettings[combinedKey] ?? presetSettings[endpointKey];
+    const settings = presetSettings[combinedKey] ?? presetSettings[endpointKey];
+    if (!settings) {
+      return undefined;
+    }
+    return {
+      col1: applyModelAwareDefaults(settings.col1, endpointKey, conversation?.model ?? undefined),
+      col2: applyModelAwareDefaults(settings.col2, endpointKey, conversation?.model ?? undefined),
+    };
   }, [conversation]);
 
   if (!parameters) {
