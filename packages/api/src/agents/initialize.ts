@@ -29,8 +29,8 @@ import type {
   TUser,
   TurnFileConsumers,
 } from 'librechat-data-provider';
+import type { AppConfig, IMongoFile, FileMethods, FileOwnerScope } from '@librechat/data-schemas';
 import type { GenericTool, LCToolRegistry, ToolMap, LCTool } from '@librechat/agents';
-import type { AppConfig, IMongoFile, FileOwnerScope } from '@librechat/data-schemas';
 import type { Request, Response as ServerResponse } from 'express';
 import type {
   TFileUpdate,
@@ -49,6 +49,12 @@ import type {
   TGetSkillByName,
 } from './skills';
 import type {
+  FileTextDeriver,
+  TurnReadingContext,
+  DirectContentAllocation,
+  TextDerivationPersister,
+} from '~/files/reading';
+import type {
   ServerRequest,
   RequestBody,
   EndpointDbMethods,
@@ -56,7 +62,6 @@ import type {
   InitializeResultBase,
 } from '~/types';
 import type { LCAvailableTools, RequestScopedMCPConnectionStore } from '../mcp/types';
-import type { DirectContentAllocation, TurnReadingContext } from '~/files/reading';
 import type { ContentTraversalLimitError } from '../protection/adapters/nested';
 import type { SkillContentInput } from '../protection/adapters/submissions';
 import type { RepositoryInstructionSource } from '../code/instructions';
@@ -237,13 +242,28 @@ interface TurnReadingSetup {
   endpoint?: string;
   fileConfig?: AppConfig['fileConfig'];
   req?: ServerRequest;
+  deriveText?: FileTextDeriver;
+  persistDerivation?: TextDerivationPersister;
   signal?: AbortSignal;
 }
 
+/** Saves a derivation under the request's file owner, when the host can save one. */
+function bindDerivationPersister(
+  save: InitializeAgentDbMethods['saveFileTextDerivation'],
+  scope: FileOwnerScope | undefined,
+): TextDerivationPersister | undefined {
+  if (save == null || scope == null) {
+    return undefined;
+  }
+  return (update) => save(update, { user: scope.userId, tenantId: scope.tenantId });
+}
+
 /**
- * The automatic policy's reading evidence for one agent's turn, or nothing under classic, so a
- * classic turn runs none of the reading steps. Text fit is judged synchronously, so the
- * tokenizer is loaded first; if it cannot load, counts fall back to the tokenizer's estimate.
+ * The reading evidence for one agent's turn: the automatic policy's, or under classic with a text
+ * deriver a context that only derives text for records the automatic policy marked. Nothing
+ * otherwise, so a classic turn runs none of the reading steps. The automatic policy judges text
+ * fit synchronously, so the tokenizer is loaded first; if it cannot load, counts fall back to
+ * the tokenizer's estimate.
  */
 async function prepareTurnReading({
   routing,
@@ -252,17 +272,22 @@ async function prepareTurnReading({
   endpoint,
   fileConfig,
   req,
+  deriveText,
+  persistDerivation,
   signal,
 }: TurnReadingSetup): Promise<TurnReadingContext | undefined> {
-  if (resolveLLMDeliveryPolicy(routing.endpointConfig) !== 'automatic') {
+  const automatic = resolveLLMDeliveryPolicy(routing.endpointConfig) === 'automatic';
+  if (!automatic && deriveText == null) {
     return undefined;
   }
-  await Tokenizer.initEncoding(READING_TOKEN_ENCODING).catch((error: unknown) => {
-    logger.warn(
-      '[initializeAgent] Tokenizer unavailable; judging text fit with estimated counts',
-      getSafeErrorMetadata(error),
-    );
-  });
+  if (automatic) {
+    await Tokenizer.initEncoding(READING_TOKEN_ENCODING).catch((error: unknown) => {
+      logger.warn(
+        '[initializeAgent] Tokenizer unavailable; judging text fit with estimated counts',
+        getSafeErrorMetadata(error),
+      );
+    });
+  }
   return buildTurnReadingContext({
     routing,
     provider,
@@ -273,6 +298,8 @@ async function prepareTurnReading({
       endpoint,
     }),
     countTokens: (text) => Tokenizer.getTokenCount(text, READING_TOKEN_ENCODING),
+    deriveText,
+    persistDerivation,
     signal,
   });
 }
@@ -1119,6 +1146,12 @@ export interface InitializeAgentParams {
    * meta user messages before the LLM call.
    */
   manualSkills?: string[];
+  /**
+   * Derives an attachment's text from its retained original on this request. With it, a record
+   * the automatic policy marked for later extraction can still be read as text, under either
+   * policy; without it the turn reads only text stored at upload.
+   */
+  deriveText?: FileTextDeriver;
 }
 
 /**
@@ -1224,6 +1257,11 @@ export interface InitializeAgentDbMethods extends EndpointDbMethods {
   loadCodeApiKey?: TLoadCodeApiKey;
   /** Optional: persist file metadata updates after provisioning */
   updateFile?: (data: TFileUpdate) => Promise<unknown>;
+  /**
+   * Optional: saves text derived on this turn onto a record whose upload deferred extraction.
+   * Without it derived text stays on the turn copies and is derived again on a later turn.
+   */
+  saveFileTextDerivation?: FileMethods['saveFileTextDerivation'];
   /** Resolves a role by name for the tool role-permission grants. Optional: when
    *  absent the role half of the web-search gate is not applied. */
   getRoleByName?: CheckAccessParams['getRoleByName'];
@@ -1635,6 +1673,8 @@ export async function initializeAgent(
     endpoint: agent.endpoint ?? undefined,
     fileConfig: appConfig?.fileConfig,
     req: params.req,
+    deriveText: params.deriveText,
+    persistDerivation: bindDerivationPersister(db.saveFileTextDerivation, requestFileOwnerScope),
     signal: params.signal,
   });
   if (readingContext != null) {
@@ -1966,9 +2006,11 @@ export async function initializeAgent(
     /* Only filter survivors are allocated: a file the endpoint refuses never spends the
      * request's direct-content allowance, and the reading records it as dropped. */
     if (readingContext != null) {
-      readingContext.recordDropped(
-        selectDroppedRequestFiles(deliveredFiles, currentFiles, admissionFileIds),
-      );
+      if (readingContext.policy === 'automatic') {
+        readingContext.recordDropped(
+          selectDroppedRequestFiles(deliveredFiles, currentFiles, admissionFileIds),
+        );
+      }
       currentFiles = await settleTurnFiles({
         routing: deliveryRouting,
         consumers: fileConsumers,
@@ -2748,10 +2790,13 @@ export async function initializeAgent(
     fileConsumers.executeCode !== finalFileConsumers.executeCode ||
     fileConsumers.fileSearch !== finalFileConsumers.fileSearch;
   Object.assign(fileConsumers, finalFileConsumers);
-  readingContext?.setSearchEvidence({
-    queued: (provisionState?.vectorDBFiles ?? []).map((file) => file.file_id),
-    registered: runtimeToolResources?.[EToolResources.file_search]?.file_ids ?? [],
-  });
+  const automaticReading = readingContext?.policy === 'automatic';
+  if (automaticReading) {
+    readingContext?.setSearchEvidence({
+      queued: (provisionState?.vectorDBFiles ?? []).map((file) => file.file_id),
+      registered: runtimeToolResources?.[EToolResources.file_search]?.file_ids ?? [],
+    });
+  }
   const primedRequestFiles = (primedRequestAttachments ?? []).filter(
     (file): file is TFile => file != null,
   );
@@ -2761,22 +2806,23 @@ export async function initializeAgent(
     consumersChanged
       ? applyTurnDelivery(files, { routing: deliveryRouting, consumers: fileConsumers })
       : files;
-  /* The reading decides the request again whether or not a reader dropped out: search
-   * evidence is known only now, so a file left for a search that never received it moves on.
-   * Request files are the only ones the automatic policy reads, so the other sets take the
-   * settled request copies and keep classic routing for everything else. */
-  const finalRequestAttachments =
-    readingContext != null
-      ? await settleTurnFiles({
-          routing: deliveryRouting,
-          consumers: fileConsumers,
-          files: primedRequestFiles,
-          allocation: requestAllocation<TFile>(),
-          signal: params.signal,
-        })
-      : redeliver(primedRequestFiles);
+  /* The automatic reading decides the request again whether or not a reader dropped out:
+   * search evidence is known only now, so a file left for a search that never received it moves
+   * on. A derive-only classic reading settles again only when a reader dropped out, since only
+   * then can a marked record newly need text. Request files are the only ones the reading
+   * settles, so the other sets take the settled request copies and keep classic routing. */
+  const settlesFinalRequest = automaticReading || (readingContext != null && consumersChanged);
+  const finalRequestAttachments = settlesFinalRequest
+    ? await settleTurnFiles({
+        routing: deliveryRouting,
+        consumers: fileConsumers,
+        files: primedRequestFiles,
+        allocation: requestAllocation<TFile>(),
+        signal: params.signal,
+      })
+    : redeliver(primedRequestFiles);
   const requestAttachments = toMongoFiles(finalRequestAttachments);
-  const readingChanged = readingContext != null && finalRequestAttachments !== primedRequestFiles;
+  const readingChanged = settlesFinalRequest && finalRequestAttachments !== primedRequestFiles;
   const settledRequestCopies = new Map(
     readingChanged ? requestAttachments.map((file) => [file.file_id, file] as const) : [],
   );

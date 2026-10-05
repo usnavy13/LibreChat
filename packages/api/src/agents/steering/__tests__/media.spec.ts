@@ -1,10 +1,12 @@
 import { FileContext, resolveTurnLLMDeliveryPath } from 'librechat-data-provider';
 import type { AppConfig, IMongoFile } from '@librechat/data-schemas';
 import type { SteerMediaClient, SteerReadingAgent } from '../media';
+import type { FileTextDeriver } from '~/files/reading';
 import type { SteerFileFetcher } from '../request';
 import type { ServerRequest } from '~/types';
 import { buildSteerMedia, collectSteerStampTargets, stampSteerPartMedia } from '../media';
 import { applyTurnDelivery, resolveTurnDeliveryRouting } from '../../files/delivery';
+import { buildTurnReadingContext, prepareTurnFiles } from '~/files/reading';
 import { AttachmentObjectNotFoundError } from '~/files/encode/utils';
 import { extractFileContext } from '~/files/context';
 
@@ -41,6 +43,8 @@ function createClient({
 }
 
 const user = { id: 'user-1' };
+/** A stored record carrying only the fields a test reads. */
+const asStoredFile = (fields: Partial<IMongoFile>): IMongoFile => fields as IMongoFile;
 const imagePart = {
   type: 'image_url',
   image_url: { url: 'data:image/png;base64,abc', detail: 'auto' },
@@ -171,6 +175,33 @@ describe('buildSteerMedia', () => {
       executeCode: false,
       fileSearch: false,
     });
+  });
+
+  it('checks and encodes the copies a host that derives text prepares', async () => {
+    const storedXlsx = { file_id: 'xlsx', type: 'text/csv', llmDeliveryPath: 'none' };
+    const preparedXlsx = { ...storedXlsx, llmDeliveryPath: 'text', text: 'derived' };
+    const getFiles: SteerFileFetcher = jest.fn(async () => [asStoredFile(storedXlsx)]);
+    const client = createClient();
+    const prepareTurnAttachments = jest.fn(async () => [asStoredFile(preparedXlsx)]);
+    const assertFilesAllowed = jest.fn();
+
+    await buildSteerMedia({
+      client: { ...client, prepareTurnAttachments },
+      user,
+      item: steerItem([{ file_id: 'xlsx' }]),
+      getFiles,
+      assertFilesAllowed,
+    });
+
+    const consumers = { executeCode: false, fileSearch: false };
+    expect(prepareTurnAttachments).toHaveBeenCalledWith([storedXlsx], consumers);
+    expect(client.resolveTurnAttachments).not.toHaveBeenCalled();
+    expect(assertFilesAllowed).toHaveBeenCalledWith([preparedXlsx]);
+    expect(client.processAttachments).toHaveBeenCalledWith(
+      expect.anything(),
+      [preparedXlsx],
+      consumers,
+    );
   });
 
   it('prepends extracted file context to the steer text', async () => {
@@ -615,6 +646,76 @@ describe('buildSteerMedia file reading', () => {
 
     expect(textOf(result)).toContain('SENTINEL-7F3A');
     expect(textOf(result)).not.toContain(holdNote);
+  });
+
+  describe('a workbook whose upload deferred extraction', () => {
+    const deferred = asStoredFile({
+      ...workbook,
+      text: undefined,
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+    });
+    const derivedSentinel = 'DERIVED-7F3A';
+
+    /** An automatic run without Run Code whose reading derives text through the given stub. */
+    function deferredRun(deriveText: FileTextDeriver) {
+      const deliveryRouting = routingFor({
+        endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } },
+      });
+      const context = buildTurnReadingContext({
+        routing: deliveryRouting,
+        provider: 'openAI',
+        fileTokenLimit: 100_000,
+        configuredFileSizeLimit: undefined,
+        countTokens: (text) => text.length,
+        deriveText,
+      });
+      deliveryRouting.reading = context;
+      return createRoutedClient({
+        deliveryRouting,
+        fileConsumers: { executeCode: false, fileSearch: true },
+      });
+    }
+    const steerDeferred = (client: SteerMediaClient) =>
+      buildSteerMedia({
+        client,
+        user,
+        item: steerItem([{ file_id: 'xlsx' }], steerText),
+        getFiles: jest.fn(async () => [deferred]),
+      });
+    const deriver = () =>
+      jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(async () => ({
+        status: 'derived',
+        text: derivedSentinel,
+        textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 1 },
+      }));
+
+    it('steers with the text the host derives for it', async () => {
+      const deriveText = deriver();
+      const client = deferredRun(deriveText);
+      const routing = client.options?.agent?.deliveryRouting;
+
+      const result = await steerDeferred({
+        ...client,
+        prepareTurnAttachments: (files, consumers) =>
+          prepareTurnFiles({ routing, files, consumers }),
+      });
+
+      expect(deriveText).toHaveBeenCalledTimes(1);
+      expect(textOf(result)).toContain(derivedSentinel);
+      expect(textOf(result)).not.toContain(holdNote);
+      expect(deferred.text).toBeUndefined();
+    });
+
+    it('leaves it out of the steer when the host cannot prepare it', async () => {
+      const deriveText = deriver();
+
+      const result = await steerDeferred(deferredRun(deriveText));
+
+      expect(deriveText).not.toHaveBeenCalled();
+      expect(textOf(result)).not.toContain(derivedSentinel);
+      expect(result?.content).toEqual([{ type: 'text', text: steerText }]);
+    });
   });
 
   it('steers exactly as before under classic routing, even with Run Code loaded', async () => {

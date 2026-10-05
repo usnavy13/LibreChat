@@ -5,10 +5,15 @@ import type {
   DirectContentLimits,
   TurnDeliveryRouting,
 } from 'librechat-data-provider';
-import type { TurnReadingContext, TurnReadingFile, DerivedText } from './turn';
+import type { TurnReadingFile, TurnReader } from './turn';
 import type { AllocationScope } from './diagnostics';
+import {
+  withDerivedText,
+  needsDerivedText,
+  deriveRequestedText,
+  getTurnReadingContext,
+} from './turn';
 import { applyTurnDelivery } from '~/agents/files/delivery';
-import { getTurnReadingContext } from './turn';
 import { logAllocation } from './diagnostics';
 
 /** First-fit allocation of the request's direct model content against the turn's limits. */
@@ -37,52 +42,32 @@ export interface SettleTurnFilesParams<T extends TurnReadingFile> {
   signal?: AbortSignal;
 }
 
-interface SettleStep {
-  routing: TurnDeliveryRouting;
-  consumers?: TurnFileConsumers;
-  context: TurnReadingContext;
+interface SettleStep extends TurnReader {
   signal?: AbortSignal;
 }
-
-type DerivedTextSuccess = Extract<DerivedText, { status: 'derived' }>;
 
 const route = <T extends TurnReadingFile>(files: T[], { routing, consumers }: SettleStep): T[] =>
   applyTurnDelivery(files, { routing, consumers });
 
-const withDerivedText = <T extends TurnReadingFile>(file: T, derived: DerivedTextSuccess): T => ({
-  ...file,
-  text: derived.text,
-  metadata: { ...file.metadata, textDerivation: derived.textDerivation },
-});
-
 /**
  * Derives text for every copy whose reading needs it. Failures are recorded on the context, so the
  * next decision passes text over for the rest of the request. Returns null when no copy needed text.
+ * A derive-only classic context decides only the records the automatic policy marked.
  */
 async function deriveNeededText<T extends TurnReadingFile>(
   files: T[],
   step: SettleStep,
 ): Promise<T[] | null> {
-  const { routing, consumers, context, signal } = step;
-  const needed = files.filter((file) => decideFileReading({ routing, file, consumers }).needsText);
+  const { context, signal } = step;
+  const needed = files.filter((file) => needsDerivedText(file, step));
   if (needed.length === 0) {
     return null;
   }
   signal?.throwIfAborted();
-  const outcomes = await Promise.all(
-    needed.map(async (file) => ({
-      fileId: file.file_id,
-      result: await context.derive(file, signal),
-    })),
+  const texts = await deriveRequestedText(
+    needed.map((file) => ({ file, contexts: [context] as const })),
+    signal,
   );
-  const texts = new Map<string, DerivedTextSuccess>();
-  for (const { fileId, result } of outcomes) {
-    if (result.status === 'derived') {
-      texts.set(fileId, result);
-      continue;
-    }
-    context.markTextFailed(fileId);
-  }
   if (texts.size === 0) {
     return files;
   }

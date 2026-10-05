@@ -9,6 +9,10 @@ import { buildTurnReadingContext } from './turn';
 
 type EndpointFileConfigInput = NonNullable<TFileConfig['endpoints']>[string];
 
+/** The module object settle reads through, so a spy on it sees every decision settle asks for. */
+const dataProvider =
+  jest.requireActual<typeof import('librechat-data-provider')>('librechat-data-provider');
+
 const MB = 1024 * 1024;
 const PDF = 'application/pdf';
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -181,6 +185,40 @@ describe('settleTurnFiles', () => {
       expect(marked).toMatchObject({ llmDeliveryPath: 'text', text: derivedText.text });
       expect(plain.text).toBeUndefined();
       expect(deriveText).toHaveBeenCalledTimes(1);
+    });
+
+    it('never decides or derives an unmarked record in a classic derive-only context', async () => {
+      const { routing, context } = setup({
+        endpointConfig: {},
+        deriveText: async () => derivedText,
+      });
+      const deriveSpy = jest.spyOn(context, 'derive');
+      const decideSpy = jest.spyOn(dataProvider, 'decideFileReading');
+      const unmarked = [
+        attachment({ file_id: 'pdf' }),
+        attachment({ file_id: 'plain-xlsx', type: XLSX, llmDeliveryPath: 'none' }),
+        attachment({ file_id: 'legacy-xlsx', type: XLSX, llmDeliveryPath: undefined }),
+      ];
+      try {
+        const settled = await settleTurnFiles({
+          routing,
+          consumers: noReader,
+          files: [...unmarked, deferredWorkbook],
+        });
+
+        expect(deriveSpy).toHaveBeenCalledTimes(1);
+        expect(deriveSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ file_id: 'xlsx' }),
+          undefined,
+        );
+        expect(decideSpy.mock.calls.map(([input]) => input.file.file_id)).toEqual(['xlsx']);
+        expect(settled.slice(0, unmarked.length)).toEqual(
+          applyTurnDelivery(unmarked, { routing, consumers: noReader }),
+        );
+        expect(settled[unmarked.length]).toMatchObject({ file_id: 'xlsx', text: derivedText.text });
+      } finally {
+        decideSpy.mockRestore();
+      }
     });
 
     it('stops before deriving once the request is aborted', async () => {

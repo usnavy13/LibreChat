@@ -1,6 +1,7 @@
 import { FileContext, FileSources, ImageDetail } from 'librechat-data-provider';
 import type { TFile } from 'librechat-data-provider';
 import type { RunFileEncodingAgent, RunFileMessageEncoderDeps } from './encode';
+import type { FileTextDeriver } from '~/files/reading';
 import type { ServerRequest } from '~/types';
 import { AgentAttachmentLimitError, AgentAttachmentPolicyError } from '../attachments';
 import { buildTurnReadingContext } from '~/files/reading';
@@ -579,6 +580,68 @@ describe('createRunFileMessageEncoder', () => {
 
       await expect(harness.encode([csv], 'child')).resolves.toEqual([]);
       expect(harness.extractText).not.toHaveBeenCalled();
+    });
+
+    it('derives the text a file needs inside encode, and validates it without the text', async () => {
+      /* No reader can take the deferred workbook, so its reading needs text. Validation stays
+       * synchronous: the copy is not model-bound until its text exists, so nothing is counted. */
+      const workbook: TFile = {
+        ...pdf,
+        ...attachment,
+        file_id: 'input-xlsx',
+        filename: 'quarterly.xlsx',
+        filepath: '/files/quarterly.xlsx',
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        text: undefined,
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+      };
+      const harness = setup({
+        agents: { child: { provider: 'openAI', fileConsumers: noReader } },
+        fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } },
+      });
+      const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+        async () => ({
+          status: 'derived',
+          text: 'quarter,total\nQ1,42',
+          textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 1 },
+        }),
+      );
+      const child = harness.getAgent('child');
+      const context =
+        child &&
+        buildTurnReadingContext({
+          routing: child.deliveryRouting,
+          provider: 'openAI',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+          deriveText,
+        });
+      if (child == null || context == null) {
+        throw new Error('expected an automatic reading context');
+      }
+      child.deliveryRouting.reading = context;
+
+      expect(() => harness.validate([workbook], 'child')).not.toThrow();
+      expect(deriveText).not.toHaveBeenCalled();
+
+      const [message] = await harness.encode([workbook], 'child');
+
+      expect(deriveText).toHaveBeenCalledTimes(1);
+      expect(deriveText).toHaveBeenCalledWith(
+        expect.objectContaining({ file_id: 'input-xlsx' }),
+        undefined,
+      );
+      expect(harness.extractText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [
+            expect.objectContaining({ file_id: 'input-xlsx', text: 'quarter,total\nQ1,42' }),
+          ],
+        }),
+      );
+      expect(message.content).toEqual(expect.stringContaining('Q1,42'));
+      expect(workbook.text).toBeUndefined();
     });
 
     it('reuses the token count the reading judged and marks any truncation', async () => {

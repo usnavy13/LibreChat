@@ -16,6 +16,13 @@ import type {
   TurnFileConsumers,
 } from 'librechat-data-provider';
 import type { AppConfig } from '@librechat/data-schemas';
+import type { TurnReadingFile, TextRequest, TurnReader } from '~/files/reading/turn';
+import {
+  withDerivedText,
+  needsDerivedText,
+  deriveRequestedText,
+  getTurnReadingContext,
+} from '~/files/reading/turn';
 import { collectModelBoundHistoricalFileIdState } from '~/middleware/modelBoundContent';
 
 /** The app config a turn's attachment routing reads. */
@@ -155,29 +162,18 @@ export function applyCheckpointDelivery<T extends TurnDeliveryFile>(
   });
 }
 
-/**
- * A primary agent's tool route cannot decide whether a handoff receives text. Keep
- * owner-hydrated candidates until each receiver resolves them, then add only text absent
- * from the shared prompt to its scoped context. The existing scoped-context pipeline owns
- * endpoint filtering, aggregate admission, inspection and extraction for these copies.
- */
-export function resolveScopedTurnAttachments<T extends TurnDeliveryFile & { file_id: string }>({
-  agents,
-  sharedConversationAgentIds,
-  resendFiles,
-  messages,
-  historicalFiles,
-  requestAttachments,
-  sharedRunAttachmentIds,
-  attachmentsByAgentId,
-}: {
-  agents: readonly {
-    agentId: string;
-    agent: {
-      deliveryRouting?: TurnDeliveryRouting;
-      fileConsumers?: TurnFileConsumers;
-    };
-  }[];
+/** A receiver of the conversation's scoped attachments, by the routing its turn settled. */
+export interface ScopedTurnAgent {
+  agentId: string;
+  agent: {
+    deliveryRouting?: TurnDeliveryRouting;
+    fileConsumers?: TurnFileConsumers;
+  };
+}
+
+/** The inputs each handoff receiver's scoped attachment context is resolved from. */
+export interface ScopedTurnAttachmentParams<T extends TurnDeliveryFile & { file_id: string }> {
+  agents: readonly ScopedTurnAgent[];
   /** Only the primary/handoff graph shares root conversation files. */
   sharedConversationAgentIds: readonly string[];
   resendFiles?: boolean;
@@ -186,23 +182,170 @@ export function resolveScopedTurnAttachments<T extends TurnDeliveryFile & { file
   requestAttachments: readonly T[];
   sharedRunAttachmentIds: ReadonlySet<string>;
   attachmentsByAgentId?: Map<string, T[]> | Record<string, T[]>;
-}): Map<string, T[]> {
+  /**
+   * The candidates {@link prepareScopedTurnCandidates} already collected from these same inputs,
+   * so the retained messages are not walked a second time.
+   */
+  candidates?: ReadonlyMap<string, T>;
+}
+
+/** The inputs that pick the candidates, with the narrowing ones optional. */
+type ScopedCandidateInputs<T extends TurnDeliveryFile & { file_id: string }> = Pick<
+  ScopedTurnAttachmentParams<T>,
+  'resendFiles' | 'historicalFiles' | 'requestAttachments'
+> &
+  Partial<Pick<ScopedTurnAttachmentParams<T>, 'messages' | 'sharedRunAttachmentIds'>>;
+
+/**
+ * The scoped attachment inputs whose text {@link prepareScopedTurnCandidates} derives. Without the
+ * narrowing inputs every receiver with a reading context decides every historical and request file.
+ */
+export type ScopedTurnCandidateParams<T extends TurnReadingFile> = ScopedCandidateInputs<T> &
+  Pick<ScopedTurnAttachmentParams<T>, 'agents' | 'attachmentsByAgentId'> &
+  Partial<Pick<ScopedTurnAttachmentParams<T>, 'sharedConversationAgentIds'>> & {
+    signal?: AbortSignal;
+  };
+
+/**
+ * The scoped attachment candidates by file id, as copies carrying the text the receivers derived;
+ * absent when no receiver has a reading context, so none were collected.
+ */
+export interface ScopedTurnCandidates<T extends TurnReadingFile> {
+  candidates?: ReadonlyMap<string, T>;
+}
+
+const scopedAttachmentsOf = <T>(
+  attachmentsByAgentId: Map<string, T[]> | Record<string, T[]> | undefined,
+  agentId: string,
+): T[] =>
+  attachmentsByAgentId instanceof Map
+    ? (attachmentsByAgentId.get(agentId) ?? [])
+    : (attachmentsByAgentId?.[agentId] ?? []);
+
+/** Historical files still model-bound in the retained messages; every one when none are given. */
+function selectHistoricalFileIds<T extends TurnDeliveryFile & { file_id: string }>({
+  resendFiles,
+  messages,
+  historicalFiles,
+}: ScopedCandidateInputs<T>): Iterable<string> {
+  if (resendFiles === false) {
+    return [];
+  }
+  if (messages == null) {
+    return historicalFiles?.keys() ?? [];
+  }
+  return collectModelBoundHistoricalFileIdState(messages).fileIds;
+}
+
+/** Hydrated history and request files no shared prompt carries, once each by file id. */
+function collectScopedCandidates<T extends TurnDeliveryFile & { file_id: string }>(
+  inputs: ScopedCandidateInputs<T>,
+): Map<string, T> {
+  const { historicalFiles, requestAttachments, sharedRunAttachmentIds } = inputs;
+  const isShared = (fileId: string): boolean => sharedRunAttachmentIds?.has(fileId) === true;
   const candidates = new Map<string, T>();
-  for (const fileId of collectModelBoundHistoricalFileIdState(resendFiles === false ? [] : messages)
-    .fileIds) {
+  for (const fileId of selectHistoricalFileIds(inputs)) {
     const file = historicalFiles?.get(fileId);
-    if (file && !sharedRunAttachmentIds.has(fileId)) candidates.set(fileId, file);
+    if (file && !isShared(fileId)) candidates.set(fileId, file);
   }
   for (const file of requestAttachments) {
-    if (!sharedRunAttachmentIds.has(file.file_id)) candidates.set(file.file_id, file);
+    if (!isShared(file.file_id)) candidates.set(file.file_id, file);
   }
+  return candidates;
+}
+
+/** A receiver that can derive text, with the files its own scoped context already carries. */
+interface ScopedTurnReader extends TurnReader {
+  scopedFileIds: ReadonlySet<string>;
+}
+
+function selectScopedReaders<T extends TurnReadingFile>({
+  agents,
+  sharedConversationAgentIds,
+  attachmentsByAgentId,
+}: ScopedTurnCandidateParams<T>): ScopedTurnReader[] {
+  const sharedAgents = sharedConversationAgentIds && new Set(sharedConversationAgentIds);
+  return agents.flatMap(({ agentId, agent }) => {
+    const routing = agent.deliveryRouting;
+    const context = getTurnReadingContext(routing);
+    if (routing == null || context == null || sharedAgents?.has(agentId) === false) {
+      return [];
+    }
+    const scoped = scopedAttachmentsOf(attachmentsByAgentId, agentId);
+    return [
+      {
+        routing,
+        consumers: agent.fileConsumers,
+        context,
+        scopedFileIds: new Set(scoped.map((file) => file.file_id)),
+      },
+    ];
+  });
+}
+
+/** The candidate with every receiver whose decision needs its text, or nothing when none does. */
+function requestScopedText<T extends TurnReadingFile>(
+  file: T,
+  readers: readonly ScopedTurnReader[],
+): TextRequest<T>[] {
+  const [first, ...rest] = readers
+    .filter((reader) => !reader.scopedFileIds.has(file.file_id) && needsDerivedText(file, reader))
+    .map(({ context }) => context);
+  return first == null ? [] : [{ file, contexts: [first, ...rest] }];
+}
+
+/**
+ * Derives, before handoff receivers resolve their scoped context, the text a receiver's reading
+ * needs. Each candidate is decided with each receiver's routing and readers, and its text is
+ * derived once, through the first receiver that needs it, then saved where the record allows.
+ * Returns the candidates, as copies carrying the text, for {@link resolveScopedTurnAttachments}
+ * to resolve synchronously without collecting them again; nothing when no receiver has a
+ * reading context.
+ */
+export async function prepareScopedTurnCandidates<T extends TurnReadingFile>(
+  params: ScopedTurnCandidateParams<T>,
+): Promise<ScopedTurnCandidates<T>> {
+  const { signal } = params;
+  const readers = selectScopedReaders(params);
+  if (readers.length === 0) {
+    return {};
+  }
+  const candidates = collectScopedCandidates(params);
+  const requests = [...candidates.values()].flatMap((file) => requestScopedText(file, readers));
+  if (requests.length === 0) {
+    return { candidates };
+  }
+  signal?.throwIfAborted();
+  const texts = await deriveRequestedText(requests, signal);
+  const derivers = new Set(requests.map(({ contexts }) => contexts[0]));
+  await Promise.all([...derivers].map((context) => context.flush()));
+  if (texts.size === 0) {
+    return { candidates };
+  }
+  for (const [fileId, derived] of texts) {
+    const file = candidates.get(fileId);
+    if (file != null) {
+      candidates.set(fileId, withDerivedText(file, derived));
+    }
+  }
+  return { candidates };
+}
+
+/**
+ * A primary agent's tool route cannot decide whether a handoff receives text. Keep
+ * owner-hydrated candidates until each receiver resolves them, then add only text absent
+ * from the shared prompt to its scoped context. The existing scoped-context pipeline owns
+ * endpoint filtering, aggregate admission, inspection and extraction for these copies.
+ */
+export function resolveScopedTurnAttachments<T extends TurnDeliveryFile & { file_id: string }>(
+  params: ScopedTurnAttachmentParams<T>,
+): Map<string, T[]> {
+  const { agents, sharedConversationAgentIds, attachmentsByAgentId } = params;
+  const candidates = params.candidates ?? collectScopedCandidates(params);
   const sharedAgents = new Set(sharedConversationAgentIds);
   const result = new Map<string, T[]>();
   for (const { agentId, agent } of agents) {
-    const scoped =
-      attachmentsByAgentId instanceof Map
-        ? (attachmentsByAgentId.get(agentId) ?? [])
-        : (attachmentsByAgentId?.[agentId] ?? []);
+    const scoped = scopedAttachmentsOf(attachmentsByAgentId, agentId);
     const files = new Map(scoped.map((file) => [file.file_id, file]));
     for (const [fileId, file] of sharedAgents.has(agentId) ? candidates : []) {
       if (files.has(fileId)) continue;

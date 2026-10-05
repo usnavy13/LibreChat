@@ -7,6 +7,7 @@ jest.mock('@librechat/data-schemas', () => ({
 }));
 
 jest.mock('@librechat/agents', () => ({
+  ...jest.requireActual('@librechat/agents'),
   Providers: {
     XAI: 'xai',
     DEEPSEEK: 'deepseek',
@@ -120,7 +121,16 @@ jest.mock('@librechat/api', () => {
       return UPLOAD_EXTRACTED_TEXT_PLANS.documentParser;
     },
   );
+  const actualApi = jest.requireActual('@librechat/api');
   return {
+    resolveUploadReading: jest.fn(actualApi.resolveUploadReading),
+    resolveUploadCodePossible: jest.fn(actualApi.resolveUploadCodePossible),
+    orderToolsForReading: jest.fn(actualApi.orderToolsForReading),
+    acquireUploadText: jest.fn(actualApi.acquireUploadText),
+    getUploadReadingMetadata: jest.fn(actualApi.getUploadReadingMetadata),
+    logUploadReading: jest.fn(actualApi.logUploadReading),
+    ExtractorUnavailableError: actualApi.ExtractorUnavailableError,
+    UninspectableFileError: actualApi.UninspectableFileError,
     sanitizeFilename: jest.fn((n) => n),
     /** Grants both; these specs vary the capability set, not the role. */
     resolveToolRoleGrants: jest.fn(async () => ({ runCode: true, fileSearch: true })),
@@ -3375,5 +3385,291 @@ describe('fallback text for uploads left to tools', () => {
       expect.objectContaining({ llmDeliveryPath: 'none', text: 'region,total' }),
       true,
     );
+  });
+});
+
+describe('automatic reading at upload', () => {
+  const { logUploadReading } = require('@librechat/api');
+  const AUTOMATIC_ENDPOINT = 'Custom Provider';
+  const blockExtractedText = {
+    files: { pii: { uninspectable: 'block', fields: ['extracted_text'] } },
+  };
+  let parseDocument;
+  let storeFile;
+
+  const useEndpointConfig = (endpointConfig) =>
+    mergeFileConfig.mockReturnValue({
+      ...makeFileConfig(),
+      endpoints: { [AUTOMATIC_ENDPOINT]: endpointConfig },
+    });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockRes.status.mockReturnThis();
+    mockRes.json.mockReturnValue({});
+    checkCapability.mockResolvedValue(true);
+    inspectContent.mockReturnValue(null);
+    useEndpointConfig({ llmDeliveryPolicy: 'automatic' });
+    parseDocument = jest.fn().mockResolvedValue({ text: 'region,total', bytes: 12 });
+    storeFile = jest.fn().mockResolvedValue({
+      bytes: 42,
+      filename: 'upload.bin',
+      filepath: '/uploads/upload.bin',
+    });
+    getStrategyFunctions.mockImplementation((source) => ({
+      handleFileUpload: source === FileSources.document_parser ? parseDocument : storeFile,
+    }));
+  });
+
+  const upload = ({ mimetype = XLSX_MIME, filters, metadata, ocrConfig } = {}) => {
+    const req = makeReq({ mimetype, filters, ocrConfig });
+    req.body.endpoint = EModelEndpoint.agents;
+    return processAgentFileUpload({
+      req,
+      res: mockRes,
+      metadata: {
+        message_file: 'true',
+        file_id: 'file-auto',
+        effectiveEndpoint: AUTOMATIC_ENDPOINT,
+        ...metadata,
+      },
+    });
+  };
+
+  const storedRecord = () => {
+    expect(db.createFile).toHaveBeenCalledTimes(1);
+    return db.createFile.mock.calls[0][0];
+  };
+
+  test('leaves an ephemeral workbook to Run Code without parsing it', async () => {
+    const { resolveUploadFallbackText } = require('@librechat/api');
+
+    await upload();
+
+    const record = storedRecord();
+    expect(parseDocument).not.toHaveBeenCalled();
+    expect(storeFile).toHaveBeenCalledTimes(1);
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.text).toBeUndefined();
+    expect(record.metadata).toEqual({
+      destinationChosen: false,
+      textDerivation: { outcome: 'deferred', at: expect.any(Number) },
+    });
+    expect(checkCapability).toHaveBeenCalledWith(expect.anything(), AgentCapabilities.execute_code);
+    expect(resolveUploadFallbackText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveryPath: 'none',
+        reading: expect.objectContaining({ codePreferred: true }),
+        textDerivation: undefined,
+      }),
+    );
+    expect(logUploadReading).toHaveBeenCalledTimes(1);
+    expect(logUploadReading).toHaveBeenCalledWith(
+      'file-auto',
+      expect.objectContaining({ policy: 'automatic', codePreferred: true }),
+      undefined,
+    );
+  });
+
+  test('defers a workbook for a saved agent whose narrowed tools include Run Code', async () => {
+    const { orderToolsForReading } = require('@librechat/api');
+    await upload({
+      metadata: {
+        agent_id: 'agent-abc',
+        agentTools: [EToolResources.file_search, EToolResources.execute_code],
+      },
+    });
+
+    const record = storedRecord();
+    expect(parseDocument).not.toHaveBeenCalled();
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.metadata.textDerivation).toEqual({
+      outcome: 'deferred',
+      at: expect.any(Number),
+    });
+    expect(orderToolsForReading).toHaveLastReturnedWith([
+      EToolResources.execute_code,
+      EToolResources.file_search,
+    ]);
+    expect(uploadVectors).not.toHaveBeenCalled();
+    expect(record.embedded).toBeFalsy();
+    expect(db.addAgentResourceFile).not.toHaveBeenCalled();
+  });
+
+  test('defers a CSV left to Run Code without reading it', async () => {
+    const { parseText } = require('@librechat/api');
+
+    await upload({ mimetype: 'text/csv' });
+
+    const record = storedRecord();
+    expect(parseText).not.toHaveBeenCalled();
+    expect(parseDocument).not.toHaveBeenCalled();
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.text).toBeUndefined();
+    expect(record.metadata).toEqual({
+      destinationChosen: false,
+      textDerivation: { outcome: 'deferred', at: expect.any(Number) },
+    });
+  });
+
+  test('keeps a zip on its recoverability route with no marker', async () => {
+    await upload({ mimetype: 'application/zip' });
+
+    const record = storedRecord();
+    expect(parseDocument).not.toHaveBeenCalled();
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.metadata).toEqual({ destinationChosen: false });
+  });
+
+  test('defers a document whose configured OCR capability is off, for a built-in reader later', async () => {
+    mergeFileConfig.mockReturnValue({
+      ...makeFileConfig({ ocrSupportedMimeTypes: [DOCX_MIME] }),
+      endpoints: { [AUTOMATIC_ENDPOINT]: { llmDeliveryPolicy: 'automatic' } },
+    });
+    checkCapability.mockImplementation(
+      async (_req, capability) => capability !== AgentCapabilities.ocr,
+    );
+
+    await upload({ mimetype: DOCX_MIME, ocrConfig: { strategy: FileSources.mistral_ocr } });
+
+    const record = storedRecord();
+    expect(checkCapability).toHaveBeenCalledWith(expect.anything(), AgentCapabilities.ocr);
+    expect(parseDocument).not.toHaveBeenCalled();
+    expect(storeFile).toHaveBeenCalledTimes(1);
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.text).toBeUndefined();
+    expect(record.metadata.textDerivation).toEqual({
+      outcome: 'deferred',
+      extractor: 'configured',
+      reason: 'extractor_unavailable',
+      at: expect.any(Number),
+    });
+  });
+
+  test.each([
+    [
+      'the Run Code capability is off',
+      () =>
+        checkCapability.mockImplementation(
+          async (_req, capability) => capability !== AgentCapabilities.execute_code,
+        ),
+      {},
+    ],
+    [
+      'the saved agent has no Run Code',
+      () => {},
+      { metadata: { agent_id: 'agent-abc', agentTools: [EToolResources.file_search] } },
+    ],
+    [
+      'an inspection policy relies on the extracted text',
+      () => {},
+      { filters: blockExtractedText },
+    ],
+    [
+      'the request names a tool resource',
+      () => {},
+      { metadata: { tool_resource: EToolResources.context } },
+    ],
+    [
+      'the upload is permanent',
+      () => {},
+      { metadata: { agent_id: 'agent-abc', message_file: undefined } },
+    ],
+    ['the endpoint stays classic', () => useEndpointConfig({}), {}],
+  ])('extracts the workbook at upload when %s', async (_label, arrange, options) => {
+    arrange();
+
+    await upload(options);
+
+    const record = storedRecord();
+    expect(parseDocument).toHaveBeenCalledTimes(1);
+    expect(record.llmDeliveryPath).toBe('text');
+    expect(record.text).toBe('region,total');
+    expect(record.metadata.textDerivation).toBeUndefined();
+    expect(logUploadReading).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps a document whose parser fails unrecognized, deferred, as the original alone', async () => {
+    const { resolveUploadFallbackText } = require('@librechat/api');
+    parseDocument.mockRejectedValue(new Error('Document parser crashed'));
+
+    await upload({ mimetype: DOCX_MIME });
+
+    const record = storedRecord();
+    expect(parseDocument).toHaveBeenCalledTimes(1);
+    expect(storeFile).toHaveBeenCalledWith(expect.objectContaining({ file_id: 'file-auto' }));
+    expect(record.llmDeliveryPath).toBe('none');
+    expect(record.text).toBeUndefined();
+    expect(record.metadata).toEqual({
+      destinationChosen: false,
+      textDerivation: { outcome: 'deferred', reason: 'parser', at: expect.any(Number) },
+    });
+    expect(resolveUploadFallbackText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveryPath: 'none',
+        textDerivation: record.metadata.textDerivation,
+      }),
+    );
+  });
+
+  test('keeps a document whose parser names its failure, marked failed', async () => {
+    parseDocument.mockRejectedValue(new Error('No text found in document'));
+
+    await upload({ mimetype: DOCX_MIME });
+
+    expect(storedRecord().metadata.textDerivation).toEqual({
+      outcome: 'failed',
+      extractor: 'document_parser',
+      reason: 'empty',
+      at: expect.any(Number),
+    });
+  });
+
+  test('still fails the upload when storage fails after a kept original', async () => {
+    parseDocument.mockRejectedValue(new Error('Document parser crashed'));
+    storeFile.mockRejectedValue(new Error('storage unavailable'));
+
+    await expect(upload({ mimetype: DOCX_MIME })).rejects.toThrow('storage unavailable');
+    expect(db.createFile).not.toHaveBeenCalled();
+  });
+
+  test('still answers a content-policy finding in extracted text with a 400', async () => {
+    inspectContent.mockReturnValue({ source: 'file', field: 'extracted_text' });
+
+    await upload({
+      mimetype: DOCX_MIME,
+      filters: {
+        files: {
+          pii: {
+            fields: ['extracted_text'],
+            customPatterns: [{ id: 'region', label: 'region', regex: 'region' }],
+          },
+        },
+      },
+    });
+
+    expect(parseDocument).toHaveBeenCalledTimes(1);
+    expect(mockRes.status).toHaveBeenCalledWith(400);
+    expect(storeFile).not.toHaveBeenCalled();
+    expect(db.createFile).not.toHaveBeenCalled();
+  });
+
+  test('still fails a classic upload whose parser fails', async () => {
+    useEndpointConfig({});
+    parseDocument.mockRejectedValue(new Error('Document parser crashed'));
+
+    await expect(upload({ mimetype: DOCX_MIME })).rejects.toThrow('Document parser crashed');
+    expect(db.createFile).not.toHaveBeenCalled();
+  });
+
+  test('still rejects an upload whose extracted text cannot be inspected', async () => {
+    const { UninspectableFileError } = require('@librechat/api');
+    extractInspectableFileText.mockImplementationOnce(async () => {
+      throw new UninspectableFileError('extracted_text');
+    });
+
+    await expect(upload({ mimetype: DOCX_MIME })).rejects.toBeInstanceOf(UninspectableFileError);
+    expect(storeFile).not.toHaveBeenCalled();
+    expect(db.createFile).not.toHaveBeenCalled();
   });
 });

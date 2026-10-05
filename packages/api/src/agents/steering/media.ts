@@ -17,6 +17,14 @@ import { prependFileContext } from '../client';
 export interface SteerMediaClient {
   /** The turn's view of stored records, which every check and encode below must share. */
   resolveTurnAttachments(files: IMongoFile[], consumers?: TurnFileConsumers): IMongoFile[];
+  /**
+   * The same view after deriving the text its reading needs, when the host can derive it; the
+   * steer then checks and encodes the copies carrying that text.
+   */
+  prepareTurnAttachments?(
+    files: IMongoFile[],
+    consumers?: TurnFileConsumers,
+  ): Promise<IMongoFile[]>;
   addFileContextToMessage(
     message: Record<string, unknown>,
     files: IMongoFile[],
@@ -201,7 +209,8 @@ export async function buildSteerMedia({
   const docsById = new Map(rawDocs.map((file) => [file.file_id, file]));
   const docs = ids.map((id) => docsById.get(id)).filter((doc): doc is IMongoFile => doc != null);
   const { fileConsumers, heldFilenames } = resolveSteerReading(client, docs);
-  const fileDocs = client.resolveTurnAttachments(docs, fileConsumers);
+  const fileDocs = await (client.prepareTurnAttachments?.(docs, fileConsumers) ??
+    client.resolveTurnAttachments(docs, fileConsumers));
   assertFilesAllowed?.(fileDocs);
   return encodeSteerContent({
     client,

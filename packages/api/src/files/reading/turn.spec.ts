@@ -1,9 +1,22 @@
 import { logger } from '@librechat/data-schemas';
 import { FileContext, FileSources } from 'librechat-data-provider';
 import type { TFileConfig, TurnDeliveryRouting } from 'librechat-data-provider';
-import type { BuildTurnReadingContextParams, FileTextDeriver, TurnReadingFile } from './turn';
-import { buildTurnReadingContext, getTurnReadingContext, getTurnTextOptions } from './turn';
+import type {
+  DerivedText,
+  FileTextDeriver,
+  TurnReadingFile,
+  TextDerivationPersister,
+  BuildTurnReadingContextParams,
+} from './turn';
+import {
+  needsDerivedText,
+  getTurnTextOptions,
+  deriveRequestedText,
+  getTurnReadingContext,
+  buildTurnReadingContext,
+} from './turn';
 import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
+import { UninspectableFileError } from '~/protection/files';
 
 type EndpointFileConfigInput = NonNullable<TFileConfig['endpoints']>[string];
 
@@ -400,6 +413,152 @@ describe('derive', () => {
     }
   });
 
+  describe('persistence', () => {
+    const derived: DerivedText = {
+      status: 'derived',
+      text: 'quarter,total\nQ1,42',
+      textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 1 },
+    };
+    const persister = () =>
+      jest.fn<ReturnType<TextDerivationPersister>, Parameters<TextDerivationPersister>>(
+        async () => true,
+      );
+
+    it.each([
+      ['automatic', { llmDeliveryPolicy: 'automatic' as const }],
+      ['classic', {}],
+    ])(
+      'saves text derived for a marked record once, under the %s policy',
+      async (_policy, endpointConfig) => {
+        const persistDerivation = persister();
+        const context = contextFor({
+          routing: routingFor('openAI', endpointConfig),
+          deriveText: async () => derived,
+          persistDerivation,
+        });
+
+        await Promise.all([context.derive(xlsx), context.derive({ ...xlsx })]);
+        await context.flush();
+
+        expect(persistDerivation).toHaveBeenCalledTimes(1);
+        expect(persistDerivation).toHaveBeenCalledWith({
+          file_id: 'xlsx',
+          text: derived.text,
+          textDerivation: derived.textDerivation,
+        });
+      },
+    );
+
+    it('saves a deterministic failure as a marker alone, and nothing it may not keep', async () => {
+      const outcomes: Record<string, DerivedText> = {
+        parser: {
+          status: 'failed',
+          textDerivation: { outcome: 'failed', reason: 'parser' },
+          persist: true,
+        },
+        transient: {
+          status: 'failed',
+          textDerivation: { outcome: 'failed', reason: 'extractor_unavailable' },
+          persist: false,
+        },
+        skipped: { status: 'skipped', reason: 'storage_unavailable' },
+      };
+      const persistDerivation = persister();
+      const context = contextFor({
+        deriveText: async (file) => outcomes[file.file_id],
+        persistDerivation,
+      });
+
+      await Promise.all(
+        Object.keys(outcomes).map((file_id) => context.derive({ ...xlsx, file_id })),
+      );
+      await context.flush();
+
+      expect(persistDerivation).toHaveBeenCalledTimes(1);
+      const [[update]] = persistDerivation.mock.calls;
+      expect(update).toEqual({
+        file_id: 'parser',
+        textDerivation: { outcome: 'failed', reason: 'parser' },
+      });
+      expect(update).not.toHaveProperty('text');
+    });
+
+    it('never saves text derived for a record the automatic policy did not mark', async () => {
+      const persistDerivation = persister();
+      const context = contextFor({ deriveText: async () => derived, persistDerivation });
+      const unmarked = attachment({ file_id: 'pdf' });
+      const settled = {
+        ...xlsx,
+        file_id: 'settled',
+        metadata: { textDerivation: derived.textDerivation },
+      };
+
+      await Promise.all([context.derive(unmarked), context.derive(settled)]);
+      await context.flush();
+
+      expect(persistDerivation).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing until the flush, so a caller saves only files that passed its checks', async () => {
+      const persistDerivation = persister();
+      const context = contextFor({ deriveText: async () => derived, persistDerivation });
+
+      await context.derive(xlsx);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(persistDerivation).not.toHaveBeenCalled();
+
+      await context.flush();
+      expect(persistDerivation).toHaveBeenCalledTimes(1);
+      await context.flush();
+      expect(persistDerivation).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the queued write before the flush settles', async () => {
+      let finishWrite: ((saved: boolean) => void) | undefined;
+      const context = contextFor({
+        deriveText: async () => derived,
+        persistDerivation: () =>
+          new Promise<boolean>((resolve) => {
+            finishWrite = resolve;
+          }),
+      });
+      await context.derive(xlsx);
+
+      let flushed = false;
+      const flushing = context.flush().then(() => {
+        flushed = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finishWrite).toBeDefined();
+      expect(flushed).toBe(false);
+
+      finishWrite?.(true);
+      await flushing;
+      expect(flushed).toBe(true);
+    });
+
+    it('logs a failed write with safe metadata and still settles the flush', async () => {
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => logger);
+      try {
+        const context = contextFor({
+          deriveText: async () => derived,
+          persistDerivation: async () => {
+            throw new Error('mongodb://user:secret@db/files');
+          },
+        });
+
+        await expect(context.derive(xlsx)).resolves.toBe(derived);
+        await expect(context.flush()).resolves.toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          '[readingText] file_id=xlsx outcome=complete persisted=failed',
+          { type: 'Error' },
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+  });
+
   it('flushes only after pending derivations settle', async () => {
     let finish: (() => void) | undefined;
     const context = contextFor({
@@ -421,5 +580,75 @@ describe('derive', () => {
     await flushing;
     expect(flushed).toBe(true);
     await expect(context.flush()).resolves.toBeUndefined();
+  });
+});
+
+describe('deriveRequestedText', () => {
+  const workbook = attachment({
+    file_id: 'xlsx',
+    type: XLSX,
+    llmDeliveryPath: 'none',
+    metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+  });
+
+  it('derives once through the first context that asked and returns the text by file id', async () => {
+    const firstDeriver = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+      async () => ({
+        status: 'derived',
+        text: 'a,b',
+        textDerivation: { outcome: 'complete', extractor: 'document_parser' },
+      }),
+    );
+    const secondDeriver = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>();
+    const first = contextFor({ deriveText: firstDeriver });
+    const second = contextFor({ deriveText: secondDeriver });
+
+    const texts = await deriveRequestedText([{ file: workbook, contexts: [first, second] }]);
+
+    expect(texts.get('xlsx')).toMatchObject({ status: 'derived', text: 'a,b' });
+    expect(firstDeriver).toHaveBeenCalledTimes(1);
+    expect(secondDeriver).not.toHaveBeenCalled();
+    expect(second.judge(workbook).textFailed).toBeUndefined();
+  });
+
+  it('throws the policy error of derived text a content policy refuses', async () => {
+    const error = new UninspectableFileError('extracted_text');
+    const context = contextFor({ deriveText: async () => ({ status: 'blocked', error }) });
+
+    await expect(deriveRequestedText([{ file: workbook, contexts: [context] }])).rejects.toBe(
+      error,
+    );
+  });
+
+  it('marks a file left without text failed on every context that asked', async () => {
+    const first = contextFor({
+      deriveText: async () => ({ status: 'skipped', reason: 'storage_unavailable' }),
+    });
+    const second = contextFor({ routing: routingFor('openAI', {}), deriveText: jest.fn() });
+
+    const texts = await deriveRequestedText([{ file: workbook, contexts: [first, second] }]);
+
+    expect(texts.size).toBe(0);
+    expect(first.judge(workbook).textFailed).toBe(true);
+    expect(second.judge(workbook).textFailed).toBe(true);
+  });
+});
+
+describe('needsDerivedText', () => {
+  it('decides only marked records for a derive-only classic context', () => {
+    const routing = routingFor('openAI', {});
+    const context = contextFor({ routing, deriveText: jest.fn() });
+    routing.reading = context;
+    const consumers = { executeCode: false, fileSearch: false };
+    const marked = attachment({
+      file_id: 'marked',
+      type: XLSX,
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+    });
+    const unmarked = { ...marked, file_id: 'unmarked', metadata: { destinationChosen: false } };
+
+    expect(needsDerivedText(marked, { routing, consumers, context })).toBe(true);
+    expect(needsDerivedText(unmarked, { routing, consumers, context })).toBe(false);
   });
 });

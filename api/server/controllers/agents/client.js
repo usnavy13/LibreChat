@@ -155,6 +155,7 @@ const {
   buildAgentScopedContext,
   buildAgentScopedAttachmentMap,
   resolveScopedTurnAttachments,
+  prepareScopedTurnCandidates,
   buildAgentContextAttachmentsByAgentId,
   buildSkillPrimeContentParts,
   buildInitialToolSessions,
@@ -2477,7 +2478,7 @@ class AgentClient extends BaseClient {
       ...modelBoundRequestAttachments,
     ];
     const sharedRunAttachmentIds = collectFileIds(sharedAttachmentFiles);
-    this.options.agentContextAttachmentsByAgentId = resolveScopedTurnAttachments({
+    const scopedInputs = {
       agents: allAgents,
       sharedConversationAgentIds: [this.options.agent.id, ...(this.agentConfigs?.keys() ?? [])],
       resendFiles: this.options.resendFiles,
@@ -2486,6 +2487,14 @@ class AgentClient extends BaseClient {
       requestAttachments,
       sharedRunAttachmentIds,
       attachmentsByAgentId: this.options.agentContextAttachmentsByAgentId,
+    };
+    const scopedCandidates = await prepareScopedTurnCandidates({
+      ...scopedInputs,
+      signal: this.options.abortController?.signal,
+    });
+    this.options.agentContextAttachmentsByAgentId = resolveScopedTurnAttachments({
+      ...scopedInputs,
+      ...scopedCandidates,
     });
     const scopedAttachmentMap = buildAgentScopedAttachmentMap({
       agentIds: allAgents.map(({ agentId }) => agentId),
@@ -5566,6 +5575,10 @@ class AgentClient extends BaseClient {
           checkpointNamespace: this.checkpointNamespace,
           agents,
           files: [...modelBoundAgentFiles, ...dynamicToolContexts],
+          delivery: {
+            routing: this.options.agent?.deliveryRouting,
+            consumers: this.options.agent?.fileConsumers,
+          },
         },
         {
           getAgentCheckpointer,

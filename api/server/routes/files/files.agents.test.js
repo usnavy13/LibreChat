@@ -973,6 +973,91 @@ describe('File Routes - Agent Files Endpoint', () => {
       readFile.mockRestore();
     });
 
+    describe('upload preflight under each delivery policy', () => {
+      const uploads = [
+        [
+          'xlsx',
+          'quarterly.xlsx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 255, 0, 1, 2, 3]),
+        ],
+        ['csv', 'quarterly.csv', 'text/csv', Buffer.from('region,total\nnorth,1200\n')],
+      ];
+      /** [label, filters, whether it rejects opaque bytes before processing] */
+      const filterShapes = [
+        ['no filters', undefined, false],
+        ['a PII redact policy', { files: { pii: { action: 'redact' } } }, false],
+        [
+          'uninspectable block on content',
+          { files: { pii: { fields: ['content'], uninspectable: 'block' } } },
+          true,
+        ],
+        [
+          'uninspectable block on extracted text only',
+          { files: { pii: { fields: ['extracted_text'], uninspectable: 'block' } } },
+          false,
+        ],
+        [
+          'uninspectable block on content and extracted text',
+          { files: { pii: { fields: ['content', 'extracted_text'], uninspectable: 'block' } } },
+          true,
+        ],
+      ];
+      const cases = uploads.flatMap((upload) =>
+        filterShapes.map(([label, filters, blocksOpaque]) => [
+          upload[0],
+          label,
+          upload,
+          filters,
+          blocksOpaque && upload[0] === 'xlsx' ? 400 : 200,
+        ]),
+      );
+
+      it.each(cases)(
+        'answers a %s message attachment under %s identically',
+        async (_mime, _label, [, originalname, mimetype, bytes], filters, expectedStatus) => {
+          await createAgent({
+            id: agentCustomId,
+            name: 'Test Agent',
+            provider: 'openai',
+            model: 'gpt-4',
+            author: authorId,
+          });
+          const readFile = jest.spyOn(fs, 'readFile').mockResolvedValue(bytes);
+          const send = async (llmDeliveryPolicy) => {
+            processAgentFileUpload.mockClear();
+            const testApp = createAppWithUser(
+              authorId,
+              SystemRoles.USER,
+              {
+                fileConfig: llmDeliveryPolicy ? { llmDeliveryPolicy } : {},
+                ...(filters ? { filters } : {}),
+              },
+              { originalname, mimetype },
+            );
+            const response = await request(testApp).post('/files').send({
+              endpoint: 'agents',
+              agent_id: agentCustomId,
+              message_file: 'true',
+              file_id: uuidv4(),
+            });
+            return {
+              status: response.status,
+              body: response.body,
+              processed: processAgentFileUpload.mock.calls.length,
+            };
+          };
+
+          const classic = await send(undefined);
+          const automatic = await send('automatic');
+          readFile.mockRestore();
+
+          expect(classic.status).toBe(expectedStatus);
+          expect(automatic).toEqual(classic);
+        },
+      );
+    });
+
     it('detects opaque content after a long printable file prefix', async () => {
       await createAgent({
         id: agentCustomId,

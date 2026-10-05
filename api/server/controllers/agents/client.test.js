@@ -10,6 +10,12 @@ const mockHasDurableAgentInterruptCheckpoint = jest.fn().mockResolvedValue(true)
 const mockBuildAgentScopedContext = jest.fn((...args) =>
   jest.requireActual('@librechat/api').buildAgentScopedContext(...args),
 );
+const mockPrepareScopedTurnCandidates = jest.fn((...args) =>
+  jest.requireActual('@librechat/api').prepareScopedTurnCandidates(...args),
+);
+const mockResolveScopedTurnAttachments = jest.fn((...args) =>
+  jest.requireActual('@librechat/api').resolveScopedTurnAttachments(...args),
+);
 const mockFormatAgentMessages = jest.fn(() => ({
   messages: [],
   indexTokenCountMap: {},
@@ -188,6 +194,8 @@ jest.mock('@librechat/agents', () => ({
 jest.mock('@librechat/api', () => ({
   ...jest.requireActual('@librechat/api'),
   buildAgentScopedContext: (...args) => mockBuildAgentScopedContext(...args),
+  prepareScopedTurnCandidates: (...args) => mockPrepareScopedTurnCandidates(...args),
+  resolveScopedTurnAttachments: (...args) => mockResolveScopedTurnAttachments(...args),
   checkAccess: jest.fn(),
   createRun: (...args) => mockCreateRun(...args),
   countFormattedMessageTokens: jest.fn(() => 42),
@@ -5472,6 +5480,7 @@ describe('AgentClient - titleConvo', () => {
         null,
         {},
       );
+      await new Promise((resolve) => setImmediate(resolve));
 
       expect(client.contextHandlers.createContext).toHaveBeenCalledTimes(1);
       expect(client.useMemory).toHaveBeenCalledTimes(1);
@@ -5530,7 +5539,7 @@ describe('AgentClient - titleConvo', () => {
       expect(client.processAttachments).not.toHaveBeenCalled();
 
       requestAttachments.resolve([requestFile]);
-      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
 
       expect(mockBuildAgentScopedContext).toHaveBeenCalledTimes(1);
       const scopedContextArgs = mockBuildAgentScopedContext.mock.calls[0][0];
@@ -7278,6 +7287,97 @@ describe('AgentClient - titleConvo', () => {
         expect(file.llmDeliveryPath).toBe('none');
       },
     );
+
+    it('derives text a handoff receiver needs before resolving its scoped attachments', async () => {
+      const { resolveTurnDeliveryRouting, buildTurnReadingContext } =
+        jest.requireActual('@librechat/api');
+      const workbook = {
+        ...makeUploadedFile(
+          'deferred-xlsx',
+          'quarterly.xlsx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ),
+        context: 'message_attachment',
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
+      };
+      const derivedMarker = { outcome: 'complete', extractor: 'document_parser', at: 2 };
+      const deriveText = jest.fn(async () => ({
+        status: 'derived',
+        text: 'Q1 total 1200',
+        textDerivation: derivedMarker,
+      }));
+      client.options.req.config.fileConfig = {
+        endpoints: { default: { llmDeliveryPolicy: 'automatic' } },
+      };
+      mockAgent.deliveryRouting = resolveTurnDeliveryRouting({
+        agent: mockAgent,
+        config: client.options.req.config,
+      });
+      mockAgent.fileConsumers = { executeCode: true, fileSearch: false };
+      const handoffAgent = {
+        id: 'handoff-agent',
+        endpoint: EModelEndpoint.openAI,
+        provider: EModelEndpoint.openAI,
+        instructions: 'Handoff instructions',
+        model_parameters: { model: 'gpt-4' },
+        tools: [],
+        fileConsumers: { executeCode: false, fileSearch: false },
+      };
+      handoffAgent.deliveryRouting = resolveTurnDeliveryRouting({
+        agent: handoffAgent,
+        config: client.options.req.config,
+      });
+      handoffAgent.deliveryRouting.reading = buildTurnReadingContext({
+        routing: handoffAgent.deliveryRouting,
+        provider: EModelEndpoint.openAI,
+        fileTokenLimit: 100000,
+        configuredFileSizeLimit: undefined,
+        countTokens: (text) => text.length,
+        deriveText,
+      });
+      client.agentConfigs = new Map([['handoff-agent', handoffAgent]]);
+      client.options.resendFiles = true;
+      client.options.attachments = [];
+      client.authorizedHistoricalFiles = new Map([[workbook.file_id, workbook]]);
+      client.message_file_map = {};
+
+      await client.buildMessages(
+        [
+          {
+            messageId: 'msg-1',
+            sender: 'User',
+            text: 'Total it',
+            isCreatedByUser: true,
+            files: [{ file_id: workbook.file_id }],
+          },
+        ],
+        'msg-1',
+        {},
+      );
+
+      const derivedCopy = {
+        ...workbook,
+        text: 'Q1 total 1200',
+        llmDeliveryPath: 'text',
+        metadata: { ...workbook.metadata, textDerivation: derivedMarker },
+      };
+      expect(mockPrepareScopedTurnCandidates).toHaveBeenCalledTimes(1);
+      expect(mockResolveScopedTurnAttachments).toHaveBeenCalledTimes(1);
+      expect(mockPrepareScopedTurnCandidates.mock.invocationCallOrder[0]).toBeLessThan(
+        mockResolveScopedTurnAttachments.mock.invocationCallOrder[0],
+      );
+      const [{ candidates }] = mockResolveScopedTurnAttachments.mock.calls[0];
+      expect(candidates.get(workbook.file_id)).toEqual(
+        expect.objectContaining({ text: 'Q1 total 1200' }),
+      );
+      expect(deriveText).toHaveBeenCalledTimes(1);
+      expect(client.turnScopedAttachmentsByAgentId.get('handoff-agent')).toEqual([derivedCopy]);
+      expect(handoffAgent.additional_instructions).toContain('Q1 total 1200');
+      expect(mockAgent.additional_instructions ?? '').not.toContain('Q1 total 1200');
+      expect(workbook.text).toBeUndefined();
+      expect(client.authorizedHistoricalFiles.get(workbook.file_id)).toBe(workbook);
+    });
 
     it('places request context inline and applies each agent context doc only once', async () => {
       const requestFile = makeTextFile('request-file', 'request.txt', 'Shared request context');

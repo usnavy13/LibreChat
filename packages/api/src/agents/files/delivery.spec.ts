@@ -6,14 +6,22 @@ import type {
   ReadingEvidence,
   FiltersConfig,
 } from 'librechat-data-provider';
+import type {
+  DerivedText,
+  FileTextDeriver,
+  TurnReadingFile,
+  TextDerivationPersister,
+} from '~/files/reading/turn';
 import {
   applyTurnDelivery as materializeTurnDelivery,
+  prepareScopedTurnCandidates,
   resolveScopedTurnAttachments,
   resolveTurnDeliveryRouting,
   toClassicInspectionView,
   applyCheckpointDelivery,
 } from './delivery';
-import { assertModelBoundContent } from '~/middleware/modelBoundContent';
+import * as modelBoundContent from '~/middleware/modelBoundContent';
+import { buildTurnReadingContext } from '~/files/reading/turn';
 import { UninspectableFileError } from '~/protection/files';
 
 function applyTurnDelivery<T extends TurnDeliveryFile>(
@@ -431,11 +439,11 @@ describe('the automatic policy', () => {
        * uninspectable although classic routing inspects and delivers the same text. */
       const copies = materializeTurnDelivery([csv], { routing, consumers: runsCode });
 
-      expect(() => assertModelBoundContent({ filters: strictContent, files: copies })).toThrow(
-        UninspectableFileError,
-      );
       expect(() =>
-        assertModelBoundContent({
+        modelBoundContent.assertModelBoundContent({ filters: strictContent, files: copies }),
+      ).toThrow(UninspectableFileError);
+      expect(() =>
+        modelBoundContent.assertModelBoundContent({
           filters: strictContent,
           files: toClassicInspectionView(copies, routing, runsCode),
         }),
@@ -501,5 +509,205 @@ describe('applyCheckpointDelivery', () => {
       { ...csv, llmDeliveryPath: 'text' },
     ]);
     expect(csv.llmDeliveryPath).toBe('none');
+  });
+});
+
+describe('prepareScopedTurnCandidates', () => {
+  const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const automatic = {
+    fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' as const } } },
+  };
+  const derived: DerivedText = {
+    status: 'derived',
+    text: 'quarter,total\nQ1,42',
+    textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 1 },
+  };
+  /** A workbook uploaded under the automatic policy with extraction left for a later turn. */
+  const workbook = (file_id: string): TurnReadingFile => ({
+    file_id,
+    filename: `${file_id}.xlsx`,
+    type: XLSX,
+    bytes: 2048,
+    source: FileSources.local,
+    context: FileContext.message_attachment,
+    llmDeliveryPath: 'none',
+    metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+  });
+  const historical = workbook('history-xlsx');
+  const requested = workbook('request-xlsx');
+  const messages = [{ files: [{ file_id: historical.file_id }] }];
+
+  /** A receiver whose turn carries a reading context over the given deriver. */
+  function receiver(
+    agentId: string,
+    {
+      consumers = noReader,
+      deriveText,
+      persistDerivation,
+    }: {
+      consumers?: TurnFileConsumers;
+      deriveText?: FileTextDeriver;
+      persistDerivation?: TextDerivationPersister;
+    } = {},
+  ) {
+    const deliveryRouting = resolveTurnDeliveryRouting({
+      agent: { provider: 'openAI' },
+      config: automatic,
+    });
+    const context = buildTurnReadingContext({
+      routing: deliveryRouting,
+      provider: 'openAI',
+      fileTokenLimit: 100_000,
+      configuredFileSizeLimit: undefined,
+      countTokens: (text) => text.length,
+      deriveText,
+      persistDerivation,
+    });
+    if (context == null) {
+      throw new Error('expected a reading context');
+    }
+    deliveryRouting.reading = context;
+    return { agentId, agent: { deliveryRouting, fileConsumers: consumers }, context };
+  }
+
+  const deriver = () =>
+    jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(async () => derived);
+
+  it('collects nothing when no receiver has a reading context', async () => {
+    const historicalFiles = new Map([[historical.file_id, historical]]);
+    const requestAttachments = [requested];
+    const routing = resolveTurnDeliveryRouting({
+      agent: { provider: 'openAI' },
+      config: automatic,
+    });
+
+    const prepared = await prepareScopedTurnCandidates({
+      agents: [
+        { agentId: 'handoff', agent: { deliveryRouting: routing, fileConsumers: noReader } },
+      ],
+      historicalFiles,
+      requestAttachments,
+    });
+
+    expect(prepared).toEqual({});
+  });
+
+  it('derives each candidate once for every receiver that needs its text', async () => {
+    const firstDeriver = deriver();
+    const secondDeriver = deriver();
+    const persistDerivation = jest.fn<
+      ReturnType<TextDerivationPersister>,
+      Parameters<TextDerivationPersister>
+    >(async () => true);
+    const first = receiver('first', { deriveText: firstDeriver, persistDerivation });
+    const second = receiver('second', { deriveText: secondDeriver });
+    const flushSpy = jest.spyOn(first.context, 'flush');
+    const inputs = {
+      agents: [first, second],
+      sharedConversationAgentIds: ['first', 'second'],
+      messages,
+      historicalFiles: new Map([[historical.file_id, historical]]),
+      requestAttachments: [requested],
+      sharedRunAttachmentIds: new Set<string>(),
+    };
+
+    const prepared = await prepareScopedTurnCandidates(inputs);
+
+    expect(firstDeriver).toHaveBeenCalledTimes(2);
+    expect(secondDeriver).not.toHaveBeenCalled();
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    expect(persistDerivation.mock.calls.map(([update]) => update.file_id).sort()).toEqual([
+      historical.file_id,
+      requested.file_id,
+    ]);
+    expect(prepared.candidates?.get(historical.file_id)).toMatchObject({
+      text: derived.text,
+      metadata: { textDerivation: derived.textDerivation },
+    });
+    expect(prepared.candidates?.get(requested.file_id)).toMatchObject({ text: derived.text });
+    expect(historical.text).toBeUndefined();
+    expect(requested.text).toBeUndefined();
+
+    const historyWalk = jest.spyOn(modelBoundContent, 'collectModelBoundHistoricalFileIdState');
+    const scoped = resolveScopedTurnAttachments({ ...inputs, ...prepared });
+    expect(historyWalk).not.toHaveBeenCalled();
+    historyWalk.mockRestore();
+    for (const agentId of ['first', 'second']) {
+      expect(scoped.get(agentId)?.map((file) => [file.file_id, file.llmDeliveryPath])).toEqual([
+        [historical.file_id, 'text'],
+        [requested.file_id, 'text'],
+      ]);
+    }
+  });
+
+  it('derives nothing for a receiver that reads the candidates with Run Code', async () => {
+    const deriveText = deriver();
+    const historicalFiles = new Map([[historical.file_id, historical]]);
+    const requestAttachments = [requested];
+
+    const prepared = await prepareScopedTurnCandidates({
+      agents: [receiver('handoff', { consumers: runsCode, deriveText })],
+      historicalFiles,
+      requestAttachments,
+    });
+
+    expect(deriveText).not.toHaveBeenCalled();
+    expect(prepared.candidates?.get(historical.file_id)).toBe(historical);
+    expect(prepared.candidates?.get(requested.file_id)).toBe(requested);
+  });
+
+  it('decides only what each receiver can be offered', async () => {
+    const deriveText = deriver();
+    const outsideDeriver = deriver();
+    const scopedFile = workbook('scoped-xlsx');
+    const stale = workbook('stale-xlsx');
+
+    const prepared = await prepareScopedTurnCandidates({
+      agents: [
+        receiver('handoff', { deriveText }),
+        receiver('subagent', { deriveText: outsideDeriver }),
+      ],
+      sharedConversationAgentIds: ['handoff'],
+      messages,
+      historicalFiles: new Map([
+        [historical.file_id, historical],
+        [stale.file_id, stale],
+      ]),
+      requestAttachments: [requested, scopedFile],
+      sharedRunAttachmentIds: new Set([historical.file_id]),
+      attachmentsByAgentId: { handoff: [scopedFile] },
+    });
+
+    expect(outsideDeriver).not.toHaveBeenCalled();
+    expect(deriveText.mock.calls.map(([file]) => file.file_id)).toEqual([requested.file_id]);
+    expect(prepared.candidates?.get(requested.file_id)?.text).toBe(derived.text);
+    expect(prepared.candidates?.get(scopedFile.file_id)).toBe(scopedFile);
+  });
+
+  it('marks the text failed on every receiver that needed it, so each moves on', async () => {
+    const first = receiver('first', {
+      deriveText: async () => ({
+        status: 'failed',
+        textDerivation: { outcome: 'failed', reason: 'parser' },
+        persist: true,
+      }),
+    });
+    const second = receiver('second', { deriveText: deriver() });
+    const inputs = {
+      agents: [first, second],
+      sharedConversationAgentIds: ['first', 'second'],
+      messages: [],
+      requestAttachments: [requested],
+      sharedRunAttachmentIds: new Set<string>(),
+    };
+
+    const prepared = await prepareScopedTurnCandidates(inputs);
+
+    expect(prepared.candidates?.get(requested.file_id)).toBe(requested);
+    expect(first.context.judge(requested).textFailed).toBe(true);
+    expect(second.context.judge(requested).textFailed).toBe(true);
+    const scoped = resolveScopedTurnAttachments({ ...inputs, ...prepared });
+    expect(scoped.get('first')).toEqual([]);
+    expect(scoped.get('second')).toEqual([]);
   });
 });

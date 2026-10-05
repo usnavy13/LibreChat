@@ -10,6 +10,8 @@ const {
   extractFileContext,
   getReferencedQuotes,
   applyTurnDelivery,
+  prepareTurnFiles,
+  getTurnTextOptions,
   encodeAndFormatAudios,
   encodeAndFormatVideos,
   getTransactionsConfig,
@@ -859,7 +861,7 @@ class BaseClient {
     if (this.options.resendFiles !== false && this.authorizedHistoricalFiles == null) {
       const historicalFileState = collectModelBoundHistoricalFileIdState(modelBoundStoredMessages);
       this.modelBoundHistoricalFileIdsOverflowed ||= historicalFileState.overflowed;
-      const files = this.resolveTurnAttachments(
+      const files = await this.prepareTurnAttachments(
         await getOwnerHistoricalFiles(historicalFileState.fileIds, this.options.req?.user),
       );
       this.authorizedHistoricalFiles = new Map(
@@ -1800,6 +1802,7 @@ class BaseClient {
       attachments: textAttachments,
       req: this.options?.req,
       tokenCountFn: (text) => countTokens(text),
+      ...getTurnTextOptions(this.options.agent?.deliveryRouting),
     });
 
     if (fileContext) {
@@ -1822,6 +1825,16 @@ class BaseClient {
     return applyTurnDelivery(files, {
       routing: this.options.agent?.deliveryRouting,
       consumers: fileConsumers,
+    });
+  }
+
+  /** {@link resolveTurnAttachments}, deriving text the turn's reading needs first. */
+  prepareTurnAttachments(files, fileConsumers = this.options.agent?.fileConsumers) {
+    return prepareTurnFiles({
+      routing: this.options.agent?.deliveryRouting,
+      files,
+      consumers: fileConsumers,
+      signal: this.options.abortController?.signal,
     });
   }
 
@@ -1949,7 +1962,7 @@ class BaseClient {
     const historicalFileState = collectModelBoundHistoricalFileIdState(_messages);
     this.modelBoundHistoricalFileIdsOverflowed ||= historicalFileState.overflowed;
     const authorizedFilesById = new Map();
-    const files = this.resolveTurnAttachments(
+    const files = await this.prepareTurnAttachments(
       await getOwnerHistoricalFiles(historicalFileState.fileIds, this.options.req?.user),
     );
     const nonSteerReplayFileIds = collectModelBoundHistoricalFileIdState(

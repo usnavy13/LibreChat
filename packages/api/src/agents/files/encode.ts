@@ -23,9 +23,9 @@ import {
   AgentAttachmentPolicyError,
 } from '../attachments';
 import { assertModelBoundContent } from '~/middleware/modelBoundContent';
+import { getTurnTextOptions, prepareTurnFiles } from '~/files/reading';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
 import { toClassicInspectionView } from './delivery';
-import { getTurnTextOptions } from '~/files/reading';
 import { countTokens } from '~/utils/tokenizer';
 
 type ContentBlock = Exclude<BaseMessage['content'], string>[number];
@@ -84,11 +84,15 @@ export interface RunFileMessageEncoder {
 export function createRunFileMessageEncoder(
   deps: RunFileMessageEncoderDeps,
 ): RunFileMessageEncoder {
-  function prepare(files: TFile[], agentId: string) {
+  function resolveAgent(agentId: string): RunFileEncodingAgent {
     const agent = deps.getAgent(agentId);
     if (!agent) {
       throw new Error('The target agent is not available for shared file delivery.');
     }
+    return agent;
+  }
+
+  function prepare(files: TFile[], agent: RunFileEncodingAgent) {
     const { deliveryRouting } = agent;
     const { endpoint, fileConfig, endpointConfig } = deliveryRouting;
     const params: RunFileEncodingParams = {
@@ -140,12 +144,18 @@ export function createRunFileMessageEncoder(
   }
 
   function validate(files: TFile[], agentId: string): void {
-    if (files.length > 0) prepare(files, agentId);
+    if (files.length > 0) prepare(files, resolveAgent(agentId));
   }
 
   async function encode(files: TFile[], agentId: string): Promise<BaseMessage[]> {
     if (files.length === 0) return [];
-    const { agent, params, sharedFiles, fileConfig, endpointConfig } = prepare(files, agentId);
+    const target = resolveAgent(agentId);
+    const turnFiles = await prepareTurnFiles({
+      routing: target.deliveryRouting,
+      files,
+      consumers: target.fileConsumers,
+    });
+    const { agent, params, sharedFiles, fileConfig, endpointConfig } = prepare(turnFiles, target);
     const images: TFile[] = [];
     const documents: TFile[] = [];
     const audios: TFile[] = [];

@@ -2,6 +2,7 @@ import { Providers } from '@librechat/agents';
 import { logger } from '@librechat/data-schemas';
 import {
   EToolResources,
+  decideFileReading,
   isBedrockDocumentType,
   categorizeForReading,
   canToolResourceConsume,
@@ -15,10 +16,14 @@ import type {
   TextDerivation,
   ReadingEvidence,
   TurnDeliveryFile,
+  TurnFileConsumers,
   TurnReadingInputs,
   TLLMDeliveryPolicy,
   TurnDeliveryRouting,
 } from 'librechat-data-provider';
+import type { FileTextDerivationUpdate } from '@librechat/data-schemas';
+import type { ContentFilterError } from '~/middleware/contentFilter';
+import type { UninspectableFileError } from '~/protection/files';
 import type { DocumentRejection } from '~/types';
 import { usesAnthropicDocumentCapabilities } from '~/files/encode/document';
 import { getNativeDocumentSizeLimit } from '~/files/validation';
@@ -33,16 +38,31 @@ export type TurnReadingFile = TurnDeliveryFile & StoredOriginal & { file_id: str
 /** Why no text was derived on this request; none of these is persisted, so a later turn retries. */
 export type DerivationSkipReason = 'policy' | 'storage_unavailable' | 'aborted' | 'no_extractor';
 
+/** The content-policy error derived text raised: a finding, or text the policy cannot inspect. */
+export type DerivationPolicyError = ContentFilterError | UninspectableFileError;
+
 /**
  * The outcome of deriving a file's text from its retained original. A `failed` outcome is
- * deterministic, and `persist` says whether the record may keep it as a failed marker.
+ * deterministic, and `persist` says whether the record may keep it as a failed marker. A
+ * `blocked` outcome is a content-policy refusal of the derived text, which fails the turn that
+ * needed it exactly as the same text stored at upload would.
  */
 export type DerivedText =
   | { status: 'derived'; text: string; textDerivation: TextDerivation }
   | { status: 'failed'; textDerivation: TextDerivation; persist: boolean }
+  | { status: 'blocked'; error: DerivationPolicyError }
   | { status: 'skipped'; reason: DerivationSkipReason };
 
 export type FileTextDeriver = (file: TurnReadingFile, signal?: AbortSignal) => Promise<DerivedText>;
+
+/** A derivation that changed the copy's text, as {@link withDerivedText} applies it. */
+export type DerivedTextSuccess = Extract<DerivedText, { status: 'derived' }>;
+
+/** What a derivation writes back onto the record the automatic policy marked `deferred`. */
+export type TextDerivationUpdate = FileTextDerivationUpdate;
+
+/** Saves a derivation onto its record and resolves whether a record changed. */
+export type TextDerivationPersister = (update: TextDerivationUpdate) => Promise<boolean>;
 
 /** Which files File Search will receive on this turn, known once tools have loaded. */
 export interface SearchEvidence {
@@ -78,7 +98,11 @@ export interface TurnReadingContext extends TurnReadingInputs {
   dropped(): readonly TurnReadingFile[];
   /** Derives the file's text once per request; repeated calls share the first derivation. */
   derive(file: TurnReadingFile, signal?: AbortSignal): Promise<DerivedText>;
-  /** Settles the request's pending reading work. */
+  /**
+   * Starts the record writes the request's derivations queued, once each derivation settles, and
+   * waits for them. Nothing is written before a flush, so a caller flushes only after the files
+   * passed its checks. Never rejects.
+   */
   flush(): Promise<void>;
   stats(): TurnReadingStats;
 }
@@ -95,6 +119,12 @@ export interface BuildTurnReadingContextParams {
   /** A synchronous token count, ready for use. */
   countTokens: (text: string) => number;
   deriveText?: FileTextDeriver;
+  /**
+   * Saves derived text, or a deterministic failure, onto the record it came from. The caller
+   * binds the request's file owner scope. Only records marked `deferred` are ever saved: text on
+   * any other record stays on the turn copy.
+   */
+  persistDerivation?: TextDerivationPersister;
   signal?: AbortSignal;
 }
 
@@ -181,6 +211,27 @@ function judgeTextFit(
   return { fit: tokens <= limit ? 'fits' : 'exceeds', tokens };
 }
 
+/**
+ * The write a derivation makes on its record: the text with its marker on success, the marker
+ * alone for a deterministic failure the record may keep. A record the automatic policy did not
+ * mark `deferred` is never written.
+ */
+function selectDerivationUpdate(
+  file: TurnReadingFile,
+  result: DerivedText,
+): TextDerivationUpdate | undefined {
+  if (file.metadata?.textDerivation?.outcome !== 'deferred') {
+    return undefined;
+  }
+  if (result.status === 'derived') {
+    return { file_id: file.file_id, text: result.text, textDerivation: result.textDerivation };
+  }
+  if (result.status === 'failed' && result.persist) {
+    return { file_id: file.file_id, textDerivation: result.textDerivation };
+  }
+  return undefined;
+}
+
 function createTurnReadingContext(
   policy: TLLMDeliveryPolicy,
   {
@@ -191,6 +242,7 @@ function createTurnReadingContext(
     configuredFileSizeLimit,
     countTokens,
     deriveText,
+    persistDerivation,
     signal: requestSignal,
   }: BuildTurnReadingContextParams,
 ): BrandedTurnReadingContext {
@@ -202,7 +254,7 @@ function createTurnReadingContext(
   const textFailed = new Set<string>();
   const droppedFiles = new Map<string, TurnReadingFile>();
   const derivations = new Map<string, Promise<DerivedText>>();
-  const pending = new Set<Promise<DerivedText>>();
+  const queuedWrites: Array<{ file: TurnReadingFile; derivation: Promise<DerivedText> }> = [];
   let searchFileIds: ReadonlySet<string> | undefined;
   let derived = 0;
 
@@ -319,6 +371,21 @@ function createTurnReadingContext(
     );
   };
 
+  /** Saves the derivation onto a marked record; a failed write is logged, never thrown. */
+  const persist = async (file: TurnReadingFile, result: DerivedText): Promise<void> => {
+    const update = selectDerivationUpdate(file, result);
+    if (update == null || persistDerivation == null) {
+      return;
+    }
+    const line = `[readingText] file_id=${update.file_id} outcome=${update.textDerivation.outcome}`;
+    try {
+      const saved = await persistDerivation(update);
+      logger.debug(`${line} persisted=${saved}`);
+    } catch (error) {
+      logger.error(`${line} persisted=failed`, getSafeErrorMetadata(error));
+    }
+  };
+
   const derive = (file: TurnReadingFile, signal?: AbortSignal): Promise<DerivedText> => {
     const existing = derivations.get(file.file_id);
     if (existing != null) {
@@ -326,14 +393,15 @@ function createTurnReadingContext(
     }
     const derivation = runDerivation(file, signal ?? requestSignal);
     derivations.set(file.file_id, derivation);
-    pending.add(derivation);
+    queuedWrites.push({ file, derivation });
     return derivation;
   };
 
   const flush = async (): Promise<void> => {
-    const settling = [...pending];
-    pending.clear();
-    await Promise.allSettled(settling);
+    const writes = queuedWrites.splice(0);
+    await Promise.allSettled(
+      writes.map(({ file, derivation }) => derivation.then((result) => persist(file, result))),
+    );
   };
 
   return {
@@ -394,4 +462,76 @@ export function buildTurnReadingContext(
     return undefined;
   }
   return createTurnReadingContext(policy, params);
+}
+
+/** One agent's turn routing, the tools judged as its readers, and its reading context. */
+export interface TurnReader {
+  routing: TurnDeliveryRouting;
+  consumers?: TurnFileConsumers;
+  context: TurnReadingContext;
+}
+
+/**
+ * Whether the file's reading needs text derived on this turn. A derive-only classic context
+ * serves only records the automatic policy marked, so an unmarked record costs it no decision.
+ */
+export function needsDerivedText(
+  file: TurnReadingFile,
+  { routing, consumers, context }: TurnReader,
+): boolean {
+  if (context.policy !== 'automatic' && file.metadata?.textDerivation == null) {
+    return false;
+  }
+  return decideFileReading({ routing, file, consumers }).needsText;
+}
+
+/** The copy carrying derived text and the marker saying how it was obtained. */
+export const withDerivedText = <T extends TurnReadingFile>(
+  file: T,
+  derived: DerivedTextSuccess,
+): T => ({
+  ...file,
+  text: derived.text,
+  metadata: { ...file.metadata, textDerivation: derived.textDerivation },
+});
+
+/** A file whose reading needs text, with every reading context whose decision asked for it. */
+export interface TextRequest<T extends TurnReadingFile> {
+  file: T;
+  /** The first context derives; the rest share its outcome. */
+  contexts: readonly [TurnReadingContext, ...TurnReadingContext[]];
+}
+
+/**
+ * Derives each requested file's text once, through the first context that asked for it, and
+ * returns the successes by file id. A file left without text is marked failed on every context
+ * that asked, so their next decisions pass text over for the rest of the request. Derived text a
+ * content policy refuses throws its policy error: the turn needed that text, and the same text
+ * stored at upload would have been refused there.
+ */
+export async function deriveRequestedText<T extends TurnReadingFile>(
+  requests: readonly TextRequest<T>[],
+  signal?: AbortSignal,
+): Promise<Map<string, DerivedTextSuccess>> {
+  const outcomes = await Promise.all(
+    requests.map(async ({ file, contexts }) => ({
+      file,
+      contexts,
+      result: await contexts[0].derive(file, signal),
+    })),
+  );
+  const texts = new Map<string, DerivedTextSuccess>();
+  for (const { file, contexts, result } of outcomes) {
+    if (result.status === 'derived') {
+      texts.set(file.file_id, result);
+      continue;
+    }
+    if (result.status === 'blocked') {
+      throw result.error;
+    }
+    for (const context of contexts) {
+      context.markTextFailed(file.file_id);
+    }
+  }
+  return texts;
 }

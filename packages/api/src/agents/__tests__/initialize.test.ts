@@ -145,6 +145,7 @@ import { isFatalAgentInitializationError } from '../errors';
 import { filterFilesByEndpointRuntimeConfig as filterByEndpointPolicy } from '~/files/filter';
 import { assertModelBoundContent } from '../../middleware/modelBoundContent';
 import { getTurnReadingContext } from '~/files/reading';
+import type { FileTextDeriver } from '~/files/reading';
 
 const realUtils = jest.requireActual<typeof import('~/utils')>('~/utils');
 
@@ -251,6 +252,7 @@ function createMocks(overrides?: {
     getUserKey: jest.fn().mockResolvedValue('user-1'),
     getUserKeyValues: jest.fn().mockResolvedValue([]),
     getToolFilesByIds: jest.fn().mockResolvedValue([]),
+    saveFileTextDerivation: jest.fn().mockResolvedValue(true),
   };
 
   return { agent, req, res, loadTools, db };
@@ -5892,8 +5894,13 @@ describe('initializeAgent automatic delivery policy', () => {
     endpointConfig = {},
     fileContextCharLimit,
     contextFiles = [],
+    deriveText,
+    saveFileTextDerivation,
   }: {
     file: IMongoFile;
+    /** The host's text deriver, which also builds a derive-only context under classic. */
+    deriveText?: FileTextDeriver;
+    saveFileTextDerivation?: InitializeAgentDbMethods['saveFileTextDerivation'];
     /** Persistent agent files priming adds to the delivered and agent-context sets. */
     contextFiles?: IMongoFile[];
     policy?: 'automatic' | 'classic';
@@ -5964,9 +5971,10 @@ describe('initializeAgent automatic delivery policy', () => {
         endpointOption: { endpoint: EModelEndpoint.agents },
         allowedProviders: new Set([Providers.OPENAI]),
         isInitialAgent: true,
+        deriveText,
         ...skillParams,
       },
-      { ...db, ...skillDb },
+      { ...db, ...skillDb, ...(saveFileTextDerivation != null && { saveFileTextDerivation }) },
     );
   }
 
@@ -6112,5 +6120,110 @@ describe('initializeAgent automatic delivery policy', () => {
     expect(result.requestAttachments).toEqual([]);
     const context = getTurnReadingContext(result.deliveryRouting);
     expect(context?.dropped().map((file) => file.file_id)).toEqual([image.file_id]);
+  });
+
+  describe('with a host that derives text', () => {
+    /** A spreadsheet uploaded under the automatic policy, its extraction left for a later turn. */
+    const deferredXlsx = () =>
+      ({
+        ...classicEraXlsx(),
+        text: undefined,
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+      }) as IMongoFile;
+    const derived = {
+      status: 'derived' as const,
+      text: 'Q1,1200\nQ2,1400',
+      textDerivation: {
+        outcome: 'complete' as const,
+        extractor: 'document_parser' as const,
+        at: 1,
+      },
+    };
+    const deriver = () =>
+      jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(async () => derived);
+    const saver = () =>
+      jest.fn<
+        ReturnType<NonNullable<InitializeAgentDbMethods['saveFileTextDerivation']>>,
+        Parameters<NonNullable<InitializeAgentDbMethods['saveFileTextDerivation']>>
+      >(async () => true);
+
+    it.each([
+      ['classic', undefined],
+      ['automatic', 'automatic' as const],
+    ])(
+      'derives a deferred spreadsheet with no Run Code under %s routing and saves it for the owner',
+      async (policyName, policy) => {
+        const xlsx = deferredXlsx();
+        const stored = structuredClone(xlsx);
+        const deriveText = deriver();
+        const saveFileTextDerivation = saver();
+
+        const result = await initializeWith({
+          file: xlsx,
+          policy,
+          deriveText,
+          saveFileTextDerivation,
+        });
+
+        expect(getTurnReadingContext(result.deliveryRouting)?.policy).toBe(policyName);
+        expect(deriveText).toHaveBeenCalledTimes(1);
+        expect(deriveText).toHaveBeenCalledWith(
+          expect.objectContaining({ file_id: xlsx.file_id }),
+          undefined,
+        );
+        expect(result.requestAttachments).toEqual([
+          {
+            ...stored,
+            llmDeliveryPath: 'text',
+            text: derived.text,
+            metadata: { destinationChosen: false, textDerivation: derived.textDerivation },
+          },
+        ]);
+        expect(saveFileTextDerivation).toHaveBeenCalledTimes(1);
+        expect(saveFileTextDerivation).toHaveBeenCalledWith(
+          { file_id: xlsx.file_id, text: derived.text, textDerivation: derived.textDerivation },
+          { user: 'user-1', tenantId: undefined },
+        );
+        expect(xlsx).toEqual(stored);
+      },
+    );
+
+    it.each([
+      ['with stored text', classicEraXlsx()],
+      ['without stored text', { ...classicEraXlsx(), text: undefined } as IMongoFile],
+    ])(
+      'never derives a record the automatic policy did not mark under classic routing (%s)',
+      async (_shape, file) => {
+        const deriveText = deriver();
+        const saveFileTextDerivation = saver();
+
+        const result = await initializeWith({ file, deriveText, saveFileTextDerivation });
+
+        expect(getTurnReadingContext(result.deliveryRouting)?.policy).toBe('classic');
+        expect(deriveText).not.toHaveBeenCalled();
+        expect(saveFileTextDerivation).not.toHaveBeenCalled();
+        expect(result.requestAttachments).toEqual([file]);
+      },
+    );
+
+    it('leaves a deferred spreadsheet to Run Code without deriving it', async () => {
+      const xlsx = deferredXlsx();
+      const deriveText = deriver();
+      const saveFileTextDerivation = saver();
+
+      const result = await initializeWith({
+        file: xlsx,
+        policy: 'automatic',
+        tools: [Tools.execute_code],
+        deriveText,
+        saveFileTextDerivation,
+      });
+
+      expect(result.fileConsumers).toEqual({ executeCode: true, fileSearch: false });
+      expect(deriveText).not.toHaveBeenCalled();
+      expect(saveFileTextDerivation).not.toHaveBeenCalled();
+      expect(result.requestAttachments).toEqual([xlsx]);
+    });
   });
 });

@@ -8,6 +8,7 @@ const {
   getPrivateTextInspectionTokens,
   assertModelBoundContent,
   resolveTurnDeliveryRouting,
+  buildTurnReadingContext,
   buildSteerMedia,
   Tokenizer,
 } = require('@librechat/api');
@@ -3481,6 +3482,85 @@ describe('BaseClient', () => {
       expect(JSON.stringify(secondMessage)).not.toContain('second-forged');
     });
 
+    describe('text a deferred file needs on a later turn', () => {
+      const deferredWorkbook = {
+        file_id: 'deferred-xlsx',
+        filename: 'quarterly.xlsx',
+        filepath: '/uploads/quarterly.xlsx',
+        source: 'local',
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        bytes: 2048,
+        user: 'user-1',
+        context: 'message_attachment',
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
+      };
+      const derivedMarker = { outcome: 'complete', extractor: 'document_parser', at: 2 };
+
+      const replayWorkbook = async (endpointConfig) => {
+        const deriveText = jest.fn(async () => ({
+          status: 'derived',
+          text: 'Q1,1200',
+          textDerivation: derivedMarker,
+        }));
+        getFiles.mockResolvedValueOnce([deferredWorkbook]);
+        TestClient.options.req.config = {
+          fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } },
+        };
+        TestClient.options.agent = {
+          provider: EModelEndpoint.openAI,
+          fileConsumers: { executeCode: false, fileSearch: false },
+        };
+        const routing = resolveTurnDeliveryRouting({
+          agent: TestClient.options.agent,
+          config: TestClient.options.req.config,
+        });
+        routing.reading = buildTurnReadingContext({
+          routing,
+          provider: EModelEndpoint.openAI,
+          fileTokenLimit: 100000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+          deriveText,
+        });
+        TestClient.options.agent.deliveryRouting = routing;
+        TestClient.assertHistoricalAttachmentLimits = jest.fn(async (files) => files);
+        const prepareTurnAttachments = jest.spyOn(TestClient, 'prepareTurnAttachments');
+        const [message] = await TestClient.addPreviousAttachments([
+          { messageId: 'msg-xlsx', text: 'Totals?', files: [{ file_id: 'deferred-xlsx' }] },
+        ]);
+        return { message, deriveText, prepareTurnAttachments };
+      };
+
+      test.each([
+        ['automatic', { llmDeliveryPolicy: 'automatic' }],
+        ['classic', {}],
+      ])(
+        'derives the text through the routing context under the %s policy',
+        async (_policy, endpointConfig) => {
+          const { message, deriveText, prepareTurnAttachments } =
+            await replayWorkbook(endpointConfig);
+          const replayed = {
+            ...deferredWorkbook,
+            text: 'Q1,1200',
+            llmDeliveryPath: 'text',
+            metadata: { ...deferredWorkbook.metadata, textDerivation: derivedMarker },
+          };
+
+          expect(prepareTurnAttachments).toHaveBeenCalledTimes(1);
+          expect(deriveText).toHaveBeenCalledTimes(1);
+          expect(deriveText).toHaveBeenCalledWith(
+            expect.objectContaining({ file_id: 'deferred-xlsx' }),
+            undefined,
+          );
+          expect(TestClient.assertHistoricalAttachmentLimits).toHaveBeenCalledWith([replayed]);
+          expect(message.fileContext).toBe('Q1,1200');
+          expect(deferredWorkbook.text).toBeUndefined();
+          expect(deferredWorkbook.llmDeliveryPath).toBe('none');
+        },
+      );
+    });
+
     test('extracts historical file context while encoding provider attachments', async () => {
       getFiles.mockResolvedValueOnce([ownerFile]);
       const fileContext = deferred();
@@ -3503,8 +3583,7 @@ describe('BaseClient', () => {
         return messages;
       });
 
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
 
       expect(TestClient.addFileContextToMessage).toHaveBeenCalledTimes(1);
       expect(TestClient.processAttachments).toHaveBeenCalledTimes(1);
@@ -4532,6 +4611,66 @@ describe('BaseClient', () => {
       expect(message.documents).toEqual([{ type: 'file' }]);
       expect(TestClient.addDocuments).toHaveBeenCalledWith(message, [file]);
     });
+  });
+});
+
+describe('BaseClient attachment text under a reading context', () => {
+  const longNote = {
+    file_id: 'long-note',
+    filename: 'notes.txt',
+    source: 'text',
+    type: 'text/plain',
+    text: 'quarterly revenue grew '.repeat(200),
+  };
+
+  const extractNote = async (endpointConfig, deriveText) => {
+    const client = initializeFakeClient(apiKey, { modelOptions: { model: 'gpt-4o-mini' } }, []);
+    const config = { fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } } };
+    client.options.req = { body: { fileTokenLimit: 20 }, config };
+    client.options.agent = {
+      provider: EModelEndpoint.openAI,
+      fileConsumers: { executeCode: false, fileSearch: false },
+    };
+    const routing = resolveTurnDeliveryRouting({ agent: client.options.agent, config });
+    routing.reading = buildTurnReadingContext({
+      routing,
+      provider: EModelEndpoint.openAI,
+      fileTokenLimit: 20,
+      configuredFileSizeLimit: undefined,
+      countTokens: (text) => text.length,
+      deriveText,
+    });
+    client.options.agent.deliveryRouting = routing;
+    const message = {};
+    await client.addFileContextToMessage(message, [longNote], client.options.agent.fileConsumers);
+    return message.fileContext;
+  };
+
+  const notice = '[Truncated: only the beginning of "notes.txt" fits; the rest is omitted.]';
+
+  beforeEach(() => {
+    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
+    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('marks truncated attachment text under the automatic policy', async () => {
+    const fileContext = await extractNote({ llmDeliveryPolicy: 'automatic' });
+
+    expect(fileContext).toContain('# "notes.txt"');
+    expect(fileContext).toContain(notice);
+  });
+
+  test('keeps truncation silent under the classic policy, with or without a deriver', async () => {
+    const withDeriver = await extractNote({}, jest.fn());
+    const withoutContext = await extractNote({});
+
+    expect(withDeriver).toContain('# "notes.txt"');
+    expect(withDeriver).not.toContain(notice);
+    expect(withoutContext).toBe(withDeriver);
   });
 });
 
