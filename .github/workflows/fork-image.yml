@@ -11,6 +11,8 @@ on:
   push:
     branches:
       - fork/image
+    paths-ignore:
+      - 'fork/**'
   workflow_dispatch:
 
 env:
