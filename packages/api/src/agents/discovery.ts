@@ -117,6 +117,8 @@ export interface DiscoverConnectedAgentsParams {
   fileSearchAvailable?: InitializeAgentParams['fileSearchAvailable'];
   /** The request's text deriver, forwarded so a handoff receiver can read a deferred record as text. */
   deriveText?: InitializeAgentParams['deriveText'];
+  /** The request's shared derivation persister, so each derived file is written once across agents. */
+  persistDerivation?: InitializeAgentParams['persistDerivation'];
   /**
    * The caller's `WEB_SEARCH` grant resolver, forwarded so a handoff or subagent
    * whose provider config turns native web search on is authorized by the same
@@ -279,6 +281,7 @@ async function initializeReferencedAgent(
         allowedStatefulCodeEnvironments: params.allowedStatefulCodeEnvironments,
         memoryAvailable: params.memoryAvailable,
         deriveText: params.deriveText,
+        persistDerivation: params.persistDerivation,
         signal: params.signal,
       },
       deps.db,

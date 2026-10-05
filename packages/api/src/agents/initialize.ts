@@ -1161,6 +1161,12 @@ export interface InitializeAgentParams {
    * policy; without it the turn reads only text stored at upload.
    */
   deriveText?: FileTextDeriver;
+  /**
+   * The request's derivation persister (`createDerivationPersister`), shared by every agent
+   * so a derived file is written once per request. Without it each agent saves its own
+   * derivations through `saveFileTextDerivation` under the request's file owner.
+   */
+  persistDerivation?: TextDerivationPersister;
 }
 
 /**
@@ -1683,7 +1689,9 @@ export async function initializeAgent(
     fileConfig: appConfig?.fileConfig,
     req: params.req,
     deriveText: params.deriveText,
-    persistDerivation: bindDerivationPersister(db.saveFileTextDerivation, requestFileOwnerScope),
+    persistDerivation:
+      params.persistDerivation ??
+      bindDerivationPersister(db.saveFileTextDerivation, requestFileOwnerScope),
     signal: params.signal,
   });
   if (readingContext != null) {

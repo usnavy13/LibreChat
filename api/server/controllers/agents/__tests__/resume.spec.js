@@ -3643,6 +3643,124 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       });
     });
 
+    it('keeps the reading notices the saved user row carries on the final requestMessage', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
+      const reading = { reader: 'unavailable', limitation: 'code_unavailable' };
+      mockGetMessages.mockResolvedValue([
+        { files: [{ file_id: 'f1', filename: 'data.csv', type: 'text/csv', reading }] },
+      ]);
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      const [, finalEvent] = mockGenerationJobManager.publishTerminalClaim.mock.calls[0];
+      expect(finalEvent.requestMessage.files).toEqual([
+        { file_id: 'f1', filename: 'data.csv', type: 'text/csv', reading },
+      ]);
+    });
+
+    it('rebuilds the reading notices for job-metadata refs from the resumed client', async () => {
+      const { resolveTurnDeliveryRouting, buildTurnReadingContext } =
+        jest.requireActual('@librechat/api');
+      const brief = {
+        user: USER_ID,
+        file_id: 'brief',
+        filename: 'brief.pdf',
+        filepath: '/uploads/brief.pdf',
+        type: 'application/pdf',
+        bytes: 2048,
+        source: 'local',
+        context: 'message_attachment',
+        llmDeliveryPath: 'provider',
+        metadata: { destinationChosen: false },
+        text: 'extracted text that should be stripped',
+      };
+      const agent = {
+        id: AGENT_ID,
+        provider: 'openAI',
+        endpoint: 'openAI',
+        fileConsumers: { executeCode: false, fileSearch: false },
+        currentRequestAttachments: [brief],
+      };
+      agent.deliveryRouting = resolveTurnDeliveryRouting({
+        agent,
+        config: { fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } } },
+      });
+      agent.deliveryRouting.reading = buildTurnReadingContext({
+        routing: agent.deliveryRouting,
+        provider: 'openAI',
+        model: 'gpt-4o',
+        fileTokenLimit: 100000,
+        configuredFileSizeLimit: undefined,
+        countTokens: (text) => text.length,
+      });
+      mockInitializeClient.mockResolvedValue({
+        client: makeClient({ options: { attachments: [brief], agent } }),
+        userMCPAuthMap: {},
+      });
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({
+          metadata: {
+            userMessage: {
+              messageId: USER_MSG_ID,
+              parentMessageId: THREAD_PARENT_ID,
+              text: 'x',
+              files: [{ file_id: 'brief' }],
+            },
+          },
+        }),
+      );
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      const [, finalEvent] = mockGenerationJobManager.publishTerminalClaim.mock.calls[0];
+      const { text: _text, ...transmitted } = brief;
+      expect(finalEvent.requestMessage.files).toEqual([
+        { ...transmitted, reading: { reader: 'provider' } },
+      ]);
+    });
+
+    it('carries the job-metadata refs as they are when the resumed agent reads classically', async () => {
+      const brief = {
+        user: USER_ID,
+        file_id: 'brief',
+        filename: 'brief.pdf',
+        filepath: '/uploads/brief.pdf',
+        type: 'application/pdf',
+        bytes: 2048,
+        source: 'local',
+        text: 'extracted text',
+      };
+      const agent = { id: AGENT_ID, provider: 'openAI', endpoint: 'openAI' };
+      mockInitializeClient.mockResolvedValue({
+        client: makeClient({ options: { attachments: [brief], agent } }),
+        userMCPAuthMap: {},
+      });
+      const refs = [{ file_id: 'brief', filename: 'brief.pdf', type: 'application/pdf' }];
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({
+          metadata: {
+            userMessage: {
+              messageId: USER_MSG_ID,
+              parentMessageId: THREAD_PARENT_ID,
+              text: 'x',
+              files: refs,
+            },
+          },
+        }),
+      );
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      const [, finalEvent] = mockGenerationJobManager.publishTerminalClaim.mock.calls[0];
+      expect(finalEvent.requestMessage.files).toEqual(refs);
+    });
+
     it('persists the response, claims terminal ownership, emits done, finishes, and prunes', async () => {
       mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
       await post(approveBody());

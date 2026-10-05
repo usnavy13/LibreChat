@@ -56,6 +56,8 @@ interface StorageErrorShape {
 /**
  * Whether storage reports the original itself gone. A missing bucket or container, a status code
  * alone, and any error on the temporary copy are not: those clear up, so a later turn retries.
+ * The same holds inside the extractor: a system error while it reads the temporary copy is not
+ * kept on the record, only a failure the parser names.
  */
 function isOriginalMissing(error: unknown, tmpPath: string): boolean {
   if (isAttachmentObjectNotFoundError(error)) {
@@ -116,6 +118,13 @@ function toDerivedText(
   }
   if (result.failure === 'policy' || result.failure === 'uninspectable') {
     return { status: 'blocked', error: blocked(file, result) };
+  }
+  if (result.failure === 'unavailable') {
+    logger.error(
+      `[readingText] file_id=${file.file_id} outcome=skipped reason=storage_unavailable`,
+      getSafeErrorMetadata(result.error),
+    );
+    return skipped('storage_unavailable');
   }
   return failed(plan, result.failure);
 }

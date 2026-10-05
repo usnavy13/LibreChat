@@ -10,8 +10,13 @@ import type { BuildTurnReadingContextParams, TurnReadingContext } from './turn';
 import type { CodeFileAgent } from '~/files/code/queued';
 import type { ReadingAgent } from './inventory';
 import type { NoticedFile } from './notices';
+import {
+  withReadingNotices,
+  stripReadingNotices,
+  buildUserMessageFiles,
+  buildResumedUserMessageFiles,
+} from './notices';
 import { buildTurnReadingContext, getTurnReadingContext, recordNativeRejections } from './turn';
-import { buildUserMessageFiles, withReadingNotices } from './notices';
 import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
 import { prepareAgentFileContext } from './inventory';
 import { buildMessageFiles } from '~/utils/message';
@@ -641,5 +646,64 @@ describe('buildUserMessageFiles', () => {
 
     expect(files).toEqual(buildMessageFiles(requestFiles, [pdf]));
     expect(files[0]).not.toHaveProperty('reading');
+  });
+});
+
+describe('stripReadingNotices', () => {
+  it('drops the notice an earlier turn saved from each replayed ref', () => {
+    const replayed = [
+      { file_id: 'book', filename: 'book.xlsx', reading: { reader: 'code' as const } },
+      { file_id: 'brief', filename: 'brief.pdf' },
+    ];
+
+    const files = stripReadingNotices(replayed);
+
+    expect(files).toEqual([
+      { file_id: 'book', filename: 'book.xlsx' },
+      { file_id: 'brief', filename: 'brief.pdf' },
+    ]);
+    expect(files[1]).toBe(replayed[1]);
+    expect(replayed[0]).toHaveProperty('reading');
+  });
+
+  it('returns the refs themselves when none carries a notice', () => {
+    const refs = [{ file_id: 'brief' }, { file_id: 'book' }];
+    expect(stripReadingNotices(refs)).toBe(refs);
+  });
+
+  it('returns a body without files unchanged', () => {
+    expect(stripReadingNotices(undefined)).toBeUndefined();
+  });
+});
+
+describe('buildResumedUserMessageFiles', () => {
+  const pdf = pdfAttachment();
+
+  it('keeps the files restored from the saved user row, which carry the notices', () => {
+    const restored = [{ file_id: pdf.file_id, reading: { reader: 'provider' as const } }];
+    expect(buildResumedUserMessageFiles(restored, [pdf], preparedAgent({ files: [pdf] }))).toBe(
+      restored,
+    );
+  });
+
+  it('rebuilds the notices from the resumed client when the refs carry none', () => {
+    const files = buildResumedUserMessageFiles(
+      [{ file_id: pdf.file_id }],
+      [pdf],
+      preparedAgent({ files: [pdf] }),
+    );
+    expect(files).toEqual([{ ...pdf, reading: { reader: 'provider' } }]);
+  });
+
+  it('keeps the request refs as they are under the classic policy', () => {
+    const refs = [{ file_id: pdf.file_id }];
+    const agent = preparedAgent({ files: [pdf], endpointConfig: {} });
+    expect(buildResumedUserMessageFiles(refs, [pdf], agent)).toBe(refs);
+  });
+
+  it('keeps the refs when the resumed client holds no matching attachment', () => {
+    const refs = [{ file_id: pdf.file_id }];
+    expect(buildResumedUserMessageFiles(refs, undefined, null)).toBe(refs);
+    expect(buildResumedUserMessageFiles(refs, [], null)).toBe(refs);
   });
 });

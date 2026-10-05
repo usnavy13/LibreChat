@@ -1039,6 +1039,65 @@ describe('useChatFunctions ask attachments', () => {
     expect(isPasteSubmitted('queued-override-file')).toBe(true);
     expect(isPasteSubmitted('queued-override-temp-file')).toBe(true);
   });
+
+  /** A saved message's files carry the notice for the turn that read them; a replay
+   *  must not show it on the new turn before the server projects that turn's own. */
+  const readFile = {
+    file_id: 'workbook-file',
+    temp_file_id: 'workbook-temp-file',
+    filepath: '/uploads/workbook.xlsx',
+    filename: 'workbook.xlsx',
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    llmDeliveryPath: 'none',
+    reading: { reader: 'code' },
+  } as NonNullable<TMessage['files']>[number];
+  const plainFile = {
+    file_id: 'notes-file',
+    filepath: '/uploads/notes.txt',
+    filename: 'notes.txt',
+    type: 'text/plain',
+  };
+  const { reading: _reading, ...readFileWithoutNotice } = readFile;
+
+  it('drops the previous turn reading notice from an edited resubmission', () => {
+    const parent = { ...userMessage('user-1'), files: [readFile, plainFile] } as TMessage;
+    const { result, setMessages, setSubmission } = renderAsk([parent], 'conversation-1', {
+      files: new Map(),
+    });
+
+    act(() => {
+      result.current.ask(
+        {
+          text: 'edited',
+          parentMessageId: parent.parentMessageId,
+          conversationId: 'conversation-1',
+        },
+        { overrideFiles: parent.files },
+      );
+    });
+
+    const submission = setSubmission.mock.calls.at(-1)?.[0] as TSubmission;
+    expect(submission.userMessage.files).toEqual([readFileWithoutNotice, plainFile]);
+    expect(submission.userMessage.files?.[1]).toBe(plainFile);
+    const optimisticUser = (setMessages.mock.calls.at(-1)?.[0] as TMessage[]).find(
+      (message) => message.messageId === submission.userMessage.messageId,
+    );
+    expect(optimisticUser?.files).toEqual([readFileWithoutNotice, plainFile]);
+    expect(createPayload(submission).payload.files).toEqual([readFileWithoutNotice, plainFile]);
+    expect(parent.files?.[0].reading).toEqual({ reader: 'code' });
+  });
+
+  it('drops the previous turn reading notice from regenerated files', () => {
+    const parent = { ...userMessage('user-1'), files: [readFile] } as TMessage;
+    const response = assistantMessage('assistant-1', parent.messageId);
+    const { result, setSubmission } = renderAsk([parent, response]);
+
+    act(() => result.current.regenerate(response));
+
+    const submission = setSubmission.mock.calls.at(-1)?.[0] as TSubmission;
+    expect(submission.userMessage.files).toEqual([readFileWithoutNotice]);
+    expect(parent.files?.[0].reading).toEqual({ reader: 'code' });
+  });
 });
 
 describe('useChatFunctions ask compaction', () => {

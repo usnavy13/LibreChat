@@ -433,7 +433,24 @@ describe('classifyExtractionFailure', () => {
     [new Error('No text found in document'), 'empty'],
     [new Error('Unable to extract text from "a.pdf". It may be image-based.'), 'empty'],
     [new Error('Invalid PDF structure'), 'parser'],
+    [Object.assign(new Error('Invalid PDF structure'), { code: 'ERR_OUT_OF_RANGE' }), 'parser'],
     ['not an error', 'parser'],
+    [Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }), 'unavailable'],
+    [Object.assign(new Error('i/o error'), { code: 'EIO' }), 'unavailable'],
+    [Object.assign(new Error('resource busy or locked'), { code: 'EBUSY' }), 'unavailable'],
+    [Object.assign(new Error('too many open files'), { code: 'EMFILE' }), 'unavailable'],
+    [Object.assign(new Error('try again'), { code: 'EAGAIN' }), 'unavailable'],
+    [Object.assign(new Error('read failed'), { errno: -5, syscall: 'read' }), 'unavailable'],
+    [
+      Object.assign(new Error('incorrect header check'), { errno: -3, code: 'Z_DATA_ERROR' }),
+      'parser',
+    ],
+    [
+      Object.assign(new ZipBombError('archive: total decompressed size exceeds the 100MB cap'), {
+        code: 'EIO',
+      }),
+      'expansion_limit',
+    ],
   ])('classifies %p as %s', (error, reason) => {
     expect(classifyExtractionFailure(error)).toBe(reason);
   });

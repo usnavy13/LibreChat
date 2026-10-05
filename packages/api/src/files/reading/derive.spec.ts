@@ -281,6 +281,49 @@ describe('createFileTextDeriver', () => {
     }
   });
 
+  it('skips, without keeping a marker, a system error the extractor hits reading the copy', async () => {
+    for (const code of ['EBUSY', 'ENOSPC', 'EMFILE']) {
+      const extractors = {
+        parseDocument: jest.fn(parseDocument),
+        parseTextNative: jest.fn(async ({ path: tmpPath }: Express.Multer.File) => {
+          throw Object.assign(new Error(`${code}: resource busy or locked`), {
+            code,
+            errno: -16,
+            path: tmpPath,
+          });
+        }),
+      } satisfies UploadFallbackTextExtractors;
+      await expect(
+        createFileTextDeriver({
+          req: newRequest(),
+          openStoredFile: localStorage(writeSource(`busy-${code}.csv`, 'a,b\n1,2\n')),
+          extractors,
+        })(storedFile({ type: 'text/csv', filename: `busy-${code}.csv` })),
+      ).resolves.toEqual({ status: 'skipped', reason: 'storage_unavailable' });
+      expect(extractors.parseTextNative).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('keeps a parser failure the extractor raised without a system code', async () => {
+    const extractors = {
+      parseDocument: jest.fn(parseDocument),
+      parseTextNative: jest.fn(async () => {
+        throw Object.assign(new Error('Invalid structure'), { code: 'ERR_INVALID_ARG_VALUE' });
+      }),
+    } satisfies UploadFallbackTextExtractors;
+    await expect(
+      createFileTextDeriver({
+        req: newRequest(),
+        openStoredFile: localStorage(writeSource('broken.csv', 'a,b')),
+        extractors,
+      })(storedFile({ type: 'text/csv', filename: 'broken.csv' })),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      textDerivation: { outcome: 'failed', reason: 'parser' },
+      persist: true,
+    });
+  });
+
   it('skips a type no built-in extractor reads without opening it', async () => {
     const openStoredFile = localStorage(path.join(documentsDir, 'sample.xlsx'));
 

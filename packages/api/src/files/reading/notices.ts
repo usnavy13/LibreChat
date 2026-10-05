@@ -25,6 +25,9 @@ export type NoticedFile<T extends TurnReadingFile = TurnReadingFile> = T & {
 
 type ReadEntry = Extract<InventoryEntry, { kind: 'read' }>;
 
+/** A request file ref as the client sends it, which may echo the notice an earlier turn saved. */
+export type ReplayedFile = RequestFile & { reading?: TFileReadingNotice };
+
 /** What a cause tells the user when a reader took the file anyway, and when nothing did. */
 interface LimitationRow {
   read?: ReadingLimitation;
@@ -225,4 +228,57 @@ export function buildUserMessageFiles<T extends TurnReadingFile>(
   agent: ReadingAgent | null | undefined,
 ): Array<TransmittedFile<T | NoticedFile>> {
   return buildMessageFiles(requestFiles, withReadingNotices(attachments, agent));
+}
+
+/** Whether a client-sent ref carries a notice; tolerates the malformed entries a body can hold. */
+const carriesNotice = (file: ReplayedFile | null | undefined): boolean =>
+  file != null && typeof file === 'object' && 'reading' in file;
+
+/**
+ * Request file refs without the notices a replayed message carries. A notice is projected by the
+ * server for the turn that read the file, so a ref the client sends back (an edit, a resubmission)
+ * must not echo the previous turn's notice onto the new message. Returns the input as is when it
+ * is not an array (a body without files) or when no ref carries a notice.
+ */
+export function stripReadingNotices<T extends ReplayedFile>(files: T[]): Array<Omit<T, 'reading'>>;
+export function stripReadingNotices<T extends ReplayedFile>(
+  files: T[] | undefined,
+): Array<Omit<T, 'reading'>> | undefined;
+export function stripReadingNotices<T extends ReplayedFile>(
+  files: T[] | undefined,
+): Array<Omit<T, 'reading'>> | undefined {
+  if (!Array.isArray(files) || !files.some(carriesNotice)) {
+    return files;
+  }
+  return files.map((file) => {
+    if (!carriesNotice(file)) {
+      return file;
+    }
+    const { reading: _reading, ...ref } = file;
+    return ref;
+  });
+}
+
+/**
+ * The user message files a resumed turn's final event carries. Under the classic policy the
+ * request refs are carried as is, as they were before notices existed. Under the automatic
+ * policy, files restored from the saved user row already carry the notices the paused turn saved;
+ * otherwise they are built from the rebuilt client's attachments, as {@link buildUserMessageFiles}
+ * built them for the save. The request refs are kept when no attachment matches, so the event
+ * never blanks the user's attachments.
+ */
+export function buildResumedUserMessageFiles<T extends TurnReadingFile>(
+  requestFiles: ReplayedFile[],
+  attachments: T[] | undefined,
+  agent: ReadingAgent | null | undefined,
+): Array<ReplayedFile | TransmittedFile<T | NoticedFile>> {
+  if (
+    !Array.isArray(attachments) ||
+    getTurnReadingContext(agent?.deliveryRouting)?.policy !== 'automatic' ||
+    requestFiles.some(carriesNotice)
+  ) {
+    return requestFiles;
+  }
+  const files = buildUserMessageFiles(requestFiles, attachments, agent);
+  return files.length > 0 ? files : requestFiles;
 }

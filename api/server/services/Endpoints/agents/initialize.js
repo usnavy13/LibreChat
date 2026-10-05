@@ -10,6 +10,7 @@ const {
   resolveInitializationProjectContext,
   initializeAgent,
   createFileTextDeriver,
+  createDerivationPersister,
   primeInvokedSkillsForProfiles,
   validateAgentModel,
   extractManualSkills,
@@ -748,6 +749,10 @@ const initializeClientWithProvider = async ({
     openStoredFile,
     filters: appConfig?.filters,
   });
+  const persistDerivation = createDerivationPersister(db.saveFileTextDerivation, {
+    user: req.user.id,
+    tenantId: req.user.tenantId,
+  });
   const primaryConfig = await initializeAgent(
     {
       useChatProjectContext: true,
@@ -775,6 +780,7 @@ const initializeClientWithProvider = async ({
       defaultActiveOnShare,
       manualSkills,
       deriveText,
+      persistDerivation,
       signal,
     },
     {
@@ -867,6 +873,7 @@ const initializeClientWithProvider = async ({
       allowedStatefulCodeEnvironments,
       memoryAvailable,
       deriveText,
+      persistDerivation,
     },
     {
       getAgent: db.getAgent,
@@ -1373,6 +1380,7 @@ const initializeClientWithProvider = async ({
           skillStates,
           defaultActiveOnShare,
           deriveText,
+          persistDerivation,
           signal: context.signal,
         },
         {

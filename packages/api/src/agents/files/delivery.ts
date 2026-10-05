@@ -24,6 +24,7 @@ import {
   getTurnReadingContext,
 } from '~/files/reading/turn';
 import { collectModelBoundHistoricalFileIdState } from '~/middleware/modelBoundContent';
+import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
 
 /** The app config a turn's attachment routing reads. */
 export type TurnDeliveryConfig = Pick<AppConfig, 'fileConfig' | 'speech' | 'endpoints'>;
@@ -196,6 +197,16 @@ type ScopedCandidateInputs<T extends TurnDeliveryFile & { file_id: string }> = P
 > &
   Partial<Pick<ScopedTurnAttachmentParams<T>, 'messages' | 'sharedRunAttachmentIds'>>;
 
+/** The endpoint type a receiver's attachments are filtered under, where the caller knows it. */
+export interface ScopedReceiverEndpoint {
+  endpointType?: string | null;
+}
+
+/** Each receiver's endpoint type by agent id. */
+export type ScopedReceiverEndpoints =
+  | Map<string, ScopedReceiverEndpoint>
+  | Record<string, ScopedReceiverEndpoint>;
+
 /**
  * The scoped attachment inputs whose text {@link prepareScopedTurnCandidates} derives. Without the
  * narrowing inputs every receiver with a reading context decides every historical and request file.
@@ -203,6 +214,10 @@ type ScopedCandidateInputs<T extends TurnDeliveryFile & { file_id: string }> = P
 export type ScopedTurnCandidateParams<T extends TurnReadingFile> = ScopedCandidateInputs<T> &
   Pick<ScopedTurnAttachmentParams<T>, 'agents' | 'attachmentsByAgentId'> &
   Partial<Pick<ScopedTurnAttachmentParams<T>, 'sharedConversationAgentIds'>> & {
+    /** The app config whose endpoint file policy each receiver's scoped files must pass. */
+    appConfig?: AppConfig;
+    /** Each receiver's endpoint type; its endpoint is the one its routing settled. */
+    endpointsByAgentId?: ScopedReceiverEndpoints;
     signal?: AbortSignal;
   };
 
@@ -221,6 +236,14 @@ const scopedAttachmentsOf = <T>(
   attachmentsByAgentId instanceof Map
     ? (attachmentsByAgentId.get(agentId) ?? [])
     : (attachmentsByAgentId?.[agentId] ?? []);
+
+const receiverEndpointOf = (
+  endpointsByAgentId: ScopedReceiverEndpoints | undefined,
+  agentId: string,
+): ScopedReceiverEndpoint | undefined =>
+  endpointsByAgentId instanceof Map
+    ? endpointsByAgentId.get(agentId)
+    : endpointsByAgentId?.[agentId];
 
 /** Historical files still model-bound in the retained messages; every one when none are given. */
 function selectHistoricalFileIds<T extends TurnDeliveryFile & { file_id: string }>({
@@ -254,16 +277,50 @@ function collectScopedCandidates<T extends TurnDeliveryFile & { file_id: string 
   return candidates;
 }
 
-/** A receiver that can derive text, with the files its own scoped context already carries. */
+/**
+ * A receiver that can derive text, with the files its own scoped context already carries and the
+ * candidates its endpoint's file policy accepts.
+ */
 interface ScopedTurnReader extends TurnReader {
   scopedFileIds: ReadonlySet<string>;
+  acceptedFileIds: ReadonlySet<string>;
 }
 
-function selectScopedReaders<T extends TurnReadingFile>({
-  agents,
-  sharedConversationAgentIds,
-  attachmentsByAgentId,
-}: ScopedTurnCandidateParams<T>): ScopedTurnReader[] {
+/** A candidate as the endpoint file policy reads it: a missing type or size reads as empty. */
+type PolicyFile = TurnReadingFile & { type: string; bytes: number };
+
+const toPolicyFile = (file: TurnReadingFile): PolicyFile => ({
+  ...file,
+  type: file.type ?? '',
+  bytes: file.bytes ?? 0,
+});
+
+/**
+ * The candidates the receiver's endpoint accepts, by the policy the scoped pipeline applies to
+ * them later: a disabled endpoint, a MIME allowlist and the per-file size limit. A file refused
+ * there is never derived for that receiver.
+ */
+function selectAcceptedFileIds<T extends TurnReadingFile>(
+  candidates: PolicyFile[],
+  routing: TurnDeliveryRouting,
+  agentId: string,
+  { appConfig, endpointsByAgentId }: ScopedTurnCandidateParams<T>,
+): ReadonlySet<string> {
+  const accepted = filterFilesByEndpointRuntimeConfig(appConfig, {
+    files: candidates,
+    endpoint: routing.endpoint,
+    endpointType: receiverEndpointOf(endpointsByAgentId, agentId)?.endpointType,
+    skipTotalSizeLimit: true,
+    preserveTextSources: true,
+  });
+  return new Set(accepted.map((file) => file.file_id));
+}
+
+function selectScopedReaders<T extends TurnReadingFile>(
+  params: ScopedTurnCandidateParams<T>,
+  candidates: PolicyFile[],
+): ScopedTurnReader[] {
+  const { agents, sharedConversationAgentIds, attachmentsByAgentId } = params;
   const sharedAgents = sharedConversationAgentIds && new Set(sharedConversationAgentIds);
   return agents.flatMap(({ agentId, agent }) => {
     const routing = agent.deliveryRouting;
@@ -278,10 +335,16 @@ function selectScopedReaders<T extends TurnReadingFile>({
         consumers: agent.fileConsumers,
         context,
         scopedFileIds: new Set(scoped.map((file) => file.file_id)),
+        acceptedFileIds: selectAcceptedFileIds(candidates, routing, agentId, params),
       },
     ];
   });
 }
+
+const needsScopedText = (file: TurnReadingFile, reader: ScopedTurnReader): boolean =>
+  !reader.scopedFileIds.has(file.file_id) &&
+  reader.acceptedFileIds.has(file.file_id) &&
+  needsDerivedText(file, reader);
 
 /** The candidate with every receiver whose decision needs its text, or nothing when none does. */
 function requestScopedText<T extends TurnReadingFile>(
@@ -289,15 +352,16 @@ function requestScopedText<T extends TurnReadingFile>(
   readers: readonly ScopedTurnReader[],
 ): TextRequest<T>[] {
   const [first, ...rest] = readers
-    .filter((reader) => !reader.scopedFileIds.has(file.file_id) && needsDerivedText(file, reader))
+    .filter((reader) => needsScopedText(file, reader))
     .map(({ context }) => context);
   return first == null ? [] : [{ file, contexts: [first, ...rest] }];
 }
 
 /**
  * Derives, before handoff receivers resolve their scoped context, the text a receiver's reading
- * needs. Each candidate is decided with each receiver's routing and readers, and its text is
- * derived once, through the first receiver that needs it, then saved where the record allows.
+ * needs. Each candidate the receiver's endpoint accepts is decided with that receiver's routing
+ * and readers, and its text is derived once, through the first receiver that needs it, then saved
+ * where the record allows.
  * Returns the candidates, as copies carrying the text, for {@link resolveScopedTurnAttachments}
  * to resolve synchronously without collecting them again; nothing when no receiver has a
  * reading context.
@@ -306,11 +370,14 @@ export async function prepareScopedTurnCandidates<T extends TurnReadingFile>(
   params: ScopedTurnCandidateParams<T>,
 ): Promise<ScopedTurnCandidates<T>> {
   const { signal } = params;
-  const readers = selectScopedReaders(params);
-  if (readers.length === 0) {
+  if (!params.agents.some(({ agent }) => getTurnReadingContext(agent.deliveryRouting) != null)) {
     return {};
   }
   const candidates = collectScopedCandidates(params);
+  const readers = selectScopedReaders(params, [...candidates.values()].map(toPolicyFile));
+  if (readers.length === 0) {
+    return {};
+  }
   const requests = [...candidates.values()].flatMap((file) => requestScopedText(file, readers));
   if (requests.length === 0) {
     return { candidates };

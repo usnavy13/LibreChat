@@ -6,6 +6,7 @@ import type {
   ReadingEvidence,
   FiltersConfig,
 } from 'librechat-data-provider';
+import type { AppConfig } from '@librechat/data-schemas';
 import type {
   DerivedText,
   FileTextDeriver,
@@ -544,19 +545,23 @@ describe('prepareScopedTurnCandidates', () => {
       consumers = noReader,
       deriveText,
       persistDerivation,
+      endpoint = 'openAI',
+      config = automatic,
     }: {
       consumers?: TurnFileConsumers;
       deriveText?: FileTextDeriver;
       persistDerivation?: TextDerivationPersister;
+      endpoint?: string;
+      config?: Pick<AppConfig, 'fileConfig'>;
     } = {},
   ) {
     const deliveryRouting = resolveTurnDeliveryRouting({
-      agent: { provider: 'openAI' },
-      config: automatic,
+      agent: { provider: endpoint },
+      config,
     });
     const context = buildTurnReadingContext({
       routing: deliveryRouting,
-      provider: 'openAI',
+      provider: endpoint,
       fileTokenLimit: 100_000,
       configuredFileSizeLimit: undefined,
       countTokens: (text) => text.length,
@@ -572,6 +577,14 @@ describe('prepareScopedTurnCandidates', () => {
 
   const deriver = () =>
     jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(async () => derived);
+
+  /** The app config a receiver's endpoint file policy is read from. */
+  const appConfigWith = (fileConfig: AppConfig['fileConfig']): AppConfig => ({
+    config: {},
+    fileStrategy: FileSources.local,
+    imageOutputType: 'png',
+    fileConfig,
+  });
 
   it('collects nothing when no receiver has a reading context', async () => {
     const historicalFiles = new Map([[historical.file_id, historical]]);
@@ -682,6 +695,62 @@ describe('prepareScopedTurnCandidates', () => {
     expect(deriveText.mock.calls.map(([file]) => file.file_id)).toEqual([requested.file_id]);
     expect(prepared.candidates?.get(requested.file_id)?.text).toBe(derived.text);
     expect(prepared.candidates?.get(scopedFile.file_id)).toBe(scopedFile);
+  });
+
+  it('derives nothing for a receiver whose endpoint refuses the candidate', async () => {
+    const fileConfig = {
+      endpoints: {
+        openAI: { llmDeliveryPolicy: 'automatic' as const, disabled: true },
+        anthropic: {
+          llmDeliveryPolicy: 'automatic' as const,
+          supportedMimeTypes: ['^application/pdf$'],
+        },
+      },
+    };
+    const appConfig = appConfigWith(fileConfig);
+    const disabledDeriver = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+      async () => ({ status: 'blocked', error: new UninspectableFileError('extracted_text') }),
+    );
+    const allowlistDeriver = deriver();
+
+    const prepared = await prepareScopedTurnCandidates({
+      agents: [
+        receiver('disabled', { deriveText: disabledDeriver, config: { fileConfig } }),
+        receiver('allowlist', {
+          deriveText: allowlistDeriver,
+          endpoint: 'anthropic',
+          config: { fileConfig },
+        }),
+      ],
+      appConfig,
+      endpointsByAgentId: new Map([['allowlist', { endpointType: null }]]),
+      requestAttachments: [requested],
+    });
+
+    expect(disabledDeriver).not.toHaveBeenCalled();
+    expect(allowlistDeriver).not.toHaveBeenCalled();
+    expect(prepared.candidates?.get(requested.file_id)).toBe(requested);
+  });
+
+  it('still derives for a receiver whose endpoint accepts the candidate', async () => {
+    const fileConfig = {
+      endpoints: {
+        openAI: {
+          llmDeliveryPolicy: 'automatic' as const,
+          supportedMimeTypes: [`^${XLSX}$`],
+        },
+      },
+    };
+    const deriveText = deriver();
+
+    const prepared = await prepareScopedTurnCandidates({
+      agents: [receiver('handoff', { deriveText, config: { fileConfig } })],
+      appConfig: appConfigWith(fileConfig),
+      requestAttachments: [requested],
+    });
+
+    expect(deriveText).toHaveBeenCalledTimes(1);
+    expect(prepared.candidates?.get(requested.file_id)?.text).toBe(derived.text);
   });
 
   it('marks the text failed on every receiver that needed it, so each moves on', async () => {

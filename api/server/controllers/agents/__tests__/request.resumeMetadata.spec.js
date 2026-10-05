@@ -295,6 +295,8 @@ jest.mock('@librechat/api', () => ({
   getViolationInfo: (...args) => mockGetViolationInfo(...args),
   /** Real, because the reading notices the final user-message save carries are under test. */
   buildUserMessageFiles: jest.requireActual('@librechat/api').buildUserMessageFiles,
+  /** Real, because a replayed file's stale notice must not reach the new user message. */
+  stripReadingNotices: jest.requireActual('@librechat/api').stripReadingNotices,
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,
@@ -4014,6 +4016,37 @@ describe('ResumableAgentController resume metadata', () => {
         { conversationId },
         expect.objectContaining({ noUpsert: true }),
       );
+    });
+
+    it('saves an edited resubmission that fails early without the replayed reading notice', async () => {
+      const initializeClient = jest.fn().mockRejectedValue(new Error('model unavailable'));
+      const replayedFile = {
+        file_id: 'book',
+        filename: 'book.xlsx',
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        reading: { reader: 'code' },
+      };
+
+      await AgentController(
+        createFailedRequest({ files: [replayedFile] }),
+        createResumableResponse(),
+        jest.fn(),
+        initializeClient,
+        null,
+      );
+
+      const [, savedUser] = mockSaveMessage.mock.calls.find(
+        ([, message]) => message?.messageId === 'user-message',
+      );
+      expect(savedUser.files).toEqual([
+        {
+          file_id: 'book',
+          filename: 'book.xlsx',
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+      ]);
+      expect(savedUser.files[0]).not.toHaveProperty('reading');
+      expect(replayedFile).toHaveProperty('reading');
     });
 
     it('allows a follow-up to chain from the persisted failed response', async () => {

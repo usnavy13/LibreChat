@@ -146,8 +146,8 @@ import { isFatalAgentInitializationError } from '../errors';
 import { filterFilesByEndpointRuntimeConfig as filterByEndpointPolicy } from '~/files/filter';
 import { assertModelBoundContent } from '../../middleware/modelBoundContent';
 import { ContentFilterError } from '../../middleware/contentFilter';
-import { getTurnReadingContext } from '~/files/reading';
-import type { FileTextDeriver } from '~/files/reading';
+import { getTurnReadingContext, createDerivationPersister } from '~/files/reading';
+import type { FileTextDeriver, TextDerivationPersister } from '~/files/reading';
 
 const realUtils = jest.requireActual<typeof import('~/utils')>('~/utils');
 
@@ -5898,6 +5898,7 @@ describe('initializeAgent automatic delivery policy', () => {
     contextFiles = [],
     deriveText,
     saveFileTextDerivation,
+    persistDerivation,
     loaded = {},
     provisionState,
     filters,
@@ -5915,6 +5916,8 @@ describe('initializeAgent automatic delivery policy', () => {
     /** The host's text deriver, which also builds a derive-only context under classic. */
     deriveText?: FileTextDeriver;
     saveFileTextDerivation?: InitializeAgentDbMethods['saveFileTextDerivation'];
+    /** The host's request-scoped persister, shared by every agent it initializes. */
+    persistDerivation?: TextDerivationPersister;
     /** Persistent agent files priming adds to the delivered and agent-context sets. */
     contextFiles?: IMongoFile[];
     policy?: 'automatic' | 'classic';
@@ -5994,6 +5997,7 @@ describe('initializeAgent automatic delivery policy', () => {
         allowedProviders: new Set([Providers.OPENAI]),
         isInitialAgent: true,
         deriveText,
+        persistDerivation,
         ...skillParams,
       },
       { ...db, ...skillDb, ...(saveFileTextDerivation != null && { saveFileTextDerivation }) },
@@ -6389,6 +6393,31 @@ describe('initializeAgent automatic delivery policy', () => {
         expect(result.requestAttachments).toEqual([file]);
       },
     );
+
+    it('saves through the host persister, once for every agent sharing it', async () => {
+      const deriveText = deriver();
+      const hostSave = saver();
+      const ownSave = saver();
+      const persistDerivation = createDerivationPersister(hostSave, { user: 'user-1' });
+
+      for (let agent = 0; agent < 2; agent++) {
+        await initializeWith({
+          file: deferredXlsx(),
+          policy: 'automatic',
+          deriveText,
+          saveFileTextDerivation: ownSave,
+          persistDerivation,
+        });
+      }
+
+      expect(deriveText).toHaveBeenCalledTimes(2);
+      expect(ownSave).not.toHaveBeenCalled();
+      expect(hostSave).toHaveBeenCalledTimes(1);
+      expect(hostSave).toHaveBeenCalledWith(
+        expect.objectContaining({ text: derived.text, textDerivation: derived.textDerivation }),
+        { user: 'user-1' },
+      );
+    });
 
     it('leaves a deferred spreadsheet to Run Code without deriving it', async () => {
       const xlsx = deferredXlsx();

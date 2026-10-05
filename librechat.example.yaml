@@ -1335,7 +1335,10 @@ endpoints:
 #   # attachment's access is listed for the model and shown on the user's message.
 #   # Explicit destinations, legacyFileUploadUX and defaultLLMDeliveryPath still win.
 #   # Also configurable under endpoints.default or a provider/custom endpoint name. Enable only
-#   # after every server replica runs this version.
+#   # after every server replica runs this version. Before downgrading the server, set this back
+#   # to classic so no new deferred records are written; workbooks already deferred stay readable
+#   # only by Run Code on the older version (its handoff encoder can fail the turn on them) until
+#   # they are re-uploaded or backfilled.
 #   llmDeliveryPolicy: classic
 #   fileContextSizeLimit: 128  # Maximum aggregate model-bound attachment size in one agent turn (MB)
 #   fileContextCharLimit: 1000000  # Maximum aggregate extracted-text characters in one agent turn

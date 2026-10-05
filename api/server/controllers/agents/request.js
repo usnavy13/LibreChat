@@ -14,6 +14,7 @@ const {
   applyForcedTemporaryRequest,
   resolveResumableRetention,
   buildUserMessageFiles,
+  stripReadingNotices,
   getReferencedQuotes,
   resolveTitleTiming,
   GenerationJobManager,
@@ -756,6 +757,7 @@ function rejectMissingTriggerParentMessageId(res, generationProtocolVersion) {
  */
 const ResumableAgentController = async (req, res, next, initializeClient, addTitle) => {
   applyForcedTemporaryRequest(req);
+  req.body.files = stripReadingNotices(req.body.files);
   const startupTelemetry = getAgentStartupTelemetry(req);
   let generationProtocolVersion = negotiateNewGenerationProtocol(req);
   const {

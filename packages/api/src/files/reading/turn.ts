@@ -64,6 +64,45 @@ export type TextDerivationUpdate = FileTextDerivationUpdate;
 /** Saves a derivation onto its record and resolves whether a record changed. */
 export type TextDerivationPersister = (update: TextDerivationUpdate) => Promise<boolean>;
 
+/** The owner a derivation is saved under, as `saveFileTextDerivation` scopes its write. */
+export interface DerivationOwnerScope {
+  user: string;
+  tenantId?: string | null;
+}
+
+/** Saves a derivation under an owner scope: the data-schemas `saveFileTextDerivation`. */
+export type TextDerivationSave = (
+  update: TextDerivationUpdate,
+  scope: DerivationOwnerScope,
+) => Promise<boolean>;
+
+/**
+ * A request's derivation persister: saves under the request's file owner and writes each file at
+ * most once, so the reading contexts of several agents that share one deriver issue one write per
+ * derived file. A failed write is forgotten, so a later context may try again. The host builds
+ * one per request, next to the deriver, and hands it to every agent.
+ */
+export function createDerivationPersister(
+  save: TextDerivationSave,
+  scope: DerivationOwnerScope,
+): TextDerivationPersister {
+  const writes = new Map<string, Promise<boolean>>();
+  return (update) => {
+    const existing = writes.get(update.file_id);
+    if (existing != null) {
+      return existing;
+    }
+    const write = save(update, scope);
+    writes.set(update.file_id, write);
+    write.catch(() => {
+      if (writes.get(update.file_id) === write) {
+        writes.delete(update.file_id);
+      }
+    });
+    return write;
+  };
+}
+
 /** Which files File Search will receive on this turn, known once tools have loaded. */
 export interface SearchEvidence {
   /** Files queued for embedding on this request. */
@@ -102,8 +141,14 @@ export interface TurnReadingContext extends TurnReadingInputs {
   derive(file: TurnReadingFile, signal?: AbortSignal): Promise<DerivedText>;
   /**
    * Starts the record writes the request's derivations queued, once each derivation settles, and
-   * waits for them. Nothing is written before a flush, so a caller flushes only after the files
-   * passed its checks. Never rejects.
+   * waits for them. Never rejects. Nothing is written before a flush, but a flush is not what
+   * makes the text safe to keep: derived text is content-inspected when it is derived
+   * (`extractBoundedText` applies the `extracted_text` policy), text a policy refuses is never
+   * written, and its refusal throws from {@link deriveRequestedText}. Initialization flushes only
+   * after endpoint admission and the full-set inspection. History replay, steering and the
+   * run-file encoder flush right after deriving, before their own endpoint filter and model-bound
+   * admission run; the scoped handoff candidates do too, but derive only for files each
+   * receiver's endpoint accepts.
    */
   flush(): Promise<void>;
   stats(): TurnReadingStats;
@@ -463,23 +508,40 @@ function createTurnReadingContext(
     ...(fileId != null && textFailed.has(fileId) && { textFailed: true as const }),
   });
 
+  /**
+   * Exposes the text verdict as an enumerable getter judged on first read, so a reading walk that
+   * settles on Run Code, the provider or File Search never counts tokens in text it will not
+   * deliver. The verdict is memoized here and, by file and text length, for knownTokenCount.
+   */
+  const withLazyText = (evidence: ReadingEvidence, file: TurnDeliveryFile): ReadingEvidence => {
+    let verdict: TextVerdict | undefined;
+    Object.defineProperty(evidence, 'text', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        verdict ??= judgeText(file);
+        return verdict?.fit;
+      },
+    });
+    return evidence;
+  };
+
   const judge = (file: TurnDeliveryFile): ReadingEvidence => {
     if (!automatic) {
       return requestEvidence(file.file_id);
     }
     const fileId = file.file_id;
     const native = judgeNative(file);
-    const text = judgeText(file);
     const rejection = fileId == null ? undefined : rejected.get(fileId);
     const search = judgeSearch(file);
-    return {
+    const evidence: ReadingEvidence = {
       ...(native != null && { native }),
-      ...(text != null && { text: text.fit }),
       ...(rejection != null && { rejected: rejection }),
       ...(fileId != null && overflow.has(fileId) && { overflow: true as const }),
       ...requestEvidence(fileId),
       ...(search != null && { search }),
     };
+    return hasText(file.text) ? withLazyText(evidence, file) : evidence;
   };
 
   const knownTokenCount = (file: TurnDeliveryFile): number | undefined => {

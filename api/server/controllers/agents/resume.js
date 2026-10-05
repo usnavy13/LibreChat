@@ -59,6 +59,7 @@ const {
   applyForcedTemporaryRequest,
   persistForcedTemporaryMetadata,
   announceReply,
+  buildResumedUserMessageFiles,
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const { decryptMetadata } = require('~/server/services/ActionService');
@@ -707,10 +708,17 @@ async function finalizeResumedTurn({
             conversationId,
             isCreatedByUser: true,
             // job.metadata.userMessage is persisted without files; carry the restored
-            // uploads (seeded onto req.body.files before reconstruction) so the final SSE
-            // doesn't blank the user bubble's attachments — matching the normal path.
+            // uploads (seeded onto req.body.files before reconstruction) with their reading
+            // notices so the final SSE doesn't blank the user bubble's attachments or
+            // captions — matching the normal path.
             ...(Array.isArray(req.body?.files) && req.body.files.length > 0
-              ? { files: req.body.files }
+              ? {
+                  files: buildResumedUserMessageFiles(
+                    req.body.files,
+                    client?.options?.attachments,
+                    client?.options?.agent,
+                  ),
+                }
               : {}),
           })
         : null,

@@ -42,7 +42,11 @@ export interface SettleTurnFilesParams<T extends TurnReadingFile> {
   consumers?: TurnFileConsumers;
   files: T[];
   allocation?: DirectContentAllocation<T>;
-  /** Settle the context's pending work before returning; initialization flushes later. */
+  /**
+   * Save the derivations the context queued before returning. Derived text was already
+   * content-inspected at derivation, and a policy refusal throws instead of saving; this decides
+   * only whether the save waits for the caller's later checks, as initialization's does.
+   */
   flush?: boolean;
   signal?: AbortSignal;
 }
@@ -171,8 +175,10 @@ export async function settleTurnFiles<T extends TurnReadingFile>({
 }
 
 /**
- * {@link settleTurnFiles} without allocation, settling pending work before returning: for
- * readers outside initialization, such as history replay, steering and the run-file encoder.
+ * {@link settleTurnFiles} without allocation, saving its derivations before returning: for readers
+ * outside initialization, such as history replay, steering and the run-file encoder. Those saves
+ * happen before the caller's endpoint filter and model-bound admission; the text they keep passed
+ * the `extracted_text` inspection when it was derived, and a refusal throws without saving.
  */
 export function prepareTurnFiles<T extends TurnReadingFile>({
   flush = true,

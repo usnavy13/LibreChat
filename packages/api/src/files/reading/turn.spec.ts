@@ -1,5 +1,5 @@
 import { logger } from '@librechat/data-schemas';
-import { FileContext, FileSources } from 'librechat-data-provider';
+import { FileContext, FileSources, decideFileReading } from 'librechat-data-provider';
 import type { TFileConfig, TurnFileConsumers, TurnDeliveryRouting } from 'librechat-data-provider';
 import type {
   DerivedText,
@@ -8,6 +8,7 @@ import type {
   EncodedDocuments,
   NativeDeliveryAgent,
   TextDerivationPersister,
+  TextDerivationSave,
   BuildTurnReadingContextParams,
 } from './turn';
 import type { NativeValidationMode } from '~/types';
@@ -20,6 +21,7 @@ import {
   recordNativeRejections,
   buildTurnReadingContext,
   getNativeValidationPolicy,
+  createDerivationPersister,
 } from './turn';
 import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
 import { UninspectableFileError } from '~/protection/files';
@@ -157,7 +159,7 @@ describe('getTurnTextOptions', () => {
     const context = contextFor({ routing, fileTokenLimit: 10, countTokens: () => 4 });
     routing.reading = context;
     const file = attachment({ file_id: 'notes', text: 'x'.repeat(40), llmDeliveryPath: 'text' });
-    context.judge(file);
+    expect(context.judge(file).text).toBe('fits');
 
     const options = getTurnTextOptions(routing);
 
@@ -416,6 +418,41 @@ describe('text verdicts', () => {
       'exceeds',
     );
     expect(countTokens).toHaveBeenCalledTimes(2);
+  });
+
+  it('never counts a stored text the reading walk gives to Run Code', () => {
+    const countTokens = jest.fn(countByLength);
+    const routing = routingFor('openAI');
+    const context = contextFor({ routing, fileTokenLimit: 100_000, countTokens });
+    routing.reading = context;
+    const csv = attachment({
+      file_id: 'large-csv',
+      type: 'text/csv',
+      llmDeliveryPath: 'text',
+      text: 'x'.repeat(700_000),
+    });
+
+    const reading = decideFileReading({
+      routing,
+      file: csv,
+      consumers: { executeCode: true, fileSearch: false },
+    });
+
+    expect(reading.reader).toBe('code');
+    expect(countTokens).not.toHaveBeenCalled();
+    expect(context.knownTokenCount(csv)).toBe(undefined);
+
+    expect(context.judge(csv).text).toBe('exceeds');
+    expect(countTokens).toHaveBeenCalledTimes(1);
+    expect(context.knownTokenCount(csv)).toBe(700_000);
+  });
+
+  it('lists the text verdict among the evidence once it is read', () => {
+    const context = contextFor({ fileTokenLimit: 10 });
+    const evidence = context.judge(attachment({ file_id: 'short', text: 'tiny' }));
+
+    expect(Object.keys(evidence)).toContain('text');
+    expect(evidence).toEqual({ native: 'fits', text: 'fits' });
   });
 
   it('judges no text verdict for a record without text', () => {
@@ -757,6 +794,48 @@ describe('derive', () => {
       } finally {
         errorSpy.mockRestore();
       }
+    });
+  });
+
+  describe('createDerivationPersister', () => {
+    const update = {
+      file_id: 'xlsx',
+      text: 'quarter,total',
+      textDerivation: { outcome: 'complete' as const, extractor: 'document_parser' as const },
+    };
+    const scope = { user: 'user-1', tenantId: 'tenant-1' };
+
+    it('writes a file once for every agent context sharing it', async () => {
+      const save = jest.fn<ReturnType<TextDerivationSave>, Parameters<TextDerivationSave>>(
+        async () => true,
+      );
+      const persistDerivation = createDerivationPersister(save, scope);
+      const deriveText: FileTextDeriver = async () => ({
+        status: 'derived',
+        text: update.text,
+        textDerivation: update.textDerivation,
+      });
+      const primary = contextFor({ deriveText, persistDerivation });
+      const handoff = contextFor({ deriveText, persistDerivation });
+
+      await Promise.all([primary.derive(xlsx), handoff.derive({ ...xlsx })]);
+      await Promise.all([primary.flush(), handoff.flush()]);
+
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith(update, scope);
+    });
+
+    it('forgets a failed write, so a later context tries again', async () => {
+      const save = jest
+        .fn<ReturnType<TextDerivationSave>, Parameters<TextDerivationSave>>()
+        .mockRejectedValueOnce(new Error('write conflict'))
+        .mockResolvedValueOnce(true);
+      const persistDerivation = createDerivationPersister(save, scope);
+
+      await expect(persistDerivation(update)).rejects.toThrow('write conflict');
+      await expect(persistDerivation(update)).resolves.toBe(true);
+      await expect(persistDerivation(update)).resolves.toBe(true);
+      expect(save).toHaveBeenCalledTimes(2);
     });
   });
 

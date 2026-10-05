@@ -60,8 +60,15 @@ export type ExtractionFailureReason = Extract<
   'empty' | 'parser' | 'too_large' | 'expansion_limit'
 >;
 
-/** Why bounded extraction kept no text: the extractor failed, or a file policy refused its text. */
-export type BoundedTextFailure = ExtractionFailureReason | 'policy' | 'uninspectable';
+/**
+ * Why bounded extraction kept no text: the extractor failed, a file policy refused its text, or
+ * the system could not serve the read (`unavailable`), which says nothing about the file.
+ */
+export type BoundedTextFailure =
+  | ExtractionFailureReason
+  | 'policy'
+  | 'uninspectable'
+  | 'unavailable';
 
 /**
  * Text within every cap, or why there is none: `error` is set when extraction threw, and
@@ -92,9 +99,38 @@ export function matchExtractionFailure(error: unknown): ExtractionFailureReason 
   return EXTRACTION_FAILURE_MESSAGES.find(([fragment]) => message.includes(fragment))?.[1];
 }
 
-/** The stable reason a built-in extractor failed with; anything unrecognized is a parser error. */
-export function classifyExtractionFailure(error: unknown): ExtractionFailureReason {
-  return matchExtractionFailure(error) ?? 'parser';
+interface SystemErrorShape {
+  code?: string;
+  errno?: number;
+  syscall?: string;
+}
+
+/** POSIX error names (`ENOSPC`, `EIO`, `EBUSY`, `EMFILE`, `EAGAIN`...), never Node's `ERR_*` codes. */
+const SYSTEM_ERROR_CODE = /^E[A-Z0-9]+$/;
+
+/**
+ * Whether the error is the operating system refusing a read, such as a full disk, a busy or
+ * locked file, or descriptor exhaustion, rather than anything the file's content caused. These
+ * clear up, so a later read may succeed. An `errno` alone is not enough: zlib reports a corrupt
+ * archive with one (`Z_DATA_ERROR`), so it counts only with the system call that failed.
+ */
+export function isSystemError(error: unknown): boolean {
+  if (typeof error !== 'object' || error == null) {
+    return false;
+  }
+  const { code, errno, syscall }: SystemErrorShape = error;
+  return (
+    (typeof code === 'string' && SYSTEM_ERROR_CODE.test(code)) ||
+    (typeof errno === 'number' && typeof syscall === 'string')
+  );
+}
+
+/**
+ * The stable reason a built-in extractor failed with. A failure the extractor names keeps its
+ * reason, a system error is `unavailable`, and anything else unrecognized is a parser error.
+ */
+export function classifyExtractionFailure(error: unknown): ExtractionFailureReason | 'unavailable' {
+  return matchExtractionFailure(error) ?? (isSystemError(error) ? 'unavailable' : 'parser');
 }
 
 /** Whether the upload's text is left to a turn, which derives it from the stored original. */

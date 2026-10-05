@@ -2522,6 +2522,8 @@ class AgentClient extends BaseClient {
     };
     const scopedCandidates = await prepareScopedTurnCandidates({
       ...scopedInputs,
+      appConfig: this.options.req?.config,
+      endpointsByAgentId,
       signal: this.options.abortController?.signal,
     });
     this.options.agentContextAttachmentsByAgentId = resolveScopedTurnAttachments({
