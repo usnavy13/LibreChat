@@ -15,8 +15,8 @@ import type {
   TurnDeliveryRouting,
 } from 'librechat-data-provider';
 import type { CodeFileAgent, ProvisionToolContext } from '~/files/code/queued';
+import type { SearchPreparationState, TurnReadingFile } from './turn';
 import type { CodeFileLocation } from '~/files/code/priming';
-import type { TurnReadingFile } from './turn';
 import { CODE_FILE_CONTEXT_ROOTS, getCodeFileLocation } from '~/files/code/priming';
 import { assertModelBoundContent } from '~/middleware/modelBoundContent';
 import { prepareQueuedCodeFileContext } from '~/files/code/queued';
@@ -66,6 +66,7 @@ export type InventoryEntry =
       file: TurnReadingFile;
       reading: FileReading;
       code?: CodeFileState;
+      search?: SearchPreparationState;
       withheld?: WithheldReason;
     }
   | { kind: 'dropped'; file: TurnReadingFile };
@@ -181,11 +182,16 @@ function readEntry(agent: DecidingAgent, file: TurnReadingFile): ReadEntry {
     consumers: agent.fileConsumers,
   });
   const withheld = findWithheldReason(agent, file, reading);
+  const search =
+    reading.reader === 'search'
+      ? getTurnReadingContext(agent.deliveryRouting)?.searchState(file.file_id)
+      : undefined;
   return {
     kind: 'read',
     file,
     reading,
     ...(reading.code === 'eligible' && { code: locateCodeFile(agent, file) }),
+    ...(search != null && { search }),
     ...(withheld != null && { withheld }),
   };
 }
@@ -300,8 +306,12 @@ const withAlsoInCode = (lead: string, code?: CodeFileState): string => {
   return alsoInCode == null ? lead : `${lead} ${alsoInCode}`;
 };
 
-function describeSearch(file: TurnReadingFile): string {
-  const indexed = hasToolResourceProvisioning(file, EToolResources.file_search);
+function describeSearch(file: TurnReadingFile, state?: SearchPreparationState): string {
+  if (state === 'failed') {
+    return `File Search could not prepare it on this turn. Retry ${Tools.file_search} to try indexing again. ${NOT_READ}`;
+  }
+  const indexed =
+    state === 'ready' || hasToolResourceProvisioning(file, EToolResources.file_search);
   const pending = indexed ? '' : '; it is indexed when you first search';
   return `search it with ${Tools.file_search}${pending}. ${SEARCH_EXCERPTS}`;
 }
@@ -318,6 +328,7 @@ function describeReader(
   file: TurnReadingFile,
   reading: FileReading,
   code: CodeFileState = NOT_PREPARED,
+  search?: SearchPreparationState,
 ): string {
   switch (reading.reader) {
     case 'provider':
@@ -327,7 +338,7 @@ function describeReader(
         ? 'its complete extracted text is included in this message.'
         : 'its extracted text is included in this message.';
     case 'search':
-      return describeSearch(file);
+      return describeSearch(file, search);
     case 'code':
       return describeCodeReader(code);
     default:
@@ -336,7 +347,7 @@ function describeReader(
 }
 
 function describeRead(
-  { file, reading, code, withheld }: ReadEntry,
+  { file, reading, code, search, withheld }: ReadEntry,
   { receivesRequest }: InventoryView,
 ): string {
   if (!receivesRequest && MESSAGE_READERS.has(reading.reader)) {
@@ -353,7 +364,10 @@ function describeRead(
       ? `its extracted text is included in this message. ${capitalize(TEXT_ONLY)}`
       : TEXT_ONLY;
   }
-  const status = describeReader(file, reading, code);
+  const status = describeReader(file, reading, code, search);
+  if (reading.reader === 'search' && search === 'failed') {
+    return withAlsoInCode(status, code);
+  }
   if (reading.reader === 'unavailable' || reading.reader === 'unresolved') {
     return status;
   }

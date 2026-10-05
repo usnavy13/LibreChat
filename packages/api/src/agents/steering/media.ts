@@ -35,6 +35,11 @@ export interface SteerMediaClient {
     files: IMongoFile[],
     consumers?: TurnFileConsumers,
   ): Promise<IMongoFile[] | undefined>;
+  processMessageAttachments?(
+    message: Record<string, unknown>,
+    files: IMongoFile[],
+    consumers?: TurnFileConsumers,
+  ): Promise<IMongoFile[] | undefined>;
   /**
    * The host's running agent. `resolveTurnAttachments` applies its `deliveryRouting`, so the
    * steer judges its files by the same routing, with Run Code as a reader exactly when the
@@ -150,10 +155,18 @@ async function encodeSteerContent({
   /** Files kept for Run Code on the next message, each noted after the steer body. */
   heldFilenames?: readonly string[];
 }): Promise<SteerMediaResult> {
-  const modelText = appendCodeHoldNotes(mergeSteerModelText(text, quotes), heldFilenames);
   const pseudo: PseudoMessage = { messageId: `steer:${steerId}` };
-  await client.addFileContextToMessage(pseudo, fileDocs, fileConsumers);
-  const validated = await client.processAttachments(pseudo, fileDocs, fileConsumers);
+  let validated: IMongoFile[] | undefined;
+  if (client.processMessageAttachments != null) {
+    validated = await client.processMessageAttachments(pseudo, fileDocs, fileConsumers);
+  } else {
+    await client.addFileContextToMessage(pseudo, fileDocs, fileConsumers);
+    validated = await client.processAttachments(pseudo, fileDocs, fileConsumers);
+  }
+  const settledFiles = validated ?? fileDocs;
+  const finalHeldFilenames =
+    fileConsumers == null ? heldFilenames : resolveSteerReading(client, settledFiles).heldFilenames;
+  const modelText = appendCodeHoldNotes(mergeSteerModelText(text, quotes), finalHeldFilenames);
   const formatted = formatMessage({
     message: {
       role: 'user',

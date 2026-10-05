@@ -73,6 +73,7 @@ jest.mock('@librechat/api', () => ({
     score: 1,
   })),
   buildUserMessageFiles: jest.fn(() => []),
+  refreshUserMessageReading: jest.requireActual('@librechat/api').refreshUserMessageReading,
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,

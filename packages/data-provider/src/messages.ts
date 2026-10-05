@@ -28,14 +28,21 @@ type MessageFile = NonNullable<TMessage['files']>[number];
 
 /**
  * The stored record stands in for a message's file, but how that message's turn read the file
- * lives only on the message's copy, so its reading notice is carried over.
+ * lives only on the message's copy, so its reading notice and delivery path are carried over.
  */
 export function hydrateMessageFile(file: MessageFile, fileMap: Record<string, TFile>): MessageFile {
   const stored = fileMap[file.file_id ?? ''];
   if (stored == null) {
     return file;
   }
-  return file.reading == null ? stored : { ...stored, reading: file.reading };
+  if (file.reading == null) {
+    return stored;
+  }
+  return {
+    ...stored,
+    reading: file.reading,
+    llmDeliveryPath: file.llmDeliveryPath ?? stored.llmDeliveryPath,
+  };
 }
 
 /**

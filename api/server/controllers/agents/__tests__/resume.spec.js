@@ -83,6 +83,7 @@ const mockGetAgentCheckpointer = jest.fn();
 const mockCheckpointGetTuple = jest.fn();
 
 const mockSaveMessage = jest.fn();
+const mockUpdateMessage = jest.fn();
 const mockGetConvo = jest.fn();
 const mockGetChatProject = jest.fn();
 const mockGetMessages = jest.fn();
@@ -154,6 +155,7 @@ jest.mock('@librechat/api', () => ({
 
 jest.mock('~/models', () => ({
   saveMessage: (...args) => mockSaveMessage(...args),
+  updateMessage: (...args) => mockUpdateMessage(...args),
   stampForcedRetention: (...args) => mockStampForcedRetention(...args),
   getConvo: (...args) => mockGetConvo(...args),
   getChatProject: (...args) => mockGetChatProject(...args),
@@ -356,6 +358,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
     });
     mockCleanupMCPRequestContextForReq.mockResolvedValue(undefined);
     mockSaveMessage.mockResolvedValue({});
+    mockUpdateMessage.mockResolvedValue({});
     mockGetConvo.mockResolvedValue(null);
     mockGetChatProject.mockResolvedValue(null);
     mockGetMessages.mockResolvedValue([]);
@@ -402,7 +405,12 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       }),
     );
     mockGenerationJobManager.finishTerminalJob.mockResolvedValue(undefined);
-    mockGenerationJobManager.completeJob.mockResolvedValue(true);
+    mockGenerationJobManager.completeJob.mockImplementation(
+      async (_streamId, _error, _createdAt, options) => {
+        await options?.beforeErrorPublication?.();
+        return true;
+      },
+    );
     mockGenerationJobManager.abortJob.mockResolvedValue({ success: true });
     mockGenerationJobManager.beginProviderExecution.mockResolvedValue(true);
     mockGenerationJobManager.markProviderExecutionDrained.mockResolvedValue(true);
@@ -2524,6 +2532,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         expect.any(String),
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
       expect(mockDeleteAgentCheckpoint).toHaveBeenCalledWith(
         CONVO_ID,
@@ -3164,6 +3173,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         expect.stringContaining('Retry the request and review the action again'),
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
       expect(mockDisposeClient).toHaveBeenCalledWith(resumedClient);
     });
@@ -3672,6 +3682,131 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       ]);
     });
 
+    it.each(['failure', 'success', 're-pause'])(
+      'persists the resumed search preparation %s before terminal or pause publication',
+      async (outcome) => {
+        const {
+          resolveTurnDeliveryRouting,
+          buildTurnReadingContext,
+          buildUserMessageFiles,
+          createProvisionFilesCallback,
+          FileSearchPreparationError,
+        } = jest.requireActual('@librechat/api');
+        const file = {
+          user: USER_ID,
+          file_id: 'search-brief',
+          filename: 'search-brief.pdf',
+          filepath: '/uploads/search-brief.pdf',
+          type: 'application/pdf',
+          bytes: 15 * 1024 * 1024,
+          source: 'local',
+          context: 'message_attachment',
+          llmDeliveryPath: 'none',
+          metadata: { destinationChosen: false },
+          text: 'cached text must not reach status',
+        };
+        const preparation = new Map();
+        const provisionState = {
+          codeEnvFiles: [],
+          vectorDBFiles: [file],
+          aliveFileIds: new Set(),
+          agentScopedFileIds: new Set(),
+          searchPreparation: preparation,
+        };
+        const agent = {
+          id: AGENT_ID,
+          provider: 'openAI',
+          endpoint: 'openAI',
+          fileConsumers: { executeCode: false, fileSearch: true },
+          currentRequestAttachments: [file],
+          provisionState,
+        };
+        agent.deliveryRouting = resolveTurnDeliveryRouting({
+          agent,
+          config: { fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } } },
+        });
+        agent.deliveryRouting.reading = buildTurnReadingContext({
+          routing: agent.deliveryRouting,
+          provider: 'openAI',
+          fileTokenLimit: 100000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+        });
+        agent.deliveryRouting.reading.setSearchEvidence({
+          queued: [file.file_id],
+          registered: [],
+          preparation,
+        });
+        const refs = buildUserMessageFiles([{ file_id: file.file_id }], [file], agent).map(
+          (ref) => ({
+            ...ref,
+            reading:
+              outcome === 'failure'
+                ? { reader: 'search', limitation: 'too_large_direct' }
+                : { reader: 'unavailable', limitation: 'not_prepared' },
+          }),
+        );
+        mockGetMessages.mockResolvedValue([{ files: refs }]);
+        mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
+        const context = { agentId: AGENT_ID, provisionState };
+        const provisionFiles = createProvisionFilesCallback({
+          req: { user: { id: USER_ID } },
+          agentToolContexts: new Map([[AGENT_ID, context]]),
+          provisionToVectorDB: async () => ({ embedded: outcome !== 'failure' }),
+          provisionToCodeEnv: jest.fn(),
+          updateFile: jest.fn(),
+          updateCodeEnvRef: jest.fn(),
+          addEmbeddedEntity: jest.fn(),
+        });
+        const client = makeClient({ options: { attachments: [file], agent } });
+        client.resumeCompletion.mockImplementation(async () => {
+          await provisionFiles(['file_search'], AGENT_ID);
+          if (outcome === 're-pause') {
+            client.pendingApproval = { actionId: NEXT_ACTION_ID };
+          }
+        });
+        mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
+        mockSaveMessage.mockImplementation(async (_ctx, message) => message);
+
+        const response = await post(approveBody());
+        expect(response.status).toBe(200);
+        await settled;
+        await flush();
+
+        const expectedReading =
+          outcome === 'failure'
+            ? { reader: 'unavailable', limitation: 'not_prepared' }
+            : { reader: 'search', limitation: 'too_large_direct' };
+        expect(mockUpdateMessage).toHaveBeenCalledWith(
+          USER_ID,
+          { messageId: USER_MSG_ID, files: [{ ...refs[0], reading: expectedReading }] },
+          { context: 'resumed user file reading' },
+        );
+        expect(JSON.stringify(mockUpdateMessage.mock.calls)).not.toContain(file.text);
+        if (outcome === 'failure') {
+          expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(
+            CONVO_ID,
+            new FileSearchPreparationError().message,
+            1000,
+            { beforeErrorPublication: expect.any(Function) },
+          );
+          expect(mockGenerationJobManager.publishTerminalClaim).not.toHaveBeenCalled();
+        } else {
+          const publication =
+            outcome === 're-pause'
+              ? mockGenerationJobManager.approvals.finishPausePersistence
+              : mockGenerationJobManager.publishTerminalClaim;
+          expect(mockUpdateMessage.mock.invocationCallOrder[0]).toBeLessThan(
+            publication.mock.invocationCallOrder[0],
+          );
+          if (outcome === 'success') {
+            const [, finalEvent] = mockGenerationJobManager.publishTerminalClaim.mock.calls[0];
+            expect(finalEvent.requestMessage.files[0].reading).toEqual(expectedReading);
+          }
+        }
+      },
+    );
+
     it('rebuilds the reading notices for job-metadata refs from the resumed client', async () => {
       const { resolveTurnDeliveryRouting, buildTurnReadingContext } =
         jest.requireActual('@librechat/api');
@@ -3859,6 +3994,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         'Resumed response could not be persisted before terminal publication',
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
       expect(mockDeleteAgentCheckpoint).toHaveBeenCalledTimes(1);
     });
@@ -3955,6 +4091,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         'transport down',
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
     });
 
@@ -4851,6 +4988,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         `Provider echoed ${rawValue}`,
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
       expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(rawValue);
       expect(mockDeleteAgentCheckpoint).toHaveBeenCalledWith(
@@ -4885,6 +5023,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         CONVO_ID,
         'Resume failed',
         1000,
+        { beforeErrorPublication: expect.any(Function) },
       );
       expect(JSON.stringify(mockGenerationJobManager.completeJob.mock.calls)).not.toContain(
         rawValue,
@@ -4919,7 +5058,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
 
       expect(mockGetAgentCheckpointer).not.toHaveBeenCalled();
       expect(mockGenerationJobManager.emitError).not.toHaveBeenCalled();
-      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, rawValue, 1000);
+      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, rawValue, 1000, {
+        beforeErrorPublication: expect.any(Function),
+      });
       expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(rawValue);
     });
 
@@ -4939,7 +5080,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       await settled;
       await flush();
 
-      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, 'boom', 1000);
+      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, 'boom', 1000, {
+        beforeErrorPublication: expect.any(Function),
+      });
       expect(mockLogger.error).toHaveBeenCalledWith(
         '[ResumeAgentController] Failed to prune checkpoint after failed resume finalization',
         { type: 'Error' },
@@ -4966,7 +5109,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       await settled;
       await flush();
 
-      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, 'boom', 1000);
+      expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(CONVO_ID, 'boom', 1000, {
+        beforeErrorPublication: expect.any(Function),
+      });
       expect(mockDeleteAgentCheckpoint).not.toHaveBeenCalled();
     });
 

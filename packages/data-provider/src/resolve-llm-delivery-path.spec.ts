@@ -1679,6 +1679,68 @@ describe('decideFileReading', () => {
       expect(decide(sheet, CODE_ONLY, routing)).toMatchObject({ reader: 'code', skipped: [] });
     });
 
+    it('preserves capacity discovered by encoding and offers complete fitting text last', () => {
+      const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
+      const routing = automaticRouting('anthropic', {
+        reading: withEvidence({ native: 'fits', rejected: 'capacity', text: 'fits' }),
+      });
+
+      expect(decide(pdf, BOTH_TOOLS, routing)).toMatchObject({
+        reader: 'search',
+        reason: 'native_capacity',
+      });
+      expect(decide(pdf, CODE_ONLY, routing)).toMatchObject({
+        reader: 'code',
+        reason: 'native_capacity',
+      });
+      expect(decide(pdf, NO_TOOLS, routing)).toMatchObject({
+        reader: 'text',
+        path: 'text',
+        reason: 'native_capacity',
+        needsText: false,
+      });
+
+      const exceeding = automaticRouting('anthropic', {
+        reading: withEvidence({ native: 'fits', rejected: 'capacity', text: 'exceeds' }),
+      });
+      expect(decide(pdf, NO_TOOLS, exceeding)).toMatchObject({
+        reader: 'unavailable',
+        path: 'none',
+        reason: 'native_capacity',
+      });
+    });
+
+    it('derives a capacity fallback while keeping integrity failures away from text', () => {
+      const pdf = attachment(PDF, { llmDeliveryPath: 'provider' });
+      const routing = automaticRouting('anthropic', {
+        reading: withEvidence({ native: 'fits', rejected: 'capacity' }, true),
+      });
+      expect(decide(pdf, NO_TOOLS, routing)).toMatchObject({
+        reader: 'text',
+        reason: 'native_capacity',
+        needsText: true,
+      });
+
+      const invalid = automaticRouting('anthropic', {
+        reading: withEvidence({ native: 'fits', rejected: 'integrity' }, true),
+      });
+      expect(decide(pdf, NO_TOOLS, invalid)).toMatchObject({
+        reader: 'unavailable',
+        reason: 'native_rejected',
+        needsText: false,
+      });
+    });
+
+    it('preserves unsupported encoding as a capability failure with a fitting-text fallback', () => {
+      const routing = automaticRouting('anthropic', {
+        reading: withEvidence({ native: 'fits', rejected: 'unsupported', text: 'fits' }),
+      });
+      expect(decide(attachment(PDF, { text: 'extracted' }), NO_TOOLS, routing)).toMatchObject({
+        reader: 'text',
+        reason: 'native_unsupported',
+      });
+    });
+
     it('moves past a provider the encoder would skip', () => {
       const routing = automaticRouting('anthropic', {
         reading: withEvidence({ native: 'unsupported' }),

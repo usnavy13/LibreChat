@@ -275,6 +275,42 @@ describe('prepareAgentFileContext', () => {
       expect(inventoryOf(agent).match(/manual\.pdf/g)).toHaveLength(1);
     });
 
+    it('describes failed search preparation and its retry without claiming cached text was sent', () => {
+      const pdf = attachment({
+        file_id: 'manual',
+        filename: 'manual.pdf',
+        type: PDF,
+        bytes: 5 * MB,
+        text: SENTINEL,
+        llmDeliveryPath: 'none',
+      });
+      const agent = agentWith({
+        files: [pdf],
+        consumers: SEARCHES,
+        vectorDBFiles: [pdf],
+        reading: { configuredFileSizeLimit: MB },
+      });
+      const preparation = new Map<string, 'queued' | 'ready' | 'failed'>([[pdf.file_id, 'failed']]);
+      readingContextOf(agent).setSearchEvidence({
+        queued: [pdf.file_id],
+        registered: [],
+        preparation,
+      });
+
+      prepare(agent);
+      expect(lineFor(agent, pdf.filename)).toContain('File Search could not prepare it');
+      expect(lineFor(agent, pdf.filename)).toContain('Retry file_search to try indexing again');
+      expect(lineFor(agent, pdf.filename)).toContain('do not claim to have read it');
+      expect(inventoryOf(agent)).not.toContain(SENTINEL);
+      expect(inventoryOf(agent)).not.toContain('text is included');
+
+      preparation.set(pdf.file_id, 'ready');
+      prepare(agent);
+      expect(lineFor(agent, pdf.filename)).toContain('Search it with file_search.');
+      expect(lineFor(agent, pdf.filename)).not.toContain('could not prepare');
+      expect(lineFor(agent, pdf.filename)).not.toContain('indexed when');
+    });
+
     it('sends text too long to include to File Search', () => {
       const log = attachment({
         file_id: 'huge',

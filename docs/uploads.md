@@ -702,18 +702,18 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
 | A-08 | PARTIAL   | Unit-only; nothing asserts the text-read original is also listed as code-accessible              |
 | A-09 | PROVEN    | Unit and API payload tests; the search-fallback variant is unit-only                             |
 | A-10 | PROVEN    | E2E payload, stored message file and caption after reload                                        |
-| A-11 | UNCOVERED | No reroute after a RAG rejection; the model sees only the tool error                             |
+| A-11 | PARTIAL   | Safe preparation failure and resend of the retained original covered; no mid-run reroute        |
 | A-12 | PARTIAL   | Deterministic first-fit allocation proven; agent-scoped context attachments can still return 413 |
 | A-13 | PROVEN    | Pins the existing generic 500 for message, code and search uploads                               |
 | A-14 | PROVEN    | Validator parity and configured/provider limit resolution, unit                                  |
 | A-15 | PROVEN    | E2E payload and code receipts for both files                                                     |
 | A-16 | PROVEN    | E2E across reloads, record unchanged                                                             |
-| A-17 | PROVEN    | E2E payload and stored derivation                                                                |
+| A-17 | PROVEN    | E2E payload, stored derivation, reattachment, text preview after reload and original download    |
 | A-18 | PROVEN    | E2E provider switch; the capability-change variant is unit-only                                  |
 | A-19 | PARTIAL   | Reload and later turns covered; an expired sandbox copy is not tested                            |
 | A-20 | PARTIAL   | Unit-only; no test sends two same-name uploads end to end                                        |
 | A-21 | PARTIAL   | Provisioning failure and abort covered; composer cancel and live retry states are not built      |
-| A-22 | PARTIAL   | Embed-before-query covered; no failed index followed by a retry under the automatic policy       |
+| A-22 | PROVEN    | Failed indexing persists an unread notice; retry indexes the same original before querying it   |
 | A-23 | PROVEN    | Unit and API spec, no E2E                                                                        |
 | A-24 | PROVEN    | Contract tests, no E2E                                                                           |
 | A-25 | PROVEN    | Unit only                                                                                        |
@@ -747,16 +747,39 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   endpoint unless an administrator sets an explicit limit.
 - A-05: returning a modified PDF is not exercised by any lane. There is no real-sandbox E2E lane;
   every code receipt comes from the fake code server.
-- A-11: there is no mid-run reroute after a RAG rejection. Search reachability comes from queue
-  membership and nothing records the rejection, so the next turn retries File Search unless the
-  tools change.
+- A-11: there is no mid-run reroute after a RAG rejection. The failed message records that the file
+  could not be prepared. Resending retries File Search from the retained original; failed shared
+  provisioning work is also evicted so another tool attempt can retry within the same request.
 - A-31: answer quality over File Search excerpts is not evaluated.
 - A-12: agent-scoped context injections are still checked after allocation and can return 413.
-- A-22: a "Searchable with File Search" notice saved before indexing stays on the message if
-  indexing later fails.
+- Search preparation outcomes are scoped to the request and agent. A failed message keeps its
+  unread notice after a later retry succeeds; it does not rewrite the history of that failed turn.
 - Downgrading the server binary after the automatic policy wrote deferred records: set the
   policy back to classic first so no new deferred records are written. That does not repair the
   records already deferred. On the older version those workbooks stay readable only by Run Code,
   and an older handoff encoder can fail the turn on them, until they are re-uploaded or
   backfilled.
 - Provisioning now treats a record without a `source` as local, like the rest of the pipeline.
+
+### Corrections from the branch review
+
+- Native PDF rejection is settled again before extracting message text, including on later turns.
+  A capacity rejection can use fitting text; unsupported content and integrity failures keep their
+  distinct fallback rules. Admission accounts for shared history, repeated attachments and each
+  agent's scoped content before injecting the full text.
+- Indexed attachments are recognized from the search loader's actual registered files. Reusing
+  an indexed original does not require embedding it again or sending its full text to the model.
+- Message hydration preserves the delivery path that belongs to that message. A workbook read
+  as text previews the extracted worksheets after reload; downloading it still returns the original.
+- Search preparation failure is recorded before saving or publishing an error, including resumed
+  turns. Retry uses the retained original, and a later success preserves the earlier failure notice.
+- Parallel added conversations receive the same text deriver and persister as the primary agent.
+  A secondary agent can derive a permitted text fallback without another upload or duplicate work.
+
+The retest covered all 22 browser cases across automatic uploads, classic uploads and provisioning,
+including a targeted rerun of the classic later-turn search case. That case verifies the separate
+context lookup and explicit tool query, with exactly one embedding. Focused backend, shared-data
+and preview tests also cover the corrections above. The production build and all five dependent
+TypeScript projects passed. Lighthouse passed with 250 ms per database query: median LCP 3,962 ms
+(budget 4,500), CLS 0.0166 (budget 0.1), and TBT 221 ms (budget 500). Browser model, search and code
+services remain local fixtures; these results do not establish live provider or sandbox reliability.

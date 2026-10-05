@@ -12,8 +12,8 @@ import type { TokenCountFn } from '~/utils/text';
 import type { ServerRequest } from '~/types';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
 import { AGENT_ATTACHMENT_LIMIT_EXCEEDED } from './errors';
+import { extractFileContext } from '~/files/context';
 import { countTokens } from '~/utils/tokenizer';
-import { extractFileContext } from '~/files';
 
 type FileWithId = {
   file_id?: string | null;

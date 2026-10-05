@@ -1,9 +1,10 @@
 import React from 'react';
+import { buildTree, FileSources } from 'librechat-data-provider';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { TFilePreview } from 'librechat-data-provider';
+import type { TFilePreview, TMessage, TFile } from 'librechat-data-provider';
 import FilePreviewDialog from '../FilePreviewDialog';
 
-let mockFileMap: Record<string, { llmDeliveryPath: 'text' }> = {};
+let mockFileMap: Record<string, Pick<TFile, 'llmDeliveryPath'>> = {};
 let mockShareId: string | undefined;
 let mockPreview: TFilePreview | undefined;
 let mockPreviewError = false;
@@ -114,6 +115,62 @@ describe('FilePreviewDialog lifecycle', () => {
       expect(mockTriggerDownload).toHaveBeenCalledWith('blob:original', 'report.pdf'),
     );
   });
+
+  it.each([
+    ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['xls', 'application/vnd.ms-excel'],
+    ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ])(
+    'previews restored %s worksheet text while downloading the retained original',
+    async (ext, type) => {
+      const stored = {
+        file_id: 'f1',
+        filename: `sales.${ext}`,
+        type,
+        source: FileSources.local,
+        llmDeliveryPath: 'none',
+      } as TFile;
+      mockFileMap = { f1: stored };
+      mockPreview = { file_id: 'f1', status: 'ready', text: 'quarter,total\nQ1,42' };
+      const restored = buildTree({
+        messages: [
+          {
+            messageId: 'text-turn',
+            parentMessageId: '',
+            files: [
+              {
+                file_id: 'f1',
+                llmDeliveryPath: 'text',
+                reading: { reader: 'text', limitation: 'code_unavailable' },
+              },
+            ],
+          } as TMessage,
+        ],
+        fileMap: { f1: stored },
+      });
+
+      render(
+        <FilePreviewDialog
+          {...props}
+          fileName={stored.filename}
+          fileType={type}
+          fileSource={stored.source}
+          deliveryPath={restored?.[0].files?.[0].llmDeliveryPath}
+        />,
+      );
+      expect(screen.getByText('quarter,total Q1,42')).toBeInTheDocument();
+      expect(mockOwnedPreview).not.toHaveBeenCalled();
+      expect(mockUseFilePreview).toHaveBeenLastCalledWith(
+        'f1',
+        expect.objectContaining({ enabled: true }),
+        undefined,
+      );
+      fireEvent.click(screen.getByRole('button', { name: `com_ui_download sales.${ext}` }));
+      await waitFor(() =>
+        expect(mockTriggerDownload).toHaveBeenCalledWith('blob:original', `sales.${ext}`),
+      );
+    },
+  );
 
   it('handles pending, polling failure, retry, and empty success', () => {
     mockPreview = { file_id: 'f1', status: 'pending' };

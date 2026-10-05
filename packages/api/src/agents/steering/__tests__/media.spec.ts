@@ -636,6 +636,51 @@ describe('buildSteerMedia file reading', () => {
     );
   });
 
+  it('notes a newly held Run Code file after native validation rejects it', async () => {
+    const deliveryRouting = routingFor({
+      endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } },
+    });
+    const reading = buildTurnReadingContext({
+      routing: deliveryRouting,
+      provider: 'openAI',
+      fileTokenLimit: 100_000,
+      configuredFileSizeLimit: undefined,
+      countTokens: (text) => text.length,
+    });
+    deliveryRouting.reading = reading;
+    const client = createRoutedClient({
+      deliveryRouting,
+      fileConsumers: { executeCode: true, fileSearch: true },
+    });
+    const file = asStoredFile({
+      ...workbook,
+      file_id: 'steered-pdf',
+      filename: 'steered.pdf',
+      type: 'application/pdf',
+      llmDeliveryPath: 'provider',
+    });
+    client.processMessageAttachments = async (_message, files, consumers) => {
+      expect(files[0].llmDeliveryPath).toBe('provider');
+      reading?.recordRejections([{ file_id: file.file_id, reason: 'capacity' }]);
+      return applyTurnDelivery(files, { routing: deliveryRouting, consumers });
+    };
+
+    const result = await buildSteerMedia({
+      client,
+      user,
+      item: steerItem([{ file_id: file.file_id }], steerText),
+      getFiles: jest.fn(async () => [file]),
+    });
+
+    expect(result?.content).toEqual([
+      {
+        type: 'text',
+        text: `${steerText}\n\n"steered.pdf" is attached; Run Code can open it starting with your next message.`,
+      },
+    ]);
+    expect(textOf(result)).not.toContain('SENTINEL-7F3A');
+  });
+
   it('delivers the text of a spreadsheet when the automatic run has no Run Code', async () => {
     const client = createRoutedClient({
       deliveryRouting: automatic,

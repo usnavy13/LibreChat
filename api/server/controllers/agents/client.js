@@ -152,6 +152,8 @@ const {
   assertAgentAttachmentTopology,
   allocateTurnAttachmentsWithHistory,
   allocateTurnAttachmentsWithRetainedContext,
+  admitNativeFallbackAttachments,
+  retainNativeAttachmentTopology,
   collectHistoricalAttachmentIds,
   admitSteerAttachmentHistory,
   rollbackSteerAttachmentHistory,
@@ -430,6 +432,10 @@ class AgentClient extends BaseClient {
     }
   }
 
+  admitPreparedAttachments(files, fileConsumers) {
+    return admitNativeFallbackAttachments(this, files, fileConsumers);
+  }
+
   async processAttachments(message, attachments, fileConsumers) {
     const modelBoundAttachments = this.getModelBoundAttachmentsForEndpoint(attachments);
     const processableAttachments = this.getProcessableAttachmentsForEndpoint(
@@ -589,6 +595,12 @@ class AgentClient extends BaseClient {
       endpointsByAgentId,
     });
     this.assertTurnAttachmentLimits(sharedAttachments, [...scopedAttachmentMap.values()].flat());
+    retainNativeAttachmentTopology(
+      this,
+      sharedAttachments,
+      scopedAttachmentMap,
+      endpointsByAgentId,
+    );
     return compatibleHistoricalAttachments;
   }
 
@@ -2628,10 +2640,12 @@ class AgentClient extends BaseClient {
         };
       }
 
-      const [, files] = await Promise.all([
-        this.addFileContextToMessage(latestMessage, modelBoundRequestAttachments),
-        this.processAttachments(latestMessage, attachments),
-      ]);
+      const files = await this.processMessageAttachments(
+        latestMessage,
+        attachments,
+        undefined,
+        modelBoundRequestAttachments,
+      );
 
       this.options.attachments = files;
     } else {

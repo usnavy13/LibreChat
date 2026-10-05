@@ -60,6 +60,7 @@ const {
   persistForcedTemporaryMetadata,
   announceReply,
   buildResumedUserMessageFiles,
+  persistResumedReadingNotices,
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const { decryptMetadata } = require('~/server/services/ActionService');
@@ -70,6 +71,7 @@ const {
 } = require('~/server/services/MCPRequestContext');
 const {
   saveMessage,
+  updateMessage,
   getConvo,
   getChatProject,
   addConvoToolApprovalAllows,
@@ -565,6 +567,15 @@ async function finalizeResumedTurn({
   }
   let terminalPublicationStarted = false;
   try {
+    req.body.files = await persistResumedReadingNotices(
+      {
+        userId,
+        messageId: parentMessageId,
+        requestFiles: req.body.files,
+        agent: client?.options?.agent,
+      },
+      { updateMessage },
+    );
     const savedResponseMessage = await saveMessage(
       {
         userId,
@@ -2094,6 +2105,15 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
         );
         if (ownsPausePersistence) {
           try {
+            req.body.files = await persistResumedReadingNotices(
+              {
+                userId,
+                messageId: client.parentMessageId,
+                requestFiles: req.body.files,
+                agent: client.options?.agent,
+              },
+              { updateMessage },
+            );
             // Persist this segment's content + artifacts before the fresh client (next
             // resume) drops them, so an expiring re-pause doesn't lose them; finalize later
             // overwrites content and merges attachments onto the saved message. A failed
@@ -2244,8 +2264,19 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
         let errorFinalized = false;
         try {
           errorFinalized =
-            (await GenerationJobManager.completeJob(streamId, errorMessage, job.createdAt)) ===
-            true;
+            (await GenerationJobManager.completeJob(streamId, errorMessage, job.createdAt, {
+              beforeErrorPublication: async () => {
+                req.body.files = await persistResumedReadingNotices(
+                  {
+                    userId,
+                    messageId: client?.parentMessageId,
+                    requestFiles: req.body.files,
+                    agent: client?.options?.agent,
+                  },
+                  { updateMessage },
+                );
+              },
+            })) === true;
         } catch (completeErr) {
           logger.error(
             '[ResumeAgentController] Failed to finalize failed resume',

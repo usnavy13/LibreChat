@@ -33,6 +33,9 @@ const queries = [];
 let sequence = 0;
 /** @type {string[]} */
 const deleted = [];
+/** Per-file failures let retry tests leave every other upload unaffected. */
+const embeddingFailures = new Set();
+const failedEmbeds = [];
 
 function sendJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -84,6 +87,11 @@ function readJson(req) {
 
 async function handleEmbed(req, res) {
   const { fields, files } = await parseMultipart(req);
+  if (embeddingFailures.has(fields.file_id)) {
+    failedEmbeds.push({ seq: ++sequence, file_id: fields.file_id });
+    sendJson(res, 503, { status: false, message: 'E2E embedding unavailable' });
+    return;
+  }
   embedded.push({
     seq: ++sequence,
     file_id: fields.file_id || '',
@@ -122,7 +130,7 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === '/__debug/embedded' && req.method === 'GET') {
-      sendJson(res, 200, { embedded, queries, deleted });
+      sendJson(res, 200, { embedded, queries, deleted, failedEmbeds });
       return;
     }
 
@@ -130,6 +138,23 @@ const server = http.createServer((req, res) => {
       embedded.length = 0;
       queries.length = 0;
       deleted.length = 0;
+      failedEmbeds.length = 0;
+      embeddingFailures.clear();
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (pathname === '/__debug/embedding-failure' && req.method === 'POST') {
+      const body = await readJson(req);
+      if (typeof body.file_id !== 'string' || typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { message: 'file_id and enabled are required' });
+        return;
+      }
+      if (body.enabled) {
+        embeddingFailures.add(body.file_id);
+      } else {
+        embeddingFailures.delete(body.file_id);
+      }
       sendJson(res, 200, { ok: true });
       return;
     }

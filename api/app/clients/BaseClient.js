@@ -18,6 +18,7 @@ const {
   encodeAndFormatDocuments,
   encodeNativeDocuments,
   recordNativeRejections,
+  prepareMessageAttachments,
   getLangfuseTraceMessageFields,
   isContentFilterError,
   assertModelBoundProviderContent,
@@ -1759,7 +1760,6 @@ class BaseClient {
           },
           getStrategyFunctions,
         ),
-      { requestOnly: true },
     );
     recordNativeRejections(this.getConversationAgents(), documentResult.rejected);
     message.documents =
@@ -1850,6 +1850,16 @@ class BaseClient {
       files,
       consumers: fileConsumers,
       signal: this.options.abortController?.signal,
+    });
+  }
+
+  processMessageAttachments(message, files, fileConsumers, contextFiles) {
+    return prepareMessageAttachments({
+      client: this,
+      message,
+      files,
+      consumers: fileConsumers,
+      contextFiles,
     });
   }
 
@@ -2094,16 +2104,10 @@ class BaseClient {
         return message;
       }
 
-      const [, processedFiles] = await Promise.all([
-        this.addFileContextToMessage(message, contextFiles),
-        this.processAttachments(message, contextFiles),
-      ]);
+      const processedFiles = await this.processMessageAttachments(message, contextFiles);
 
-      const processedFileIds = new Set(
-        (processedFiles ?? []).map((file) => file?.file_id).filter(Boolean),
-      );
-      this.message_file_map[message.messageId] = contextFiles.filter(
-        (file) => processedFileIds.has(file?.file_id) && isModelBoundAttachmentFile(file),
+      this.message_file_map[message.messageId] = (processedFiles ?? []).filter(
+        isModelBoundAttachmentFile,
       );
       return message;
     };

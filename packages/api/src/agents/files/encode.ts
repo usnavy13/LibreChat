@@ -24,19 +24,22 @@ import type { TokenCountFn } from '~/utils/text';
 import {
   isToolOwnedAttachment,
   isModelBoundAttachmentFile,
+  measureModelBoundAttachment,
   assertAgentAttachmentLimits,
+  resolveAgentAttachmentLimits,
   AgentAttachmentPolicyError,
 } from '../attachments';
 import {
   prepareTurnFiles,
+  settleTurnFiles,
   renderLeftOutFiles,
   getTurnTextOptions,
   encodeNativeDocuments,
   recordNativeRejections,
 } from '~/files/reading';
 import { assertModelBoundContent } from '~/middleware/modelBoundContent';
+import { toClassicInspectionView, applyTurnDelivery } from './delivery';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
-import { toClassicInspectionView } from './delivery';
 import { countTokens } from '~/utils/tokenizer';
 
 type ContentBlock = Exclude<BaseMessage['content'], string>[number];
@@ -252,11 +255,54 @@ export function createRunFileMessageEncoder(
     ]);
     recordNativeRejections([agent], documentResult.rejected);
     const rejectedIds = new Set((documentResult.rejected ?? []).map(({ file_id }) => file_id));
+    let fallbackText: string | undefined;
+    let fallbackFiles: TFile[] = [];
+    if (rejectedIds.size > 0) {
+      const sharedIds = new Set(sharedFiles.map((file) => file.file_id));
+      const settled = await settleTurnFiles({
+        routing: agent.deliveryRouting,
+        files: sharedFiles,
+        consumers: agent.fileConsumers,
+        allocation: {
+          requestFileIds: sharedFiles
+            .filter((file) => rejectedIds.has(file.file_id))
+            .map((file) => file.file_id),
+          limits: resolveAgentAttachmentLimits({ req: deps.req, endpoint: params.endpoint }),
+          measure: measureModelBoundAttachment,
+          committedExtra: applyTurnDelivery(
+            (agent.agentContextAttachments ?? []).filter((file) => !sharedIds.has(file.file_id)),
+            { routing: agent.deliveryRouting, consumers: agent.fileConsumers },
+          ),
+          committedEntries: sharedFiles
+            .filter((file) => !rejectedIds.has(file.file_id))
+            .map(measureModelBoundAttachment),
+          scope: 'request',
+        },
+        flush: true,
+      });
+      const prepared = prepare(settled, agent).sharedFiles;
+      fallbackFiles = prepared.filter(
+        (file) => rejectedIds.has(file.file_id) && file.llmDeliveryPath === 'text',
+      );
+      assertModelBoundContent({
+        filters: deps.req.config?.filters,
+        files: fallbackFiles,
+      });
+      if (fallbackFiles.length > 0) {
+        fallbackText = await deps.extractText({
+          attachments: fallbackFiles,
+          req: deps.req,
+          tokenCountFn: countTokens,
+          ...getTurnTextOptions(agent.deliveryRouting),
+        });
+      }
+    }
+    const deliveredIds = new Set(fallbackFiles.map(({ file_id }) => file_id));
     const leftOut = renderLeftOutFiles(
       agent,
-      documents.filter((file) => rejectedIds.has(file.file_id)),
+      documents.filter((file) => rejectedIds.has(file.file_id) && !deliveredIds.has(file.file_id)),
     );
-    const body = [text, leftOut].filter(Boolean).join('\n\n');
+    const body = [text, fallbackText, leftOut].filter(Boolean).join('\n\n');
     if (
       !body &&
       imageResult.image_urls.length === 0 &&

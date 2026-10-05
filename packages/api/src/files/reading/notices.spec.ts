@@ -14,6 +14,8 @@ import {
   withReadingNotices,
   stripReadingNotices,
   buildUserMessageFiles,
+  refreshUserMessageReading,
+  persistResumedReadingNotices,
   buildResumedUserMessageFiles,
 } from './notices';
 import { buildTurnReadingContext, getTurnReadingContext, recordNativeRejections } from './turn';
@@ -618,6 +620,176 @@ describe('withReadingNotices', () => {
     expect(saved.reading).toEqual(reading);
     expect(saved).not.toHaveProperty('text');
     expect(saved).not.toHaveProperty('_id');
+  });
+});
+
+describe('search preparation notices', () => {
+  it('projects failure until successful retry, preserving the failed message after reload', () => {
+    const pdf = pdfAttachment({ bytes: 15 * MB, llmDeliveryPath: 'none', text: 'cached text' });
+    const agent = preparedAgent({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+    const preparation = new Map<string, 'queued' | 'ready' | 'failed'>();
+    readingContextOf(agent).setSearchEvidence({
+      queued: [pdf.file_id],
+      registered: [],
+      preparation,
+    });
+    const refs = [{ file_id: pdf.file_id }];
+    const message = { files: buildUserMessageFiles(refs, [pdf], agent) };
+    expect(message.files[0].reading).toEqual({ reader: 'search', limitation: 'too_large_direct' });
+
+    preparation.set(pdf.file_id, 'failed');
+    refreshUserMessageReading(message, refs, { options: { attachments: [pdf], agent } });
+    expect(message.files[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+    expect(message.files[0]).not.toHaveProperty('text');
+    expect(pdf).not.toHaveProperty('reading');
+
+    const restored: typeof message.files = JSON.parse(JSON.stringify(message.files));
+    const freshAgent = preparedAgent({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+    expect(buildResumedUserMessageFiles(restored, [pdf], freshAgent)).toBe(restored);
+    expect(restored[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+
+    preparation.set(pdf.file_id, 'ready');
+    refreshUserMessageReading(message, refs, { options: { attachments: [pdf], agent } });
+    expect(message.files[0].reading).toEqual({ reader: 'search', limitation: 'too_large_direct' });
+    expect(restored[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+  });
+
+  it('does not rewrite legacy, missing, or unmatched message files', () => {
+    const pdf = pdfAttachment();
+    const existing = [{ file_id: 'unmatched' }];
+    const message = { files: existing };
+    const classic = preparedAgent({ files: [pdf], endpointConfig: {} });
+    refreshUserMessageReading(message, [{ file_id: pdf.file_id }], {
+      options: { attachments: [pdf], agent: classic },
+    });
+    expect(message.files).toBe(existing);
+    refreshUserMessageReading(message, existing, {
+      options: { attachments: [pdf], agent: preparedAgent({ files: [pdf] }) },
+    });
+    expect(message.files).toBe(existing);
+    refreshUserMessageReading(message, undefined, undefined);
+    refreshUserMessageReading(undefined, existing, undefined);
+    expect(message.files).toBe(existing);
+  });
+
+  it('persists a resumed search failure before exposing the files, and recovers only on success', async () => {
+    const pdf = pdfAttachment({ bytes: 15 * MB, llmDeliveryPath: 'none', text: 'cached text' });
+    const agent = preparedAgent({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+    const preparation = new Map<string, 'queued' | 'ready' | 'failed'>([[pdf.file_id, 'failed']]);
+    agent.provisionState!.searchPreparation = preparation;
+    readingContextOf(agent).setSearchEvidence({
+      queued: [pdf.file_id],
+      registered: [],
+      preparation,
+    });
+    const saved = buildUserMessageFiles([{ file_id: pdf.file_id }], [pdf], agent).map((file) => ({
+      ...file,
+      reading: { reader: 'search' as const, limitation: 'too_large_direct' as const },
+    }));
+    const unmatched = { file_id: 'unmatched', reading: { reader: 'provider' as const } };
+    const refs = [...saved, unmatched];
+    let finishWrite: () => void = () => {};
+    const write = new Promise<object>((resolve) => {
+      finishWrite = () => resolve({ messageId: 'user-row' });
+    });
+    const updateMessage = jest.fn(() => write);
+    let published = false;
+    const persisted = persistResumedReadingNotices(
+      { userId: 'user-1', messageId: 'user-row', requestFiles: refs, agent },
+      { updateMessage },
+    ).then((files) => {
+      published = true;
+      return files;
+    });
+    await Promise.resolve();
+
+    expect(published).toBe(false);
+    expect(updateMessage).toHaveBeenCalledWith(
+      'user-1',
+      {
+        messageId: 'user-row',
+        files: [
+          { ...saved[0], reading: { reader: 'unavailable', limitation: 'not_prepared' } },
+          unmatched,
+        ],
+      },
+      { context: 'resumed user file reading' },
+    );
+    finishWrite();
+    const failed = await persisted;
+    expect(failed?.[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+    expect(failed?.[1]).toBe(unmatched);
+    expect(refs[0].reading.reader).toBe('search');
+    const restored: NonNullable<typeof failed> = JSON.parse(JSON.stringify(failed));
+    expect(buildResumedUserMessageFiles(restored, [pdf], agent)[0].reading).toEqual({
+      reader: 'unavailable',
+      limitation: 'not_prepared',
+    });
+
+    preparation.set(pdf.file_id, 'ready');
+    const recovered = await persistResumedReadingNotices(
+      { userId: 'user-1', messageId: 'user-row', requestFiles: restored, agent },
+      { updateMessage: jest.fn().mockResolvedValue({}) },
+    );
+    expect(recovered?.[0].reading).toEqual({ reader: 'search', limitation: 'too_large_direct' });
+    expect(restored[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+    expect(recovered?.[0]).not.toHaveProperty('text');
+  });
+
+  it('leaves delivered text, native files, and queued search notices unchanged on resume', async () => {
+    const pdf = pdfAttachment({ bytes: 15 * MB, llmDeliveryPath: 'none' });
+    const agent = preparedAgent({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+    const preparation = new Map<string, 'queued' | 'ready' | 'failed'>([[pdf.file_id, 'failed']]);
+    agent.provisionState!.searchPreparation = preparation;
+    readingContextOf(agent).setSearchEvidence({
+      queued: [pdf.file_id],
+      registered: [],
+      preparation,
+    });
+    const updateMessage = jest.fn().mockResolvedValue({});
+    for (const reader of ['provider', 'text'] as const) {
+      const refs = [{ file_id: pdf.file_id, reading: { reader } }];
+      expect(
+        await persistResumedReadingNotices(
+          { userId: 'user-1', messageId: 'user-row', requestFiles: refs, agent },
+          { updateMessage },
+        ),
+      ).toBe(refs);
+      expect(buildResumedUserMessageFiles(refs, [pdf], agent)).toBe(refs);
+    }
+    preparation.set(pdf.file_id, 'queued');
+    const refs = [{ file_id: pdf.file_id, reading: { reader: 'search' as const } }];
+    expect(
+      await persistResumedReadingNotices(
+        { userId: 'user-1', messageId: 'user-row', requestFiles: refs, agent },
+        { updateMessage },
+      ),
+    ).toBe(refs);
+    expect(updateMessage).not.toHaveBeenCalled();
+  });
+
+  it('propagates a resumed notice persistence failure without returning successful files', async () => {
+    const pdf = pdfAttachment({ bytes: 15 * MB, llmDeliveryPath: 'none' });
+    const agent = preparedAgent({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+    const preparation = new Map([[pdf.file_id, 'failed' as const]]);
+    agent.provisionState!.searchPreparation = preparation;
+    readingContextOf(agent).setSearchEvidence({
+      queued: [pdf.file_id],
+      registered: [],
+      preparation,
+    });
+    const error = new Error('storage unavailable');
+    await expect(
+      persistResumedReadingNotices(
+        {
+          userId: 'user-1',
+          messageId: 'user-row',
+          requestFiles: [{ file_id: pdf.file_id, reading: { reader: 'search' } }],
+          agent,
+        },
+        { updateMessage: jest.fn().mockRejectedValue(error) },
+      ),
+    ).rejects.toBe(error);
   });
 });
 

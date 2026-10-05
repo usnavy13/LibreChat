@@ -16,6 +16,7 @@ const {
   getPrivateTextInspectionTokens,
   assertModelBoundContent,
   resolveTurnDeliveryRouting,
+  admitNativeFallbackAttachments,
   buildTurnReadingContext,
   buildSteerMedia,
   Tokenizer,
@@ -4801,6 +4802,10 @@ describe('BaseClient native documents under a reading context', () => {
   beforeAll(() => {
     uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'baseclient-documents-'));
     fs.writeFileSync(path.join(uploads, 'brief.pdf'), 'not a pdf document');
+    fs.writeFileSync(
+      path.join(uploads, 'long.pdf'),
+      `%PDF-1.7\n${'<< /Type /Page >>\n'.repeat(101)}`,
+    );
   });
 
   afterAll(() => {
@@ -4862,12 +4867,113 @@ describe('BaseClient native documents under a reading context', () => {
     expect(routing.reading.stats().rejected).toBe(0);
   });
 
-  test('still fails the turn on a replayed document outside the request', async () => {
+  test('keeps a replayed automatic document eligible for the supported fallback', async () => {
     const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
     client.options.agent.currentRequestAttachments = [];
 
-    await expect(client.addDocuments({}, [brokenPdf])).rejects.toThrow('PDF validation failed');
-    expect(routing.reading.stats().rejected).toBe(0);
+    await expect(client.addDocuments({}, [brokenPdf])).resolves.toEqual([]);
+    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
+  });
+
+  const overPageLimit = {
+    ...brokenPdf,
+    file_id: 'long-pdf',
+    filename: 'long.pdf',
+    filepath: '/uploads/long.pdf',
+    bytes: 1800,
+  };
+
+  test.each([
+    ['search', { executeCode: false, fileSearch: true }],
+    ['code', { executeCode: true, fileSearch: false }],
+    ['text', { executeCode: false, fileSearch: false }],
+  ])(
+    'continues a PDF accepted through %s on a fresh turn without reuploading',
+    async (reader, tools) => {
+      jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
+      jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
+      const stored = { ...overPageLimit, text: 'Complete cached PDF text.' };
+      const setupTurn = () => {
+        const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+        client.options.agent.fileConsumers = tools;
+        client.options.agent.currentRequestAttachments = [stored];
+        client.options.attachments = [stored];
+        client.admitPreparedAttachments = (files, fileConsumers) =>
+          admitNativeFallbackAttachments(client, files, fileConsumers);
+        return { client, routing };
+      };
+      try {
+        const first = setupTurn();
+        const message = { messageId: 'first-turn' };
+        const delivered = await first.client.processMessageAttachments(message, [stored]);
+        expect(delivered).toEqual([
+          expect.objectContaining({
+            file_id: stored.file_id,
+            llmDeliveryPath: reader === 'text' ? 'text' : 'none',
+          }),
+        ]);
+        expect(message.documents).toBeUndefined();
+        expect(first.routing.reading.judge(stored).rejected).toBe('capacity');
+        expect(message.fileContext?.includes(stored.text) ?? false).toBe(reader === 'text');
+
+        const next = setupTurn();
+        next.client.options.resendFiles = true;
+        next.client.options.attachments = undefined;
+        next.client.options.agent.currentRequestAttachments = [];
+        next.client.checkVisionRequest = jest.fn();
+        getFiles.mockResolvedValueOnce([stored]);
+        const [replayed] = await next.client.addPreviousAttachments([
+          { messageId: 'first-turn', files: [{ file_id: stored.file_id }], text: 'Read this PDF' },
+        ]);
+        expect(replayed.documents).toBeUndefined();
+        expect(next.routing.reading.judge(stored).rejected).toBe('capacity');
+        expect(resolveTurnLLMDeliveryPath(next.routing, stored, tools)).toBe(
+          reader === 'text' ? 'text' : 'none',
+        );
+        expect(replayed.fileContext?.includes(stored.text) ?? false).toBe(reader === 'text');
+        expect(stored.llmDeliveryPath).toBe('provider');
+      } finally {
+        jest.restoreAllMocks();
+      }
+    },
+  );
+
+  test('derives a fitting capacity fallback once and persists a truthful text reading', async () => {
+    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
+    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
+    const deriveText = jest.fn(async () => ({
+      status: 'derived',
+      text: 'Complete newly derived PDF text.',
+      textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 2 },
+    }));
+    try {
+      const { client } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
+      const file = {
+        ...overPageLimit,
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
+      };
+      client.options.agent.fileConsumers = { executeCode: false, fileSearch: false };
+      client.options.agent.currentRequestAttachments = [file];
+      client.options.attachments = [file];
+      client.admitPreparedAttachments = (files, fileConsumers) =>
+        admitNativeFallbackAttachments(client, files, fileConsumers);
+      const message = { messageId: 'derived-fallback' };
+      const delivered = await client.processMessageAttachments(message, [file]);
+      expect(message.documents).toBeUndefined();
+      expect(message.fileContext.match(/Complete newly derived PDF text\./g)).toHaveLength(1);
+      expect(deriveText).toHaveBeenCalledTimes(1);
+      expect(delivered[0]).toMatchObject({
+        llmDeliveryPath: 'text',
+        text: 'Complete newly derived PDF text.',
+      });
+      expect(client.options.agent.currentRequestAttachments[0]).toMatchObject({
+        llmDeliveryPath: 'text',
+        text: 'Complete newly derived PDF text.',
+      });
+      expect(file.text).toBeUndefined();
+    } finally {
+      jest.restoreAllMocks();
+    }
   });
 
   test('records a rejection on every agent the conversation agents list', async () => {

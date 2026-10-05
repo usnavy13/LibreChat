@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { FileContext, FileSources } from 'librechat-data-provider';
 import type {
   TurnReadingInputs,
@@ -13,6 +15,7 @@ import type {
   TurnReadingFile,
   TextDerivationPersister,
 } from '~/files/reading/turn';
+import type { ServerRequest } from '~/types';
 import {
   applyTurnDelivery as materializeTurnDelivery,
   prepareScopedTurnCandidates,
@@ -23,6 +26,7 @@ import {
 } from './delivery';
 import * as modelBoundContent from '~/middleware/modelBoundContent';
 import { buildTurnReadingContext } from '~/files/reading/turn';
+import { createFileTextDeriver } from '~/files/reading/derive';
 import { UninspectableFileError } from '~/protection/files';
 
 function applyTurnDelivery<T extends TurnDeliveryFile>(
@@ -667,6 +671,51 @@ describe('prepareScopedTurnCandidates', () => {
     expect(deriveText).not.toHaveBeenCalled();
     expect(prepared.candidates?.get(historical.file_id)).toBe(historical);
     expect(prepared.candidates?.get(requested.file_id)).toBe(requested);
+  });
+
+  it('derives the original workbook once for a parallel text reader while the primary uses code', async () => {
+    const openStoredFile = jest.fn(async () =>
+      fs.createReadStream(path.join(__dirname, '../../files/documents/sample.xlsx')),
+    );
+    const deriveText = createFileTextDeriver({
+      req: { user: { id: 'user_1' } } as ServerRequest,
+      openStoredFile,
+    });
+    const persistDerivation = jest.fn<
+      ReturnType<TextDerivationPersister>,
+      Parameters<TextDerivationPersister>
+    >(async () => true);
+    const primary = receiver('primary', { consumers: runsCode, deriveText, persistDerivation });
+    const parallel = receiver('parallel', { deriveText, persistDerivation });
+    const secondParallel = receiver('second-parallel', { deriveText, persistDerivation });
+    const inputs = {
+      agents: [primary, parallel, secondParallel],
+      sharedConversationAgentIds: ['primary', 'parallel', 'second-parallel'],
+      messages: [],
+      requestAttachments: [requested],
+      sharedRunAttachmentIds: new Set<string>(),
+    };
+    const prepared = await prepareScopedTurnCandidates(inputs);
+    const scoped = resolveScopedTurnAttachments({ ...inputs, ...prepared });
+    const text = 'Sheet One:\nData,on,first,sheet\nSecond Sheet:\nData,On\nSecond,Sheet\n';
+
+    expect(scoped.get('primary')).toEqual([]);
+    for (const agentId of ['parallel', 'second-parallel']) {
+      expect(scoped.get(agentId)).toEqual([
+        expect.objectContaining({ file_id: requested.file_id, llmDeliveryPath: 'text', text }),
+      ]);
+    }
+    expect(openStoredFile).toHaveBeenCalledTimes(1);
+    expect(persistDerivation).toHaveBeenCalledTimes(1);
+    expect(persistDerivation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        file_id: requested.file_id,
+        text,
+        textDerivation: expect.objectContaining({ outcome: 'complete' }),
+      }),
+    );
+    expect(requested.text).toBeUndefined();
+    expect(requested.metadata?.textDerivation?.outcome).toBe('deferred');
   });
 
   it('decides only what each receiver can be offered', async () => {

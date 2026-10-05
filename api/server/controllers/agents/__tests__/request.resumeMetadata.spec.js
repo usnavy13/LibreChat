@@ -295,6 +295,7 @@ jest.mock('@librechat/api', () => ({
   getViolationInfo: (...args) => mockGetViolationInfo(...args),
   /** Real, because the reading notices the final user-message save carries are under test. */
   buildUserMessageFiles: jest.requireActual('@librechat/api').buildUserMessageFiles,
+  refreshUserMessageReading: jest.requireActual('@librechat/api').refreshUserMessageReading,
   /** Real, because a replayed file's stale notice must not reach the new user message. */
   stripReadingNotices: jest.requireActual('@librechat/api').stripReadingNotices,
   resolveTitleTiming: jest.fn(() => 'immediate'),
@@ -3893,6 +3894,116 @@ describe('ResumableAgentController resume metadata', () => {
         await nextTick();
       }
     }
+
+    it('persists the failed indexing notice before publishing the generation error', async () => {
+      const api = jest.requireActual('@librechat/api');
+      const file = {
+        user: 'user-123',
+        file_id: 'search-pdf',
+        filename: 'search.pdf',
+        filepath: '/uploads/search.pdf',
+        type: 'application/pdf',
+        bytes: 3 * 1024 * 1024,
+        object: 'file',
+        embedded: false,
+        usage: 0,
+        source: 'local',
+        context: 'message_attachment',
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false },
+        text: 'complete cached text was not sent',
+      };
+      const routing = api.resolveTurnDeliveryRouting({
+        agent: { provider: 'openAI', endpoint: 'openAI' },
+        config: {
+          fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } },
+        },
+      });
+      const preparation = new Map();
+      routing.reading = api.buildTurnReadingContext({
+        routing,
+        provider: 'openAI',
+        fileTokenLimit: 1000,
+        configuredFileSizeLimit: 1024 * 1024,
+        countTokens: (text) => text.length,
+      });
+      routing.reading.setSearchEvidence({
+        queued: [file.file_id],
+        registered: [],
+        preparation,
+      });
+      const agent = {
+        id: 'agent-1',
+        deliveryRouting: routing,
+        fileConsumers: { executeCode: false, fileSearch: true },
+        currentRequestAttachments: [file],
+        provisionState: {
+          codeEnvFiles: [],
+          vectorDBFiles: [file],
+          searchPreparation: preparation,
+          aliveFileIds: new Set(),
+          agentScopedFileIds: new Set(),
+        },
+      };
+      const refs = [{ file_id: file.file_id }];
+      const message = {
+        messageId: 'user-message',
+        parentMessageId: 'prior-response',
+        conversationId,
+        text: 'Search the attached PDF.',
+        files: api.buildUserMessageFiles(refs, [file], agent),
+      };
+      expect(message.files[0].reading).toEqual({
+        reader: 'search',
+        limitation: 'too_large_direct',
+      });
+      const provisionFiles = api.createProvisionFilesCallback({
+        req: { user: { id: 'user-123' } },
+        agentToolContexts: new Map([[agent.id, { provisionState: agent.provisionState }]]),
+        provisionToCodeEnv: jest.fn(),
+        provisionToVectorDB: jest.fn().mockResolvedValue({ embedded: false, fileUpdate: null }),
+        updateFile: jest.fn(),
+        updateCodeEnvRef: jest.fn(),
+        addEmbeddedEntity: jest.fn(),
+      });
+      const client = {
+        options: { attachments: [file], agent },
+        sendMessage: jest.fn(async (_text, options) => {
+          options.onStart(message, 'user-message_');
+          await provisionFiles(['file_search'], agent.id);
+        }),
+      };
+      mockGenerationJobManager.completeJob.mockImplementation(
+        async (_streamId, error, _createdAt, options) => {
+          await options.beforeErrorPublication();
+          const saved = mockSaveMessage.mock.calls.find(
+            ([, row]) => row.messageId === message.messageId,
+          )?.[1];
+          expect(saved.files[0].reading).toEqual({
+            reader: 'unavailable',
+            limitation: 'not_prepared',
+          });
+          expect(saved.files[0]).not.toHaveProperty('text');
+          expect(error).toBe(new api.FileSearchPreparationError().message);
+          return true;
+        },
+      );
+
+      await AgentController(
+        createFailedRequest({ text: message.text, files: refs }),
+        createResumableResponse(),
+        jest.fn(),
+        jest.fn().mockResolvedValue({ client }),
+        null,
+      );
+      await flushBackgroundGeneration();
+      expect(mockGenerationJobManager.completeJob).toHaveBeenCalled();
+      const saved = mockSaveMessage.mock.calls.find(
+        ([, row]) => row.messageId === message.messageId,
+      )?.[1];
+      expect(saved.files[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+      expect(agent.provisionState.vectorDBFiles).toEqual([file]);
+    });
 
     it.each(['history', 'exact-model'])(
       'does not persist a protected turn rejected by %s policy during terminal recovery',

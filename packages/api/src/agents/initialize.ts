@@ -2905,9 +2905,18 @@ export async function initializeAgent(
   Object.assign(fileConsumers, finalFileConsumers);
   const automaticReading = readingContext?.policy === 'automatic';
   if (automaticReading) {
+    const searchResource = runtimeToolResources?.[EToolResources.file_search];
+    const registeredSearchFileIds = primedSearchFiles?.map((file) => file.file_id) ?? [
+      ...(searchResource?.file_ids ?? []),
+      ...(searchResource?.files ?? []).flatMap((file) => (file == null ? [] : [file.file_id])),
+    ];
+    if (provisionState != null) {
+      provisionState.searchPreparation ??= new Map();
+    }
     readingContext?.setSearchEvidence({
       queued: (provisionState?.vectorDBFiles ?? []).map((file) => file.file_id),
-      registered: runtimeToolResources?.[EToolResources.file_search]?.file_ids ?? [],
+      registered: registeredSearchFileIds,
+      preparation: provisionState?.searchPreparation,
     });
   }
   const primedRequestFiles = (primedRequestAttachments ?? []).filter(

@@ -19,6 +19,7 @@ import {
   getModelRun,
   uniqueName,
   replyPrompt,
+  sendMessage,
   getCodeExecs,
   requestJson,
   messagesView,
@@ -81,6 +82,8 @@ const WORKBOOK_RESULT = JSON.stringify({ sheets: ['Q1', 'Q2', 'Notes'], totals: 
 const CSV_RESULT = JSON.stringify({ rows: Q1_ROWS.length, total: WORKBOOK_TOTALS.Q1 });
 const CODE_UNAVAILABLE_CAPTION =
   "Not read in this message (spreadsheet analysis isn't available here)";
+const PREPARATION_FAILED_CAPTION =
+  "Not read in this message (couldn't be prepared for this message)";
 /** The heading of the model's file inventory, which only the automatic policy writes. */
 const INVENTORY_HEADING = 'how you can read them on this turn';
 
@@ -339,6 +342,29 @@ async function attachExisting(page: Page, file: TFile) {
   await expect(composerChip(page, file.filename)).toBeVisible({ timeout: 15_000 });
 }
 
+async function expectWorkbookTextPreview(page: Page, file: TFile) {
+  await messagesView(page)
+    .getByRole('button', {
+      name: `${file.filename}: Included as text (spreadsheet analysis isn't available here)`,
+      exact: true,
+    })
+    .click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText(WORKBOOK_SENTINEL);
+  await expect(dialog).not.toContainText('[Content_Types].xml');
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+}
+
+/** Fail one original's external indexing until the retry explicitly restores the service. */
+async function setEmbeddingFailure(page: Page, fileId: string, enabled: boolean) {
+  const port = process.env.E2E_RAG_API_PORT || '8791';
+  const response = await page.request.post(`http://127.0.0.1:${port}/__debug/embedding-failure`, {
+    data: { file_id: fileId, enabled },
+  });
+  expect(response.ok()).toBe(true);
+}
+
 test.describe('automatic upload reading', () => {
   test.describe.configure({ timeout: TEST_TIMEOUT });
 
@@ -499,11 +525,20 @@ test.describe('automatic upload reading', () => {
       /* Derived once: a later turn reads the saved text and leaves the derivation, stamp and
        * all, as it was. */
       await reloadConversation(page);
+      await attachExisting(page, uploaded);
       const thirdTurn = await sendTurn(page, replyPrompt(uniqueName('a17-turn3')));
       expect(initialRequest(thirdTurn).promptText).toContain(WORKBOOK_SENTINEL);
       expect((await getFileRecord(page, uploaded.file_id)).metadata?.textDerivation).toEqual(
         derivation,
       );
+      expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+        llmDeliveryPath: 'text',
+        reading: { reader: 'text', limitation: 'code_unavailable' },
+      });
+      await expectWorkbookTextPreview(page, uploaded);
+      await reloadConversation(page);
+      await expectWorkbookTextPreview(page, uploaded);
+      expect(await downloadOriginal(page, uploaded)).toEqual(attachFileBuffer(workbook));
     } finally {
       await cleanupAgent(page, agentId);
     }
@@ -512,6 +547,7 @@ test.describe('automatic upload reading', () => {
   test('A-06/A-13: a PDF over the small endpoint limit is searched there, and refused as a new upload', async ({
     page,
   }) => {
+    test.setTimeout(MULTI_TURN_TIMEOUT);
     await startChat(page, AUTO_ENDPOINT);
     await sendTurn(page, replyPrompt(uniqueName('a06-open')));
 
@@ -564,6 +600,38 @@ test.describe('automatic upload reading', () => {
     expect(embed.seq).toBeGreaterThan(mark);
     expect(embed.seq).toBeLessThan(Math.min(...searches.map(({ seq }) => seq)));
 
+    /* A fresh conversation receives this indexed original through message resources.files,
+     * not an agent's configured file_ids. It must remain searchable without another embed. */
+    await page.goto(NEW_CHAT_PATH);
+    await selectMockEndpoint(page, AUTO_ENDPOINT);
+    await sendTurn(page, replyPrompt(uniqueName('a06-reuse-open')));
+    await attachExisting(page, uploaded);
+    await selectMockEndpoint(page, AUTO_SMALL_ENDPOINT);
+    if (
+      !(await page.getByRole('button', { name: 'Remove File Search', exact: true }).isVisible())
+    ) {
+      await enableFileSearch(page);
+    }
+    const reuseMark = latestSeq(await getRagQueries(page));
+    const reusedRun = await sendTurn(page, `E2E_FILE_SEARCH:${uniqueName('a06-reuse')}`);
+    expect(initialRequest(reusedRun).documentFiles).not.toContain(pdf.name);
+    expect(inventoryLine(initialRequest(reusedRun), pdf.name)).toContain('file_search');
+    expect(
+      messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
+    ).toMatchObject({ reader: 'search' });
+    expect(
+      (await getRagEmbedded(page)).filter((entry) => entry.file_id === uploaded.file_id),
+    ).toHaveLength(1);
+    expect(
+      (await getRagQueries(page)).some(
+        (query) => query.file_id === uploaded.file_id && query.seq > reuseMark,
+      ),
+    ).toBe(true);
+    await reloadConversation(page);
+    expect(
+      messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
+    ).toMatchObject({ reader: 'search' });
+
     /* Refused as before this policy existed, on every route: the size check throws inside the
      * upload handler, which answers with its generic error, and no tool receives the bytes. The
      * small PDF on the same route shows size decides. */
@@ -590,6 +658,66 @@ test.describe('automatic upload reading', () => {
     const token = await getAccessToken(page);
     const files = await fetchJson<TFile[]>(page, '/api/files', token);
     expect(files.map((file) => file.filename)).not.toContain(direct.name);
+  });
+
+  test('failed indexing persists an honest notice, and retry reuses the original successfully', async ({
+    page,
+  }) => {
+    test.setTimeout(MULTI_TURN_TIMEOUT);
+    await startChat(page, AUTO_ENDPOINT);
+    await sendTurn(page, replyPrompt(uniqueName('search-failure-open')));
+    const pdf = renamed(UPLOAD_FIXTURES.largePdf, 'search-retry');
+    const uploaded = await confirmUpload(page, uploadViaUnifiedButton(page, pdf));
+    await selectMockEndpoint(page, AUTO_SMALL_ENDPOINT);
+    await enableFileSearch(page);
+    await setEmbeddingFailure(page, uploaded.file_id, true);
+    try {
+      const response = await sendMessage(page, `E2E_FILE_SEARCH:${uniqueName('search-failure')}`);
+      expect(response.ok()).toBe(true);
+      await expect
+        .poll(
+          async () =>
+            messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
+          { timeout: TURN_TIMEOUT },
+        )
+        .toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
+      expect(
+        (await getRagQueries(page)).filter((query) => query.file_id === uploaded.file_id),
+      ).toHaveLength(0);
+      const port = process.env.E2E_RAG_API_PORT || '8791';
+      const debugResponse = await page.request.get(`http://127.0.0.1:${port}/__debug/embedded`);
+      const debug = (await debugResponse.json()) as { failedEmbeds: { file_id: string }[] };
+      expect(debug.failedEmbeds.some((entry) => entry.file_id === uploaded.file_id)).toBe(true);
+      await reloadConversation(page);
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
+
+      await setEmbeddingFailure(page, uploaded.file_id, false);
+      await selectMockEndpoint(page, AUTO_ENDPOINT);
+      await attachExisting(page, uploaded);
+      await selectMockEndpoint(page, AUTO_SMALL_ENDPOINT);
+      const recovered = await sendTurn(page, `E2E_FILE_SEARCH:${uniqueName('search-recovery')}`);
+      expect(inventoryLine(initialRequest(recovered), pdf.name)).toContain('file_search');
+      expect(
+        messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
+      ).toMatchObject({ reader: 'search' });
+      const embeds = (await getRagEmbedded(page)).filter(
+        (entry) => entry.file_id === uploaded.file_id,
+      );
+      const queries = (await getRagQueries(page)).filter(
+        (entry) => entry.file_id === uploaded.file_id,
+      );
+      expect(embeds).toHaveLength(1);
+      expect(queries.length).toBeGreaterThan(0);
+      expect(embeds[0].seq).toBeLessThan(Math.min(...queries.map(({ seq }) => seq)));
+      await reloadConversation(page);
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
+      expect(
+        messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
+      ).toMatchObject({ reader: 'search' });
+    } finally {
+      await setEmbeddingFailure(page, uploaded.file_id, false);
+    }
   });
 
   test('A-10/A-28: a spreadsheet too long to include, with no reader, is reported as not read', async ({

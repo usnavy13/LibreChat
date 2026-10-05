@@ -2,7 +2,13 @@ import type { SummaryContentPart } from './types/content';
 import type { ParentMessage } from './messages';
 import type { TFile } from './types/files';
 import type { TMessage } from './types';
-import { buildTree, findMessageById, isCompactedLeaf, isUserInitiatedCompaction } from './messages';
+import {
+  buildTree,
+  findMessageById,
+  hydrateMessageFile,
+  isCompactedLeaf,
+  isUserInitiatedCompaction,
+} from './messages';
 import { ContentTypes } from './types/runs';
 
 const msg = (messageId: string, parentMessageId: string, over: Partial<TMessage> = {}): TMessage =>
@@ -163,6 +169,40 @@ describe('buildTree', () => {
     expect(file).not.toHaveProperty('reading');
   });
 
+  it('keeps separate code and text delivery paths when the same workbook is reused and restored', () => {
+    const stored = {
+      file_id: 'workbook',
+      filename: 'sales.xlsx',
+      llmDeliveryPath: 'none',
+      preview: 'stored-preview',
+    } as TFile;
+    const codeFile = {
+      file_id: stored.file_id,
+      llmDeliveryPath: 'none' as const,
+      reading: { reader: 'code' as const },
+    };
+    const textFile = {
+      file_id: stored.file_id,
+      llmDeliveryPath: 'text' as const,
+      reading: { reader: 'text' as const, limitation: 'code_unavailable' as const },
+    };
+    const messages = [
+      msg('code-turn', '', { files: [codeFile] }),
+      msg('text-turn', 'code-turn', { files: [textFile] }),
+    ];
+    const tree = buildTree({ messages, fileMap: { workbook: stored } });
+
+    expect(tree?.[0].files?.[0]).toEqual({ ...stored, ...codeFile });
+    expect(asParent(tree?.[0]).children[0].files?.[0]).toEqual({ ...stored, ...textFile });
+
+    const refreshed = { ...stored, llmDeliveryPath: 'text' as const, preview: 'fresh-preview' };
+    const restored = buildTree({ messages, fileMap: { workbook: refreshed } });
+    expect(restored?.[0].files?.[0]).toEqual({ ...refreshed, ...codeFile });
+    expect(asParent(restored?.[0]).children[0].files?.[0]).toEqual({ ...refreshed, ...textFile });
+    expect(stored.llmDeliveryPath).toBe('none');
+    expect(messages[1].files?.[0]).toBe(textFile);
+  });
+
   describe('memoization', () => {
     const chain = () => [
       msg('u1', '00000000-0000-0000-0000-000000000000', { isCreatedByUser: true }),
@@ -211,6 +251,24 @@ describe('buildTree', () => {
       expect(buildTree({ messages, fileMap: fileMapB })).toBe(treeB);
       expect(buildTree({ messages, fileMap: fileMapA })).not.toBe(treeA);
       expect(buildTree({ messages })).toBe(bare);
+    });
+  });
+});
+
+describe('hydrateMessageFile', () => {
+  const stored = { file_id: 'file', filename: 'report.pdf', llmDeliveryPath: 'provider' } as TFile;
+
+  it('keeps legacy hydration on the stored record when no reading notice is present', () => {
+    expect(
+      hydrateMessageFile({ file_id: stored.file_id, llmDeliveryPath: 'text' }, { file: stored }),
+    ).toBe(stored);
+  });
+
+  it('uses the stored path when an older message has a notice without a delivery path', () => {
+    const reading = { reader: 'search' as const };
+    expect(hydrateMessageFile({ file_id: stored.file_id, reading }, { file: stored })).toEqual({
+      ...stored,
+      reading,
     });
   });
 });

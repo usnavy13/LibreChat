@@ -14,6 +14,7 @@ const {
   applyForcedTemporaryRequest,
   resolveResumableRetention,
   buildUserMessageFiles,
+  refreshUserMessageReading,
   stripReadingNotices,
   getReferencedQuotes,
   resolveTitleTiming,
@@ -3307,6 +3308,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         job.abortController.signal.removeEventListener('abort', abortTitleOnJobAbort);
         acceptsTitleEvents = false;
         resolveConvoReady();
+        refreshUserMessageReading(userMessage, req.body.files, client);
         if (!res.headersSent) {
           sendGenerationJson(
             res,

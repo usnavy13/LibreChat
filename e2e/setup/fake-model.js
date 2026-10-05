@@ -17,7 +17,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 const { FakeChatModel } = require('@librechat/agents');
 const { ChatGenerationChunk } = require('@langchain/core/outputs');
 const { AIMessageChunk } = require('@langchain/core/messages');
@@ -3434,7 +3434,7 @@ function provisioningToolResponses({ text, toolNames }) {
       responses: ['', `${FILE_SEARCH_FINAL_TEXT}: ${searchLabel}`],
       toolCalls: [
         {
-          id: FILE_SEARCH_TOOL_CALL_ID,
+          id: `${FILE_SEARCH_TOOL_CALL_ID}_${createHash('sha256').update(searchLabel).digest('hex').slice(0, 12)}`,
           name: FILE_SEARCH_TOOL_NAME,
           args: { query: `e2e ${searchLabel}` },
           type: 'tool_call',

@@ -670,7 +670,13 @@ function judgeProvider({ mimeType, routing, evidence }: ReadingWalk): ReaderVerd
   ) {
     return 'native_unsupported';
   }
-  if (evidence.rejected != null) {
+  if (evidence.rejected === 'capacity') {
+    return 'native_capacity';
+  }
+  if (evidence.rejected === 'unsupported') {
+    return 'native_unsupported';
+  }
+  if (evidence.rejected === 'integrity') {
     return 'native_rejected';
   }
   if (evidence.native === 'capacity') {

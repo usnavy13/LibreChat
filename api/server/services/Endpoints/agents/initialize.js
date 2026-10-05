@@ -996,6 +996,8 @@ const initializeClientWithProvider = async ({
     toolIntentsAvailable,
     statefulSessionsAvailable,
     memoryAvailable,
+    deriveText,
+    persistDerivation,
     signal,
   });
 

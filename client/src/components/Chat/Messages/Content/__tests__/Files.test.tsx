@@ -1,5 +1,6 @@
 /* eslint-disable i18next/no-literal-string */
 import React from 'react';
+import { buildTree, FileSources } from 'librechat-data-provider';
 import type { TFile, TMessage, TFileReadingNotice } from 'librechat-data-provider';
 import { fireEvent, render, screen } from 'test/layout-test-utils';
 import { getFileType } from '~/utils';
@@ -116,6 +117,49 @@ describe('reading notice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'report.pdf: Available to Run Code' }));
     expect(screen.getByText('preview: none')).toBeInTheDocument();
   });
+
+  it.each([
+    ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['xls', 'application/vnd.ms-excel'],
+    ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ])(
+    'opens the extracted preview of a reused %s workbook after restoring the message',
+    (ext, type) => {
+      const stored = {
+        file_id: 'workbook',
+        filename: `sales.${ext}`,
+        type,
+        source: FileSources.local,
+        llmDeliveryPath: 'none',
+      } as TFile;
+      mockFileMap = { workbook: stored };
+      const restored = buildTree({
+        messages: [
+          {
+            messageId: 'text-turn',
+            parentMessageId: '',
+            files: [
+              {
+                file_id: stored.file_id,
+                llmDeliveryPath: 'text',
+                reading: { reader: 'text', limitation: 'code_unavailable' },
+              },
+            ],
+          } as TMessage,
+        ],
+        fileMap: { workbook: stored },
+      });
+
+      render(<Files message={restored?.[0]} />);
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: `sales.${ext}: Included as text (spreadsheet analysis isn't available here)`,
+        }),
+      );
+      expect(screen.getByText('preview: text')).toBeInTheDocument();
+      expect(stored.llmDeliveryPath).toBe('none');
+    },
+  );
 
   it('shows an image nothing read as a captioned chip, not a delivered-looking preview', () => {
     renderFiles([

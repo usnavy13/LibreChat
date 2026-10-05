@@ -241,14 +241,14 @@ describe('native validation', () => {
       ]);
     });
 
-    it('leaves out only the request attachments when scoped to the request', () => {
+    it('allows an automatic historical attachment to use the same fallback as a request file', () => {
       const replayed = attachment({ file_id: 'replayed-pdf' });
-      const agent = automaticAgent();
-      const requestMode = getNativeValidationPolicy(agent, { requestOnly: true });
+      const agent = automaticAgent({ currentRequestAttachments: [] });
+      const modeOf = getNativeValidationPolicy(agent);
 
-      expect(requestMode(rejectedPdf)).toBe('skip');
-      expect(requestMode(replayed)).toBe('throw');
-      expect(getNativeValidationPolicy(agent)(replayed)).toBe('skip');
+      expect(modeOf(rejectedPdf)).toBe('skip');
+      expect(modeOf(replayed)).toBe('skip');
+      expect(modeOf({ ...replayed, metadata: { destinationChosen: true } })).toBe('throw');
     });
   });
 
@@ -573,6 +573,26 @@ describe('request evidence', () => {
     expect(context.judge(missing).search).toBe('unreachable');
     expect(context.judge(unsearchable).search).toBe('reachable');
     expect(context.judge(chosen).search).toBe('reachable');
+  });
+
+  it('reads shared preparation outcomes without rerouting already-sent attachments', () => {
+    const context = contextFor();
+    const queued = attachment({ file_id: 'queued' });
+    const preparation = new Map<string, 'queued' | 'ready' | 'failed'>();
+    context.setSearchEvidence({ queued: ['queued'], registered: ['indexed'], preparation });
+
+    expect(context.searchState('queued')).toBe('queued');
+    expect(context.searchState('indexed')).toBe('ready');
+    expect(context.searchState('missing')).toBeUndefined();
+
+    preparation.set('queued', 'failed');
+    expect(context.searchState('queued')).toBe('failed');
+    expect(context.judge(queued).search).toBe('reachable');
+
+    preparation.set('queued', 'ready');
+    expect(context.searchState('queued')).toBe('ready');
+    expect(context.judge(queued).search).toBe('reachable');
+    expect(contextFor().searchState('queued')).toBeUndefined();
   });
 
   it('keeps each dropped request file once', () => {

@@ -50,7 +50,13 @@ import {
   configSchema,
 } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
-import type { Agent, TFile, FiltersConfig, AgentInstructionsPrompt } from 'librechat-data-provider';
+import type {
+  Agent,
+  TFile,
+  FiltersConfig,
+  AgentToolResources,
+  AgentInstructionsPrompt,
+} from 'librechat-data-provider';
 import type { ServerRequest, InitializeResultBase, EndpointTokenConfig } from '~/types';
 import type { ResolveLinkedInstructions } from '../instructions/linked';
 import type { InitializeAgentDbMethods } from '../initialize';
@@ -6258,11 +6264,13 @@ describe('initializeAgent automatic delivery policy', () => {
     skillTools,
     endpointConfig = {},
     fileContextCharLimit,
+    fileTokenLimit,
     contextFiles = [],
     deriveText,
     saveFileTextDerivation,
     persistDerivation,
     loaded = {},
+    toolResources = {},
     provisionState,
     filters,
   }: {
@@ -6275,6 +6283,7 @@ describe('initializeAgent automatic delivery policy', () => {
     };
     /** The provisioning queues priming hands back. */
     provisionState?: ProvisionState;
+    toolResources?: AgentToolResources;
     filters?: FiltersConfig;
     /** The host's text deriver, which also builds a derive-only context under classic. */
     deriveText?: FileTextDeriver;
@@ -6289,6 +6298,7 @@ describe('initializeAgent automatic delivery policy', () => {
     skillTools?: string[];
     endpointConfig?: { fileSizeLimit?: number };
     fileContextCharLimit?: number;
+    fileTokenLimit?: number;
   }) {
     const { filterFilesByEndpointRuntimeConfig } = jest.requireMock('~/files') as {
       filterFilesByEndpointRuntimeConfig: jest.Mock;
@@ -6309,7 +6319,7 @@ describe('initializeAgent automatic delivery policy', () => {
         attachments: [...files, ...contextFiles],
         requestAttachments: files,
         agentContextAttachments: contextFiles,
-        tool_resources: {},
+        tool_resources: toolResources,
         provisionState,
       };
     });
@@ -6317,6 +6327,7 @@ describe('initializeAgent automatic delivery policy', () => {
       filters,
       fileConfig: {
         fileContextCharLimit,
+        fileTokenLimit,
         endpoints: {
           [Providers.OPENAI]: {
             ...(policy != null && { llmDeliveryPolicy: policy }),
@@ -6569,6 +6580,84 @@ describe('initializeAgent automatic delivery policy', () => {
       });
 
       expect(result.primedSearchFileIds).toEqual(expected);
+    });
+
+    it.each([
+      ['fitting', 1000, 'fits'],
+      ['oversized', 1, 'exceeds'],
+    ] as const)(
+      'reuses an indexed user PDF through the primed search files with %s cached text',
+      async (_case, fileTokenLimit, textFit) => {
+        const pdf = {
+          ...oversizedPdf(),
+          embedded: true,
+          text: 'Complete cached text',
+        } as IMongoFile;
+        const result = await initializeWith({
+          file: pdf,
+          policy: 'automatic',
+          tools: [Tools.file_search],
+          endpointConfig: { fileSizeLimit: 1 },
+          fileTokenLimit,
+          loaded: {
+            toolNames: [Tools.file_search],
+            primedSearchFiles: [{ file_id: pdf.file_id, filename: pdf.filename, fromAgent: false }],
+          },
+          toolResources: {
+            [EToolResources.file_search]: { files: [queued(pdf)], file_ids: [] },
+          },
+        });
+
+        expect(result.provisionState).toBeUndefined();
+        expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
+        expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).search).toBe('reachable');
+        expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).text).toBe(textFit);
+        expect(getTurnReadingContext(result.deliveryRouting)?.searchState(pdf.file_id)).toBe(
+          'ready',
+        );
+        expect(result.dynamicToolContextMap?.file_inventory).toContain(
+          'Search it with file_search.',
+        );
+        expect(result.dynamicToolContextMap?.file_inventory).not.toContain('text is included');
+      },
+    );
+
+    it('uses both resource representations when an older loader does not report primed files', async () => {
+      const pdf = { ...oversizedPdf(), embedded: true } as IMongoFile;
+      const result = await initializeWith({
+        file: pdf,
+        policy: 'automatic',
+        tools: [Tools.file_search],
+        endpointConfig: { fileSizeLimit: 1 },
+        loaded: { toolNames: [Tools.file_search] },
+        toolResources: {
+          [EToolResources.file_search]: { files: [queued(pdf)], file_ids: ['knowledge-base'] },
+        },
+      });
+
+      expect(getTurnReadingContext(result.deliveryRouting)?.searchState(pdf.file_id)).toBe('ready');
+      expect(getTurnReadingContext(result.deliveryRouting)?.searchState('knowledge-base')).toBe(
+        'ready',
+      );
+      expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
+    });
+
+    it('honors a loader that explicitly primed no search files', async () => {
+      const pdf = { ...oversizedPdf(), embedded: true } as IMongoFile;
+      const result = await initializeWith({
+        file: pdf,
+        policy: 'automatic',
+        tools: [Tools.file_search],
+        endpointConfig: { fileSizeLimit: 1 },
+        loaded: { toolNames: [Tools.file_search], primedSearchFiles: [] },
+        toolResources: { [EToolResources.file_search]: { files: [queued(pdf)] } },
+      });
+
+      expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).search).toBe('unreachable');
+      expect(
+        getTurnReadingContext(result.deliveryRouting)?.searchState(pdf.file_id),
+      ).toBeUndefined();
+      expect(result.dynamicToolContextMap?.file_inventory).toContain('cannot be read on this turn');
     });
 
     it('lists the queued spreadsheet at its planned path and checks both advertisements', async () => {

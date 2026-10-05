@@ -103,12 +103,17 @@ export function createDerivationPersister(
   };
 }
 
+/** Preparation of one file in this turn's authorized File Search namespace. */
+export type SearchPreparationState = 'queued' | 'ready' | 'failed';
+
 /** Which files File Search will receive on this turn, known once tools have loaded. */
 export interface SearchEvidence {
   /** Files queued for embedding on this request. */
   queued: readonly string[];
   /** Files registered under the turn's `file_search` tool resource. */
   registered: readonly string[];
+  /** Shared with lazy provisioning; a failed attempt stays failed until a retry succeeds. */
+  preparation?: ReadonlyMap<string, SearchPreparationState>;
 }
 
 /** Request-scoped counts for the turn's reading diagnostics. */
@@ -134,6 +139,8 @@ export interface TurnReadingContext extends TurnReadingInputs {
   recordRejections(rejections: ReadonlyArray<DocumentRejection>): void;
   markTextFailed(fileId: string): void;
   setSearchEvidence(evidence: SearchEvidence): void;
+  /** Whether an eligible search file is indexed, queued, or failed on this turn. */
+  searchState(fileId: string): SearchPreparationState | undefined;
   /** Request attachments the endpoint's runtime policy removed before delivery. */
   recordDropped(files: Iterable<TurnReadingFile>): void;
   dropped(): readonly TurnReadingFile[];
@@ -230,14 +237,6 @@ export interface NativeDeliveryAgent {
   currentRequestAttachments?: readonly TurnDeliveryFile[];
 }
 
-export interface NativeValidationScope {
-  /**
-   * Leaves out only the request's own attachments. An encoder that runs for history replay or a
-   * steer has no later inventory to tell the model a file was left out, so it fails as classic.
-   */
-  requestOnly?: boolean;
-}
-
 /** What a document encoder returns, as a split encode merges it. */
 export interface EncodedDocuments<D, M> {
   documents: D[];
@@ -252,20 +251,12 @@ export interface EncodedDocuments<D, M> {
  */
 export function getNativeValidationPolicy(
   agent: NativeDeliveryAgent | null | undefined,
-  { requestOnly = false }: NativeValidationScope = {},
 ): (file: TurnDeliveryFile) => NativeValidationMode {
   const routing = agent?.deliveryRouting ?? undefined;
   if (getTurnReadingContext(routing)?.policy !== 'automatic' || agent?.fileConsumers == null) {
     return () => 'throw';
   }
-  const requestFileIds = requestOnly
-    ? new Set((agent.currentRequestAttachments ?? []).map(({ file_id }) => file_id))
-    : undefined;
-  return (file) =>
-    isAutomaticReadingRecord(routing, file) &&
-    (requestFileIds == null || (file.file_id != null && requestFileIds.has(file.file_id)))
-      ? 'skip'
-      : 'throw';
+  return (file) => (isAutomaticReadingRecord(routing, file) ? 'skip' : 'throw');
 }
 
 const mergeEncoded = <D, M>(
@@ -289,9 +280,8 @@ export async function encodeNativeDocuments<F extends TurnDeliveryFile, D, M>(
     files: F[],
     onValidationFailure: NativeValidationMode,
   ) => Promise<EncodedDocuments<D, M>>,
-  scope: NativeValidationScope = {},
 ): Promise<EncodedDocuments<D, M>> {
-  const validationMode = getNativeValidationPolicy(agent, scope);
+  const validationMode = getNativeValidationPolicy(agent);
   const skippable = files.filter((file) => validationMode(file) === 'skip');
   if (skippable.length === 0) {
     return encode(files, 'throw');
@@ -441,6 +431,8 @@ function createTurnReadingContext(
   const derivations = new Map<string, Promise<DerivedText>>();
   const queuedWrites: Array<{ file: TurnReadingFile; derivation: Promise<DerivedText> }> = [];
   let searchFileIds: ReadonlySet<string> | undefined;
+  let registeredSearchFileIds: ReadonlySet<string> | undefined;
+  let searchPreparation: ReadonlyMap<string, SearchPreparationState> | undefined;
   let derived = 0;
 
   const judgeNativeUncached = (file: TurnDeliveryFile): NativeVerdict | null => {
@@ -628,8 +620,23 @@ function createTurnReadingContext(
     markTextFailed: (fileId) => {
       textFailed.add(fileId);
     },
-    setSearchEvidence: ({ queued, registered }) => {
+    setSearchEvidence: ({ queued, registered, preparation }) => {
       searchFileIds = new Set([...queued, ...registered]);
+      registeredSearchFileIds = new Set(registered);
+      searchPreparation = preparation;
+    },
+    searchState: (fileId) => {
+      const preparation = searchPreparation?.get(fileId);
+      if (preparation != null) {
+        return preparation;
+      }
+      if (registeredSearchFileIds?.has(fileId)) {
+        return 'ready';
+      }
+      if (searchFileIds?.has(fileId)) {
+        return 'queued';
+      }
+      return undefined;
     },
     recordDropped: (files) => {
       for (const file of files) {

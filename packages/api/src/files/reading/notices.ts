@@ -11,8 +11,8 @@ import type {
 import type { CodeFileState, InventoryEntry, ReadingAgent } from './inventory';
 import type { RequestFile, TransmittedFile } from '~/utils/message';
 import type { TurnReadingContext, TurnReadingFile } from './turn';
+import { buildMessageFiles, sanitizeFileForTransmit } from '~/utils/message';
 import { collectInventoryEntries } from './inventory';
-import { buildMessageFiles } from '~/utils/message';
 import { getTurnReadingContext } from './turn';
 
 /** What a notice can say limited the reading, in the user's terms. */
@@ -89,7 +89,15 @@ const isUnreadSpreadsheet = (reading: FileReading): boolean =>
  * The reader the user is told about. A code reader counts only once Run Code can open the file;
  * a provider reading the encoder withheld becomes Run Code where it can still open the file.
  */
-function selectNoticeReader({ reading, code, withheld }: ReadEntry): TFileReadingNotice['reader'] {
+function selectNoticeReader({
+  reading,
+  code,
+  search,
+  withheld,
+}: ReadEntry): TFileReadingNotice['reader'] {
+  if (reading.reader === 'search' && search === 'failed') {
+    return 'unavailable';
+  }
   if (withheld != null) {
     return isCodeReady(code) ? 'code' : 'unavailable';
   }
@@ -119,8 +127,11 @@ function selectLimitation(
   reader: TFileReadingNotice['reader'],
   context: TurnReadingContext,
 ): ReadingLimitation | undefined {
-  const { file, reading, withheld } = entry;
+  const { file, reading, search, withheld } = entry;
   const unread = reader === 'unavailable';
+  if (unread && search === 'failed') {
+    return 'not_prepared';
+  }
   if (unread && reading.reader === 'code') {
     return 'not_prepared';
   }
@@ -230,9 +241,115 @@ export function buildUserMessageFiles<T extends TurnReadingFile>(
   return buildMessageFiles(requestFiles, withReadingNotices(attachments, agent));
 }
 
+/** Refreshes a failed turn's user row from the same evidence used by the successful final save. */
+export function refreshUserMessageReading(
+  message: { files?: RequestFile[] } | null | undefined,
+  requestFiles: RequestFile[] | undefined,
+  client:
+    | { options?: { attachments?: TurnReadingFile[]; agent?: ReadingAgent | null } }
+    | null
+    | undefined,
+): void {
+  const attachments = client?.options?.attachments;
+  const agent = client?.options?.agent;
+  if (
+    message == null ||
+    !Array.isArray(requestFiles) ||
+    !Array.isArray(attachments) ||
+    getTurnReadingContext(agent?.deliveryRouting)?.policy !== 'automatic'
+  ) {
+    return;
+  }
+  const files = buildUserMessageFiles(requestFiles, attachments, agent);
+  if (files.length > 0) {
+    message.files = files;
+  }
+}
+
 /** Whether a client-sent ref carries a notice; tolerates the malformed entries a body can hold. */
 const carriesNotice = (file: ReplayedFile | null | undefined): boolean =>
   file != null && typeof file === 'object' && 'reading' in file;
+
+/** A rebuilt segment may settle search preparation, but cannot change what a paused payload sent. */
+function withResumedSearchPreparation(
+  requestFiles: ReplayedFile[],
+  agent: ReadingAgent | null | undefined,
+): ReplayedFile[] {
+  const context = getTurnReadingContext(agent?.deliveryRouting);
+  if (agent == null || context?.policy !== 'automatic') {
+    return requestFiles;
+  }
+  const outcomes = new Map<string, ReadEntry>();
+  for (const entry of collectInventoryEntries(agent)) {
+    const preparation = agent.provisionState?.searchPreparation?.get(entry.file.file_id);
+    if (
+      entry.kind === 'read' &&
+      entry.reading.reader === 'search' &&
+      (preparation === 'ready' || preparation === 'failed')
+    ) {
+      outcomes.set(entry.file.file_id, entry);
+    }
+  }
+  if (outcomes.size === 0) {
+    return requestFiles;
+  }
+  let changed = false;
+  const files = requestFiles.map((file) => {
+    const entry = file.file_id == null ? undefined : outcomes.get(file.file_id);
+    const saved = file.reading;
+    if (
+      entry == null ||
+      (saved != null &&
+        saved.reader !== 'search' &&
+        !(saved.reader === 'unavailable' && saved.limitation === 'not_prepared'))
+    ) {
+      return file;
+    }
+    const reading = describeReading(entry, context);
+    if (saved?.reader === reading.reader && saved.limitation === reading.limitation) {
+      return file;
+    }
+    changed = true;
+    return sanitizeFileForTransmit(
+      saved == null ? { ...entry.file, ...file, reading } : { ...file, reading },
+    );
+  });
+  return changed ? files : requestFiles;
+}
+
+/** Saves only a resumed segment's definitive search outcomes, using the already loaded user refs. */
+export async function persistResumedReadingNotices(
+  {
+    userId,
+    messageId,
+    requestFiles,
+    agent,
+  }: {
+    userId: string;
+    messageId?: string | null;
+    requestFiles?: ReplayedFile[];
+    agent?: ReadingAgent | null;
+  },
+  {
+    updateMessage,
+  }: {
+    updateMessage: (
+      userId: string,
+      message: { messageId: string; files: ReplayedFile[] },
+      metadata: { context: string },
+    ) => Promise<object>;
+  },
+): Promise<ReplayedFile[] | undefined> {
+  if (!messageId || !Array.isArray(requestFiles)) {
+    return requestFiles;
+  }
+  const files = withResumedSearchPreparation(requestFiles, agent);
+  if (files === requestFiles) {
+    return requestFiles;
+  }
+  await updateMessage(userId, { messageId, files }, { context: 'resumed user file reading' });
+  return files;
+}
 
 /**
  * Request file refs without the notices a replayed message carries. A notice is projected by the
@@ -262,10 +379,10 @@ export function stripReadingNotices<T extends ReplayedFile>(
 /**
  * The user message files a resumed turn's final event carries. Under the classic policy the
  * request refs are carried as is, as they were before notices existed. Under the automatic
- * policy, files restored from the saved user row already carry the notices the paused turn saved;
- * otherwise they are built from the rebuilt client's attachments, as {@link buildUserMessageFiles}
- * built them for the save. The request refs are kept when no attachment matches, so the event
- * never blanks the user's attachments.
+ * policy, files restored from the saved user row keep what the paused payload delivered; a
+ * definitive search preparation outcome from the resumed segment updates only that reader.
+ * Otherwise notices are built from the rebuilt client's attachments, as {@link buildUserMessageFiles}
+ * built them for the save. The request refs are kept when no attachment matches.
  */
 export function buildResumedUserMessageFiles<T extends TurnReadingFile>(
   requestFiles: ReplayedFile[],
@@ -274,10 +391,12 @@ export function buildResumedUserMessageFiles<T extends TurnReadingFile>(
 ): Array<ReplayedFile | TransmittedFile<T | NoticedFile>> {
   if (
     !Array.isArray(attachments) ||
-    getTurnReadingContext(agent?.deliveryRouting)?.policy !== 'automatic' ||
-    requestFiles.some(carriesNotice)
+    getTurnReadingContext(agent?.deliveryRouting)?.policy !== 'automatic'
   ) {
     return requestFiles;
+  }
+  if (requestFiles.some(carriesNotice)) {
+    return withResumedSearchPreparation(requestFiles, agent);
   }
   const files = buildUserMessageFiles(requestFiles, attachments, agent);
   return files.length > 0 ? files : requestFiles;
