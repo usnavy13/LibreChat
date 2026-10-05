@@ -9,6 +9,8 @@ import type { HistoryAllocationFile } from './history';
 import type { NativeDeliveryAgent } from './turn';
 import type { ServerRequest } from '~/types';
 import {
+  getAgentEntry,
+  listAgentIds,
   isModelBoundAttachmentFile,
   measureModelBoundAttachment,
   resolveAgentAttachmentLimits,
@@ -196,14 +198,9 @@ function reserveFallbackCapacity<T extends HistoryAllocationFile>(
     },
   ];
   const endpoints = host.turnAttachmentEndpointsByAgentId;
-  const agentIds = new Set([
-    ...scoped.keys(),
-    ...(endpoints instanceof Map ? endpoints.keys() : Object.keys(endpoints ?? {})),
-  ]);
-  const endpointOf = (agentId: string) =>
-    endpoints instanceof Map ? endpoints.get(agentId) : endpoints?.[agentId];
+  const agentIds = new Set([...scoped.keys(), ...listAgentIds(endpoints)]);
   const appendEndpointBudget = (agentId?: string): void => {
-    const selectedEndpoint = agentId == null ? undefined : endpointOf(agentId);
+    const selectedEndpoint = agentId == null ? undefined : getAgentEntry(endpoints, agentId);
     budgets.push({
       limits: resolveAgentAttachmentLimits({
         req,
@@ -366,6 +363,10 @@ async function admitFallback<T extends HistoryAllocationFile>(
   if (host.options.attachments != null) {
     host.options.attachments = current.map(replace);
   }
+  const primary = getTurnReadingContext(host.options.agent?.deliveryRouting);
+  const overflowIds = prepared
+    .filter((file) => primary?.judge(file).overflow)
+    .map((file) => file.file_id);
   for (const agent of host.getConversationAgents?.() ?? []) {
     if (agent == null) {
       continue;
@@ -373,11 +374,7 @@ async function admitFallback<T extends HistoryAllocationFile>(
     agent.currentRequestAttachments = agent.currentRequestAttachments?.map(replace);
     agent.requestAttachments = agent.requestAttachments?.map(replace);
     agent.attachments = agent.attachments?.map(replace);
-    const context = getTurnReadingContext(agent.deliveryRouting);
-    const primary = getTurnReadingContext(host.options.agent?.deliveryRouting);
-    context?.addOverflow(
-      prepared.filter((file) => primary?.judge(file).overflow).map((file) => file.file_id),
-    );
+    getTurnReadingContext(agent.deliveryRouting)?.addOverflow(overflowIds);
   }
   return prepared;
 }

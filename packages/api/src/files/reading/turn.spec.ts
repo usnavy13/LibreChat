@@ -332,6 +332,7 @@ describe('native validation', () => {
       const primary = automaticAgent();
       const handoff = automaticAgent({ id: 'agent-2' });
       const sharing = { ...primary, id: 'agent-3' };
+      const levelSpy = jest.spyOn(logger, 'isDebugEnabled').mockReturnValue(true);
       const debugSpy = jest.spyOn(logger, 'debug').mockImplementation(() => logger);
 
       recordNativeRejections(
@@ -353,6 +354,7 @@ describe('native validation', () => {
         '[nativeDelivery] agent=agent-2 file_id=rejected-pdf provider=openAI rejected=capacity mode=skip next=search',
       ]);
       debugSpy.mockRestore();
+      levelSpy.mockRestore();
     });
 
     it('ignores rejections without a reading context or without rejections', () => {
@@ -741,7 +743,7 @@ describe('derive', () => {
       expect(update).not.toHaveProperty('text');
     });
 
-    it('never saves text derived for a record the automatic policy did not mark', async () => {
+    it('caches text derived for an unmarked original and never for a settled record', async () => {
       const persistDerivation = persister();
       const context = contextFor({ deriveText: async () => derived, persistDerivation });
       const unmarked = attachment({ file_id: 'pdf' });
@@ -754,7 +756,38 @@ describe('derive', () => {
       await Promise.all([context.derive(unmarked), context.derive(settled)]);
       await context.flush();
 
+      expect(persistDerivation).toHaveBeenCalledTimes(1);
+      expect(persistDerivation).toHaveBeenCalledWith({
+        file_id: 'pdf',
+        text: derived.text,
+        textDerivation: derived.textDerivation,
+      });
+    });
+
+    it('keeps a failed marker only on a record the automatic policy deferred', async () => {
+      const persistDerivation = persister();
+      const failure: DerivedText = {
+        status: 'failed',
+        textDerivation: { outcome: 'failed', reason: 'parser' },
+        persist: true,
+      };
+      const context = contextFor({ deriveText: async () => failure, persistDerivation });
+
+      await context.derive(attachment({ file_id: 'pdf' }));
+      await context.flush();
+
       expect(persistDerivation).not.toHaveBeenCalled();
+    });
+
+    it('forgets an aborted derivation so a later caller derives again', async () => {
+      const deriveText = jest
+        .fn(async (): Promise<DerivedText> => derived)
+        .mockResolvedValueOnce({ status: 'skipped', reason: 'aborted' });
+      const context = contextFor({ deriveText });
+
+      await expect(context.derive(xlsx)).resolves.toEqual({ status: 'skipped', reason: 'aborted' });
+      await expect(context.derive(xlsx)).resolves.toBe(derived);
+      expect(deriveText).toHaveBeenCalledTimes(2);
     });
 
     it('writes nothing until the flush, so a caller saves only files that passed its checks', async () => {

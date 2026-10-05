@@ -430,15 +430,10 @@ export function assertAgentAttachmentTopology({
 }): void {
   const agentIds = new Set([
     ...scopedAttachmentsByAgentId.keys(),
-    ...(endpointsByAgentId instanceof Map
-      ? endpointsByAgentId.keys()
-      : Object.keys(endpointsByAgentId ?? {})),
+    ...listAgentIds(endpointsByAgentId),
   ]);
   for (const agentId of agentIds) {
-    const agentEndpoint =
-      endpointsByAgentId instanceof Map
-        ? endpointsByAgentId.get(agentId)
-        : endpointsByAgentId?.[agentId];
+    const agentEndpoint = getAgentEntry(endpointsByAgentId, agentId);
     const compatibleSharedAttachments = filterFilesByEndpointRuntimeConfig(req?.config, {
       files: sharedAttachments,
       endpoint: agentEndpoint?.endpoint ?? endpoint ?? EModelEndpoint.agents,
@@ -577,6 +572,23 @@ export type AgentAttachmentEndpointsByAgentId =
   | Map<string, { endpoint?: string | null; endpointType?: string | null }>
   | Record<string, { endpoint?: string | null; endpointType?: string | null }>;
 
+/** A collection keyed by agent id, which callers supply as a Map or a plain record. */
+export type AgentKeyed<T> = Map<string, T> | Record<string, T | undefined> | null | undefined;
+
+export function getAgentEntry<T>(entries: AgentKeyed<T>, agentId: string): T | undefined {
+  return entries instanceof Map ? entries.get(agentId) : entries?.[agentId];
+}
+
+export function listAgentIds<T>(entries: AgentKeyed<T>): string[] {
+  return entries instanceof Map ? [...entries.keys()] : Object.keys(entries ?? {});
+}
+
+/** The entries of an agent-keyed collection, without the gaps a record may carry. */
+export function listAgentEntries<T>(entries: AgentKeyed<T>): T[] {
+  const values = entries instanceof Map ? [...entries.values()] : Object.values(entries ?? {});
+  return values.filter((value): value is T => value != null);
+}
+
 export function collectFileIds<TFile extends FileWithId>(
   files?: Array<TFile | null | undefined> | null,
 ): Set<string> {
@@ -712,10 +724,7 @@ export function getAgentContextAttachments<TFile extends FileWithId>({
     return [];
   }
 
-  const attachments: TFile[] =
-    attachmentsByAgentId instanceof Map
-      ? (attachmentsByAgentId.get(agentId) ?? [])
-      : (attachmentsByAgentId[agentId] ?? []);
+  const attachments: TFile[] = getAgentEntry(attachmentsByAgentId, agentId) ?? [];
 
   if (!excludeFileIds || excludeFileIds.size === 0) {
     return attachments;
@@ -742,10 +751,7 @@ export function buildAgentScopedAttachmentMap({
   endpointsByAgentId?: AgentAttachmentEndpointsByAgentId;
 }): Map<string, IMongoFile[]> {
   const entries = Array.from(new Set(agentIds.filter(Boolean))).map((agentId) => {
-    const agentEndpoint =
-      endpointsByAgentId instanceof Map
-        ? endpointsByAgentId.get(agentId)
-        : endpointsByAgentId?.[agentId];
+    const agentEndpoint = getAgentEntry(endpointsByAgentId, agentId);
     const attachments = getAgentContextAttachments({
       agentId,
       attachmentsByAgentId,

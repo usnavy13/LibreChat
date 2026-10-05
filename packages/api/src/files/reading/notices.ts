@@ -1,4 +1,4 @@
-import { fileConfig, isTextOnlyRecord } from 'librechat-data-provider';
+import { fileConfig, isTextOnlyRecord, getRoutingMimeType } from 'librechat-data-provider';
 import type {
   SkipReason,
   FileReading,
@@ -177,7 +177,7 @@ function selectDroppedLimitation(
   endpointConfig: EndpointFileConfig | undefined,
 ): ReadingLimitation {
   const { disabled, fileSizeLimit, supportedMimeTypes } = endpointConfig ?? {};
-  const mimeType = file.metadata?.routingMimeType ?? file.type ?? '';
+  const mimeType = getRoutingMimeType(file);
   const typeAllowed =
     isTextOnlyRecord(file) ||
     supportedMimeTypes == null ||

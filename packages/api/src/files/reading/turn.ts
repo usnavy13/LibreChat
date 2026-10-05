@@ -1,6 +1,7 @@
 import { Providers } from '@librechat/agents';
 import { logger } from '@librechat/data-schemas';
 import {
+  getRoutingMimeType,
   EToolResources,
   decideFileReading,
   isBedrockDocumentType,
@@ -58,7 +59,7 @@ export type FileTextDeriver = (file: TurnReadingFile, signal?: AbortSignal) => P
 /** A derivation that changed the copy's text, as {@link withDerivedText} applies it. */
 export type DerivedTextSuccess = Extract<DerivedText, { status: 'derived' }>;
 
-/** What a derivation writes back onto the record the automatic policy marked `deferred`. */
+/** What a derivation writes back onto a record: see {@link selectDerivationUpdate}. */
 export type TextDerivationUpdate = FileTextDerivationUpdate;
 
 /** Saves a derivation onto its record and resolves whether a record changed. */
@@ -175,8 +176,8 @@ export interface BuildTurnReadingContextParams {
   deriveText?: FileTextDeriver;
   /**
    * Saves derived text, or a deterministic failure, onto the record it came from. The caller
-   * binds the request's file owner scope. Only records marked `deferred` are ever saved: text on
-   * any other record stays on the turn copy.
+   * binds the request's file owner scope. A record marked `deferred`, or an unmarked original
+   * without text, takes derived text; a failed marker is kept only by a deferred record.
    */
   persistDerivation?: TextDerivationPersister;
   signal?: AbortSignal;
@@ -341,6 +342,9 @@ export function recordNativeRejections(
     }
     recorded.add(context);
     context.recordRejections(rejected);
+    if (!logger.isDebugEnabled()) {
+      continue;
+    }
     const next = describeNextReaders(agent, rejected);
     for (const { file_id, reason } of rejected) {
       logger.debug(
@@ -388,20 +392,21 @@ function judgeTextFit(
 
 /**
  * The write a derivation makes on its record: the text with its marker on success, the marker
- * alone for a deterministic failure the record may keep. A record the automatic policy did not
- * mark `deferred` is never written.
+ * alone for a deterministic failure the record may keep. Derived text is kept by the record that
+ * deferred it, and cached on an unmarked original that stored none, so a document the provider
+ * could not take is parsed once rather than on every turn that replays it. A failed marker is
+ * kept only where the record was deferred; a settled or failed record is never written.
  */
 function selectDerivationUpdate(
   file: TurnReadingFile,
   result: DerivedText,
 ): TextDerivationUpdate | undefined {
-  if (file.metadata?.textDerivation?.outcome !== 'deferred') {
-    return undefined;
-  }
-  if (result.status === 'derived') {
+  const outcome = file.metadata?.textDerivation?.outcome;
+  const hasText = typeof file.text === 'string' && file.text.length > 0;
+  if (result.status === 'derived' && (outcome === 'deferred' || (outcome == null && !hasText))) {
     return { file_id: file.file_id, text: result.text, textDerivation: result.textDerivation };
   }
-  if (result.status === 'failed' && result.persist) {
+  if (result.status === 'failed' && result.persist && outcome === 'deferred') {
     return { file_id: file.file_id, textDerivation: result.textDerivation };
   }
   return undefined;
@@ -436,7 +441,7 @@ function createTurnReadingContext(
   let derived = 0;
 
   const judgeNativeUncached = (file: TurnDeliveryFile): NativeVerdict | null => {
-    const routingMimeType = file.metadata?.routingMimeType ?? file.type ?? '';
+    const routingMimeType = getRoutingMimeType(file);
     if (categorizeForReading(routingMimeType) === 'media') {
       return null;
     }
@@ -588,6 +593,17 @@ function createTurnReadingContext(
     const derivation = runDerivation(file, signal ?? requestSignal);
     derivations.set(file.file_id, derivation);
     queuedWrites.push({ file, derivation });
+    /* An aborted derivation answers only its own caller, like the deriver's memo. */
+    const forget = () => {
+      if (derivations.get(file.file_id) === derivation) {
+        derivations.delete(file.file_id);
+      }
+    };
+    derivation.then((result) => {
+      if (result.status === 'skipped' && result.reason === 'aborted') {
+        forget();
+      }
+    }, forget);
     return derivation;
   };
 

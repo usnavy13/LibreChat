@@ -1105,7 +1105,7 @@ describe('ToolService - Action Capability Gating', () => {
       expect(result.dynamicToolContextMap[Tools.file_search]).toBe(toolContext);
     });
 
-    it('leaves the primed search list unset when search priming fails', async () => {
+    it('treats failed search priming as no primed search files', async () => {
       mockPrimeSearchFiles.mockRejectedValueOnce(new Error('search priming failed'));
       const req = createMockReq([AgentCapabilities.file_search]);
       mockGetEndpointsConfig.mockResolvedValue(
@@ -1122,7 +1122,7 @@ describe('ToolService - Action Capability Gating', () => {
         definitionsOnly: true,
       });
 
-      expect(result.primedSearchFiles).toBeUndefined();
+      expect(result.primedSearchFiles).toEqual([]);
       expect(result.dynamicToolContextMap[Tools.file_search]).toBeUndefined();
     });
   });

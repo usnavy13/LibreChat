@@ -1275,11 +1275,19 @@ export function createFileMethods(mongoose: typeof import('mongoose')): {
     }
     const File = mongoose.models.File as Model<IMongoFile>;
     const { file_id, text, textDerivation } = update;
+    /* A deferred record, or an unmarked one, takes a derivation while it stores no text. */
     const filter = withOwnerScope(
       {
         file_id,
-        'metadata.textDerivation.outcome': 'deferred',
-        $or: [{ text: { $exists: false } }, { text: null }, { text: '' }],
+        $and: [
+          {
+            $or: [
+              { 'metadata.textDerivation.outcome': 'deferred' },
+              { 'metadata.textDerivation': { $exists: false } },
+            ],
+          },
+          { $or: [{ text: { $exists: false } }, { text: null }, { text: '' }] },
+        ],
       },
       { userId: scope.user, tenantId: scope.tenantId },
     );

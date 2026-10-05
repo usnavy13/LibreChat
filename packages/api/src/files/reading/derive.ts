@@ -4,8 +4,13 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { logger } from '@librechat/data-schemas';
-import { selectBuiltInTextPlan } from 'librechat-data-provider';
-import type { FiltersConfig, BuiltInTextPlan, TextDerivation } from 'librechat-data-provider';
+import { fileConfig, selectBuiltInTextPlan } from 'librechat-data-provider';
+import type {
+  FiltersConfig,
+  BuiltInTextPlan,
+  TextDerivation,
+  RegexLike,
+} from 'librechat-data-provider';
 import type {
   DerivedText,
   TurnReadingFile,
@@ -32,6 +37,11 @@ export interface FileTextDeriverDeps {
   filters?: FiltersConfig;
   /** The built-in extractors; RAG and OCR never run at turn time. */
   extractors?: UploadFallbackTextExtractors;
+  /**
+   * The deployment's text allowlist (`fileConfig.text.supportedMimeTypes`). A natively readable
+   * type outside it is not parsed, as upload extraction refuses it; absent means unrestricted.
+   */
+  textMimeTypes?: RegexLike[];
 }
 
 /** The largest file each built-in extractor accepts, checked before anything is downloaded. */
@@ -180,6 +190,7 @@ export function createFileTextDeriver({
   openStoredFile,
   filters,
   extractors,
+  textMimeTypes,
 }: FileTextDeriverDeps): FileTextDeriver {
   const derivations = new Map<string, Promise<DerivedText>>();
 
@@ -219,8 +230,18 @@ export function createFileTextDeriver({
   };
 
   const deriveOnce = (file: TurnReadingFile, signal?: AbortSignal): Promise<DerivedText> => {
-    const plan = selectBuiltInTextPlan(file.type ?? '');
+    const type = file.type ?? '';
+    const plan = selectBuiltInTextPlan(type);
     if (plan == null) {
+      return Promise.resolve(skipped('no_extractor'));
+    }
+    /* Upload extraction consults the allowlist only for types the native text reader takes;
+     * document types reach the parser regardless, so the same holds here. */
+    if (
+      plan === 'native_text' &&
+      textMimeTypes != null &&
+      !fileConfig.checkType(type, textMimeTypes)
+    ) {
       return Promise.resolve(skipped('no_extractor'));
     }
     const bytes = file.bytes ?? 0;

@@ -3682,91 +3682,95 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       ]);
     });
 
+    /** A resumed turn whose only attachment File Search prepares with `outcome`. */
+    const prepareResumedSearchTurn = (outcome) => {
+      const {
+        resolveTurnDeliveryRouting,
+        buildTurnReadingContext,
+        buildUserMessageFiles,
+        createProvisionFilesCallback,
+        FileSearchPreparationError,
+      } = jest.requireActual('@librechat/api');
+      const file = {
+        user: USER_ID,
+        file_id: 'search-brief',
+        filename: 'search-brief.pdf',
+        filepath: '/uploads/search-brief.pdf',
+        type: 'application/pdf',
+        bytes: 15 * 1024 * 1024,
+        source: 'local',
+        context: 'message_attachment',
+        llmDeliveryPath: 'none',
+        metadata: { destinationChosen: false },
+        text: 'cached text must not reach status',
+      };
+      const preparation = new Map();
+      const provisionState = {
+        codeEnvFiles: [],
+        vectorDBFiles: [file],
+        aliveFileIds: new Set(),
+        agentScopedFileIds: new Set(),
+        searchPreparation: preparation,
+      };
+      const agent = {
+        id: AGENT_ID,
+        provider: 'openAI',
+        endpoint: 'openAI',
+        fileConsumers: { executeCode: false, fileSearch: true },
+        currentRequestAttachments: [file],
+        provisionState,
+      };
+      agent.deliveryRouting = resolveTurnDeliveryRouting({
+        agent,
+        config: { fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } } },
+      });
+      agent.deliveryRouting.reading = buildTurnReadingContext({
+        routing: agent.deliveryRouting,
+        provider: 'openAI',
+        fileTokenLimit: 100000,
+        configuredFileSizeLimit: undefined,
+        countTokens: (text) => text.length,
+      });
+      agent.deliveryRouting.reading.setSearchEvidence({
+        queued: [file.file_id],
+        registered: [],
+        preparation,
+      });
+      const refs = buildUserMessageFiles([{ file_id: file.file_id }], [file], agent).map((ref) => ({
+        ...ref,
+        reading:
+          outcome === 'failure'
+            ? { reader: 'search', limitation: 'too_large_direct' }
+            : { reader: 'unavailable', limitation: 'not_prepared' },
+      }));
+      mockGetMessages.mockResolvedValue([{ files: refs }]);
+      mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
+      const context = { agentId: AGENT_ID, provisionState };
+      const provisionFiles = createProvisionFilesCallback({
+        req: { user: { id: USER_ID } },
+        agentToolContexts: new Map([[AGENT_ID, context]]),
+        provisionToVectorDB: async () => ({ embedded: outcome !== 'failure' }),
+        provisionToCodeEnv: jest.fn(),
+        updateFile: jest.fn(),
+        updateCodeEnvRef: jest.fn(),
+        addEmbeddedEntity: jest.fn(),
+      });
+      const client = makeClient({ options: { attachments: [file], agent } });
+      client.resumeCompletion.mockImplementation(async () => {
+        await provisionFiles(['file_search'], AGENT_ID);
+        if (outcome === 're-pause') {
+          client.pendingApproval = { actionId: NEXT_ACTION_ID };
+        }
+      });
+      mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
+      mockSaveMessage.mockImplementation(async (_ctx, message) => message);
+      return { file, refs, FileSearchPreparationError };
+    };
+
     it.each(['failure', 'success', 're-pause'])(
       'persists the resumed search preparation %s before terminal or pause publication',
       async (outcome) => {
-        const {
-          resolveTurnDeliveryRouting,
-          buildTurnReadingContext,
-          buildUserMessageFiles,
-          createProvisionFilesCallback,
-          FileSearchPreparationError,
-        } = jest.requireActual('@librechat/api');
-        const file = {
-          user: USER_ID,
-          file_id: 'search-brief',
-          filename: 'search-brief.pdf',
-          filepath: '/uploads/search-brief.pdf',
-          type: 'application/pdf',
-          bytes: 15 * 1024 * 1024,
-          source: 'local',
-          context: 'message_attachment',
-          llmDeliveryPath: 'none',
-          metadata: { destinationChosen: false },
-          text: 'cached text must not reach status',
-        };
-        const preparation = new Map();
-        const provisionState = {
-          codeEnvFiles: [],
-          vectorDBFiles: [file],
-          aliveFileIds: new Set(),
-          agentScopedFileIds: new Set(),
-          searchPreparation: preparation,
-        };
-        const agent = {
-          id: AGENT_ID,
-          provider: 'openAI',
-          endpoint: 'openAI',
-          fileConsumers: { executeCode: false, fileSearch: true },
-          currentRequestAttachments: [file],
-          provisionState,
-        };
-        agent.deliveryRouting = resolveTurnDeliveryRouting({
-          agent,
-          config: { fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } } },
-        });
-        agent.deliveryRouting.reading = buildTurnReadingContext({
-          routing: agent.deliveryRouting,
-          provider: 'openAI',
-          fileTokenLimit: 100000,
-          configuredFileSizeLimit: undefined,
-          countTokens: (text) => text.length,
-        });
-        agent.deliveryRouting.reading.setSearchEvidence({
-          queued: [file.file_id],
-          registered: [],
-          preparation,
-        });
-        const refs = buildUserMessageFiles([{ file_id: file.file_id }], [file], agent).map(
-          (ref) => ({
-            ...ref,
-            reading:
-              outcome === 'failure'
-                ? { reader: 'search', limitation: 'too_large_direct' }
-                : { reader: 'unavailable', limitation: 'not_prepared' },
-          }),
-        );
-        mockGetMessages.mockResolvedValue([{ files: refs }]);
-        mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
-        const context = { agentId: AGENT_ID, provisionState };
-        const provisionFiles = createProvisionFilesCallback({
-          req: { user: { id: USER_ID } },
-          agentToolContexts: new Map([[AGENT_ID, context]]),
-          provisionToVectorDB: async () => ({ embedded: outcome !== 'failure' }),
-          provisionToCodeEnv: jest.fn(),
-          updateFile: jest.fn(),
-          updateCodeEnvRef: jest.fn(),
-          addEmbeddedEntity: jest.fn(),
-        });
-        const client = makeClient({ options: { attachments: [file], agent } });
-        client.resumeCompletion.mockImplementation(async () => {
-          await provisionFiles(['file_search'], AGENT_ID);
-          if (outcome === 're-pause') {
-            client.pendingApproval = { actionId: NEXT_ACTION_ID };
-          }
-        });
-        mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
-        mockSaveMessage.mockImplementation(async (_ctx, message) => message);
+        const { file, refs, FileSearchPreparationError } = prepareResumedSearchTurn(outcome);
 
         const response = await post(approveBody());
         expect(response.status).toBe(200);
@@ -3806,6 +3810,34 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         }
       },
     );
+
+    it('finalizes the resumed response when updating the reading notices fails', async () => {
+      prepareResumedSearchTurn('success');
+      mockUpdateMessage.mockRejectedValueOnce(new Error('messages unavailable'));
+
+      const response = await post(approveBody());
+      expect(response.status).toBe(200);
+      await settled;
+      await flush();
+
+      expect(mockUpdateMessage).toHaveBeenCalledTimes(1);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not update reading notices'),
+        expect.anything(),
+      );
+      expect(mockSaveMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: USER_ID }),
+        expect.objectContaining({ messageId: RESPONSE_MSG_ID, error: false }),
+        expect.anything(),
+      );
+      expect(mockGenerationJobManager.publishTerminalClaim).toHaveBeenCalledTimes(1);
+      expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.anything(),
+        expect.objectContaining({ beforeErrorPublication: expect.any(Function) }),
+      );
+    });
 
     it('rebuilds the reading notices for job-metadata refs from the resumed client', async () => {
       const { resolveTurnDeliveryRouting, buildTurnReadingContext } =

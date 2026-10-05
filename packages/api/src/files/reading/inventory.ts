@@ -1,4 +1,5 @@
 import {
+  getRoutingMimeType,
   Tools,
   EToolResources,
   isTextOnlyRecord,
@@ -255,14 +256,11 @@ function reconcileSearchAdvert(agent: ReadingAgent, entries: readonly InventoryE
   }
 }
 
-const routingMimeType = (file: TurnReadingFile): string =>
-  file.metadata?.routingMimeType ?? file.type ?? '';
-
 function describeType(
   file: TurnReadingFile,
-  category: FileReading['category'] = categorizeForReading(routingMimeType(file)),
+  category: FileReading['category'] = categorizeForReading(getRoutingMimeType(file)),
 ): string {
-  const mimeType = routingMimeType(file);
+  const mimeType = getRoutingMimeType(file);
   if (category === 'tabular') {
     return 'spreadsheet';
   }

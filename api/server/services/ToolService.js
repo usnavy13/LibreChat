@@ -1590,6 +1590,8 @@ async function loadToolDefinitionsWrapper({
         '[loadToolDefinitionsWrapper] Error priming search files:',
         getSafeErrorMetadata(error),
       );
+      /* Nothing was primed, so no resource file may be advertised as reachable by search. */
+      primedSearchFiles = [];
     }
   }
 

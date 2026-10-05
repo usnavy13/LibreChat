@@ -576,6 +576,14 @@ async function finalizeResumedTurn({
       },
       { updateMessage },
     );
+  } catch (noticeError) {
+    /* The notice only describes how the files were read; the completed response still counts. */
+    logger.warn(
+      `[ResumeAgentController] Could not update reading notices for ${parentMessageId}; finalizing without them`,
+      getSafeErrorMetadata(noticeError),
+    );
+  }
+  try {
     const savedResponseMessage = await saveMessage(
       {
         userId,

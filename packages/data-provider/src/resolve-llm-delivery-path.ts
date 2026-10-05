@@ -549,8 +549,7 @@ export function resolveClassicTurnLLMDeliveryPath(
     return isLLMDeliveryPath(file.llmDeliveryPath) ? file.llmDeliveryPath : undefined;
   }
   const { endpointConfig } = routing;
-  /* Conversion changes the stored type, so use the type routing originally saw. */
-  const mimeType = file.metadata?.routingMimeType ?? file.type ?? '';
+  const mimeType = getRoutingMimeType(file);
   const path = resolveUploadLLMDeliveryPath({ mimeType, ...routing });
   const hasFallbackText = typeof file.text === 'string' && file.text.length > 0;
   if (
@@ -842,8 +841,9 @@ function classicReading(
 type ReadingConfig = Pick<DeliveryRouteInputs, 'endpointConfig' | 'fileConfig'>;
 
 /** The type routing saw at upload; conversion rewrites the stored type. */
-const getRoutingMimeType = (file: TurnDeliveryFile): string =>
-  file.metadata?.routingMimeType ?? file.type ?? '';
+export function getRoutingMimeType(file: TurnDeliveryFile): string {
+  return file.metadata?.routingMimeType ?? file.type ?? '';
+}
 
 /**
  * Eligibility gates the record and the endpoint's file configuration decide alone: the first that

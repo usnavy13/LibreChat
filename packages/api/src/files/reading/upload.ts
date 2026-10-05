@@ -145,15 +145,16 @@ const isHardUploadFailure = (error: unknown): boolean =>
 
 /**
  * The marker an extraction failure leaves. A failure a built-in step names (a parser limit, empty
- * text, the zip guard) is `failed`. An unavailable configured step, or an error nothing
- * recognizes and that may be a passing outage, is `deferred` where a built-in extractor can
- * derive the text on a later turn, and `failed` where none can.
+ * text, the zip guard) is `failed`, as is a type the deployment's text allowlist excludes: a
+ * later turn must not parse what the administrator kept out of text. An unavailable configured
+ * step, or an error nothing recognizes and that may be a passing outage, is `deferred` where a
+ * built-in extractor can derive the text on a later turn, and `failed` where none can.
  */
 function markExtractionFailure(mimeType: string, error: unknown): TextDerivation {
   const at = Date.now();
   const plan = selectBuiltInTextPlan(mimeType);
   if (error instanceof ExtractorUnavailableError) {
-    return plan == null
+    return plan == null || error.reason === 'no_extractor'
       ? { outcome: 'failed', extractor: 'configured', reason: error.reason, at }
       : { outcome: 'deferred', extractor: 'configured', reason: 'extractor_unavailable', at };
   }

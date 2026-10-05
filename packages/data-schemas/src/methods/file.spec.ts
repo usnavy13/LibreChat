@@ -2021,10 +2021,23 @@ describe('File Methods', () => {
       expect(stored?.metadata?.textDerivation).toEqual(complete);
     });
 
+    it('caches derived text on an unmarked record without text', async () => {
+      const { file_id, user } = await seedFile({ metadata: { destinationChosen: false } });
+
+      const saved = await fileMethods.saveFileTextDerivation(
+        { file_id, text: 'derived', textDerivation: complete },
+        { user },
+      );
+
+      expect(saved).toBe(true);
+      const stored = await fileMethods.findFileById(file_id);
+      expect(stored?.text).toBe('derived');
+      expect(stored?.metadata?.textDerivation).toEqual(complete);
+    });
+
     it.each([
       ['complete', complete],
       ['failed', failed],
-      ['unmarked', undefined],
     ])('leaves a %s record untouched', async (_label, textDerivation) => {
       const { file_id, user } = await seedFile({
         metadata: { destinationChosen: false, textDerivation },

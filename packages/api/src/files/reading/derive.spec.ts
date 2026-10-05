@@ -324,6 +324,33 @@ describe('createFileTextDeriver', () => {
     });
   });
 
+  it('skips a natively readable type the text allowlist excludes without opening it', async () => {
+    const openStoredFile = localStorage(writeSource('notes.csv', 'a,b\n1,2\n'));
+    const textMimeTypes = [/^application\/json$/];
+
+    await expect(
+      createFileTextDeriver({ req: newRequest(), openStoredFile, textMimeTypes })(
+        storedFile({ type: 'text/csv', filename: 'notes.csv' }),
+      ),
+    ).resolves.toEqual({ status: 'skipped', reason: 'no_extractor' });
+    expect(openStoredFile).not.toHaveBeenCalled();
+  });
+
+  it('parses a document type whatever the text allowlist says, as upload extraction does', async () => {
+    const openStoredFile = localStorage(path.join(documentsDir, 'sample.xlsx'));
+    const extractors = spiedExtractors();
+
+    const result = await createFileTextDeriver({
+      req: newRequest(),
+      openStoredFile,
+      extractors,
+      textMimeTypes: [/^application\/json$/],
+    })(storedFile({ type: XLSX, filename: 'sample.xlsx' }));
+
+    expect(result).toMatchObject({ status: 'derived' });
+    expect(extractors.parseDocument).toHaveBeenCalledTimes(1);
+  });
+
   it('skips a type no built-in extractor reads without opening it', async () => {
     const openStoredFile = localStorage(path.join(documentsDir, 'sample.xlsx'));
 

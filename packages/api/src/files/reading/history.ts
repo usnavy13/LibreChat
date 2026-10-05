@@ -6,6 +6,7 @@ import type { TurnReadingFile } from './turn';
 import type { ServerRequest } from '~/types';
 import {
   collectFileIds,
+  listAgentEntries,
   isModelBoundAttachmentFile,
   measureModelBoundAttachment,
   resolveAgentAttachmentLimits,
@@ -24,8 +25,6 @@ interface AttachmentScope {
   endpoint: string;
   endpointType?: string | null;
 }
-
-type AgentEndpoint = { endpoint?: string | null; endpointType?: string | null };
 
 export interface TurnAttachmentsWithHistoryParams<T extends HistoryAllocationFile> {
   agent: Pick<TurnReadingAgent, 'id' | 'deliveryRouting' | 'fileConsumers'>;
@@ -75,9 +74,6 @@ const tightenLimits = (
   textChars: tighter(first.textChars, second.textChars),
 });
 
-const listAgentEndpoints = (endpoints?: AgentAttachmentEndpointsByAgentId): AgentEndpoint[] =>
-  endpoints instanceof Map ? [...endpoints.values()] : Object.values(endpoints ?? {});
-
 /**
  * The limits every check on the shared set enforces together: the global context limits of
  * `assertTurnAttachmentLimits`, and each reachable agent's own count allowance and endpoint
@@ -95,7 +91,7 @@ function resolveSharedLimits(
     enforceAttachmentCount: false,
     useGlobalContextSizeLimit: true,
   });
-  return [{ endpoint, endpointType }, ...listAgentEndpoints(endpointsByAgentId)]
+  return [{ endpoint, endpointType }, ...listAgentEntries(endpointsByAgentId)]
     .map((agentEndpoint) =>
       resolveAgentAttachmentLimits({
         req,

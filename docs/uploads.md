@@ -702,7 +702,7 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
 | A-08 | PARTIAL   | Unit-only; nothing asserts the text-read original is also listed as code-accessible              |
 | A-09 | PROVEN    | Unit and API payload tests; the search-fallback variant is unit-only                             |
 | A-10 | PROVEN    | E2E payload, stored message file and caption after reload                                        |
-| A-11 | PARTIAL   | Safe preparation failure and resend of the retained original covered; no mid-run reroute        |
+| A-11 | PARTIAL   | Safe preparation failure and resend of the retained original covered; no mid-run reroute         |
 | A-12 | PARTIAL   | Deterministic first-fit allocation proven; agent-scoped context attachments can still return 413 |
 | A-13 | PROVEN    | Pins the existing generic 500 for message, code and search uploads                               |
 | A-14 | PROVEN    | Validator parity and configured/provider limit resolution, unit                                  |
@@ -713,7 +713,7 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
 | A-19 | PARTIAL   | Reload and later turns covered; an expired sandbox copy is not tested                            |
 | A-20 | PARTIAL   | Unit-only; no test sends two same-name uploads end to end                                        |
 | A-21 | PARTIAL   | Provisioning failure and abort covered; composer cancel and live retry states are not built      |
-| A-22 | PROVEN    | Failed indexing persists an unread notice; retry indexes the same original before querying it   |
+| A-22 | PROVEN    | Failed indexing persists an unread notice; retry indexes the same original before querying it    |
 | A-23 | PROVEN    | Unit and API spec, no E2E                                                                        |
 | A-24 | PROVEN    | Contract tests, no E2E                                                                           |
 | A-25 | PROVEN    | Unit only                                                                                        |
@@ -729,7 +729,11 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
 
 - For a message attachment the automatic policy routes, the endpoint `fileSizeLimit` at turn time
   is treated as native delivery capacity, not admission: an oversized file moves to another reader
-  instead of being dropped. Upload admission and `serverFileSizeLimit` are unchanged.
+  instead of being dropped. Upload admission and `serverFileSizeLimit` are unchanged. The
+  consequence to confirm against L-04: a file admitted under another endpoint (a handoff
+  receiver, an added agent, a reattached upload) that exceeds this endpoint's `fileSizeLimit`
+  now reaches Run Code or File Search preparation here, where classic dropped it from the turn;
+  only `serverFileSizeLimit` bounds what those preparations receive.
 - A soft extraction failure becomes hard whenever an inspection policy relies on extracted text:
   text a blocking `extracted_text` policy cannot inspect is refused, never kept unchecked.
 - The `text_only` notice appears only when Run Code was wanted for a record that has no original.
@@ -760,6 +764,11 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   and an older handoff encoder can fail the turn on them, until they are re-uploaded or
   backfilled.
 - Provisioning now treats a record without a `source` as local, like the rest of the pipeline.
+- Resume after tool drift: checkpoint files are charged by the resuming agent's own decision. If
+  the readers changed while a run was paused (Run Code enabled on the resume request, for example),
+  a file read as text before the pause is charged as `none` on resume, so the resumed aggregate
+  text check can under-count by that file. Pinning the pause-time reading onto the checkpoint is
+  the follow-up; drift in the other direction over-charges, which is safe.
 
 ### Corrections from the branch review
 
@@ -775,6 +784,24 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   turns. Retry uses the retained original, and a later success preserves the earlier failure notice.
 - Parallel added conversations receive the same text deriver and persister as the primary agent.
   A secondary agent can derive a permitted text fallback without another upload or duplicate work.
+- A resumed turn whose reading-notice update fails still saves and publishes its response; the
+  failed notice write is logged and the saved row keeps its earlier notice.
+- When search priming throws while tools load, the loader reports that it primed nothing, so no
+  resource file is advertised or shown as searchable on evidence that never existed.
+- A natively readable type the deployment's text allowlist (`fileConfig.text.supportedMimeTypes`)
+  excludes is marked `failed` at upload rather than `deferred`, and turn-time derivation skips it,
+  so an excluded type is never parsed on a later turn. Document types reach the parser whatever
+  the allowlist says, as upload extraction already does.
+- Text derived for an unmarked original that stored none, such as a document the provider could
+  not take, is cached on the record with a `complete` marker, so later turns and replays reuse it
+  instead of downloading and parsing the original again. A failed marker is still kept only by a
+  record the policy deferred.
+- An aborted derivation is forgotten by the reading context as well as by the deriver, so a later
+  caller on the same request derives under its own signal.
+- The file preview dialog no longer decodes a workbook kept for Run Code as text: the preview
+  treated every MIME type containing `xml` as text, which includes Office Open XML packages, so a
+  code-kept xlsx opened as raw ZIP bytes. Only XML proper and `+xml` types preview as text now; a
+  binary workbook without extracted text shows the existing "preview not available" state.
 
 The retest covered all 22 browser cases across automatic uploads, classic uploads and provisioning,
 including a targeted rerun of the classic later-turn search case. That case verifies the separate
@@ -783,3 +810,9 @@ and preview tests also cover the corrections above. The production build and all
 TypeScript projects passed. Lighthouse passed with 250 ms per database query: median LCP 3,962 ms
 (budget 4,500), CLS 0.0166 (budget 0.1), and TBT 221 ms (budget 500). Browser model, search and code
 services remain local fixtures; these results do not establish live provider or sandbox reliability.
+
+A review pass on October 5, 2026 applied the corrections above and re-ran the verification at that
+head: the four upload e2e lanes (25 cases), focused Jest in `api`, `packages/api`,
+`packages/data-schemas`, `packages/data-provider` and `client`, `tsc --noEmit` in the four changed
+workspaces, the static checks against `origin/dev`, and a five-scenario headless browser walkthrough
+whose screenshots accompany the pull request. Lighthouse was not rerun in that pass.

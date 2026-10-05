@@ -72,6 +72,7 @@ const {
   MAX_SUBAGENT_GRAPH_NODES,
   MAX_SUBAGENT_RUN_CONFIGS,
   isEphemeralAgentId,
+  mergeFileConfig,
   resolveAllowedStatefulCodeEnvironments,
 } = require('librechat-data-provider');
 const {
@@ -777,6 +778,7 @@ const initializeClientWithProvider = async ({
     req,
     openStoredFile,
     filters: appConfig?.filters,
+    textMimeTypes: mergeFileConfig(appConfig?.fileConfig).text?.supportedMimeTypes,
   });
   const persistDerivation = createDerivationPersister(db.saveFileTextDerivation, {
     user: req.user.id,

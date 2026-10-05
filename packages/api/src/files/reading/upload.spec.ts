@@ -27,6 +27,7 @@ const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 const PDF = 'application/pdf';
+const CSV = 'text/csv';
 
 const automatic: EndpointFileConfig = { llmDeliveryPolicy: 'automatic' };
 const extractedTextBlock: FiltersConfig = {
@@ -408,6 +409,20 @@ describe('acquireUploadText', () => {
           Promise.reject(
             new ExtractorUnavailableError(
               `File type ${PPTX} is not supported for text parsing.`,
+              'no_extractor',
+            ),
+          ),
+      }),
+    ).resolves.toEqual(failedWith('no_extractor', 'configured'));
+    /* A type the text allowlist excludes stays failed even where a built-in extractor exists. */
+    await expect(
+      acquireUploadText({
+        fileId,
+        reading: keep(CSV),
+        acquire: () =>
+          Promise.reject(
+            new ExtractorUnavailableError(
+              `File type ${CSV} is not supported for text parsing.`,
               'no_extractor',
             ),
           ),

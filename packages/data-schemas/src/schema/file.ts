@@ -188,7 +188,8 @@ const file: Schema<IMongoFile> = new Schema(
         default: undefined,
       },
       /** How the text a reader may need was obtained, under the automatic reading policy.
-       *  Only a `deferred` record accepts text derived later at turn time. */
+       *  A `deferred` or unmarked record without text accepts text derived at turn
+       *  time; a failed marker is kept only by a deferred record. */
       textDerivation: {
         type: textDerivationSchema,
         default: undefined,

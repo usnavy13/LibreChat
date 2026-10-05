@@ -25,6 +25,7 @@ import {
 } from '~/files/reading/turn';
 import { collectModelBoundHistoricalFileIdState } from '~/middleware/modelBoundContent';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
+import { getAgentEntry } from '~/agents/attachments';
 
 /** The app config a turn's attachment routing reads. */
 export type TurnDeliveryConfig = Pick<AppConfig, 'fileConfig' | 'speech' | 'endpoints'>;
@@ -229,22 +230,6 @@ export interface ScopedTurnCandidates<T extends TurnReadingFile> {
   candidates?: ReadonlyMap<string, T>;
 }
 
-const scopedAttachmentsOf = <T>(
-  attachmentsByAgentId: Map<string, T[]> | Record<string, T[]> | undefined,
-  agentId: string,
-): T[] =>
-  attachmentsByAgentId instanceof Map
-    ? (attachmentsByAgentId.get(agentId) ?? [])
-    : (attachmentsByAgentId?.[agentId] ?? []);
-
-const receiverEndpointOf = (
-  endpointsByAgentId: ScopedReceiverEndpoints | undefined,
-  agentId: string,
-): ScopedReceiverEndpoint | undefined =>
-  endpointsByAgentId instanceof Map
-    ? endpointsByAgentId.get(agentId)
-    : endpointsByAgentId?.[agentId];
-
 /** Historical files still model-bound in the retained messages; every one when none are given. */
 function selectHistoricalFileIds<T extends TurnDeliveryFile & { file_id: string }>({
   resendFiles,
@@ -309,7 +294,7 @@ function selectAcceptedFileIds<T extends TurnReadingFile>(
   const accepted = filterFilesByEndpointRuntimeConfig(appConfig, {
     files: candidates,
     endpoint: routing.endpoint,
-    endpointType: receiverEndpointOf(endpointsByAgentId, agentId)?.endpointType,
+    endpointType: getAgentEntry(endpointsByAgentId, agentId)?.endpointType,
     skipTotalSizeLimit: true,
     preserveTextSources: true,
   });
@@ -328,7 +313,7 @@ function selectScopedReaders<T extends TurnReadingFile>(
     if (routing == null || context == null || sharedAgents?.has(agentId) === false) {
       return [];
     }
-    const scoped = scopedAttachmentsOf(attachmentsByAgentId, agentId);
+    const scoped = getAgentEntry(attachmentsByAgentId, agentId) ?? [];
     return [
       {
         routing,
@@ -412,7 +397,7 @@ export function resolveScopedTurnAttachments<T extends TurnDeliveryFile & { file
   const sharedAgents = new Set(sharedConversationAgentIds);
   const result = new Map<string, T[]>();
   for (const { agentId, agent } of agents) {
-    const scoped = scopedAttachmentsOf(attachmentsByAgentId, agentId);
+    const scoped = getAgentEntry(attachmentsByAgentId, agentId) ?? [];
     const files = new Map(scoped.map((file) => [file.file_id, file]));
     for (const [fileId, file] of sharedAgents.has(agentId) ? candidates : []) {
       if (files.has(fileId)) continue;
