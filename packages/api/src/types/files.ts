@@ -1,4 +1,4 @@
-import type { BedrockDocumentFormat } from 'librechat-data-provider';
+import type { BedrockDocumentFormat, ReadingEvidence } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { Readable } from 'stream';
 import type { DownloadURLParams } from '~/storage/types';
@@ -128,7 +128,7 @@ export type DocumentBlock =
  * `capacity`: larger than the provider accepts.
  * `integrity`: the stored bytes could not be read or are not a usable file.
  */
-export type ValidationFailureReason = 'capacity' | 'integrity';
+export type ValidationFailureReason = Exclude<DocumentRejection['reason'], 'unsupported'>;
 
 /** Whether the document encoder fails the turn on an invalid file or leaves the file out. */
 export type NativeValidationMode = 'throw' | 'skip';
@@ -136,7 +136,7 @@ export type NativeValidationMode = 'throw' | 'skip';
 /** A document the encoder left out in skip mode instead of failing the turn, and why. */
 export interface DocumentRejection {
   file_id: string;
-  reason: ValidationFailureReason | 'unsupported';
+  reason: NonNullable<ReadingEvidence['rejected']>;
 }
 
 export interface DocumentResult {

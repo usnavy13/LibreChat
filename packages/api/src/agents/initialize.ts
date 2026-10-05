@@ -14,6 +14,7 @@ import {
   hasActivePiiPatterns,
   replaceSpecialVars,
   providerEndpointMap,
+  resolveLLMDeliveryPolicy,
 } from 'librechat-data-provider';
 import type {
   AgentToolResources,
@@ -55,6 +56,7 @@ import type {
   InitializeResultBase,
 } from '~/types';
 import type { LCAvailableTools, RequestScopedMCPConnectionStore } from '../mcp/types';
+import type { DirectContentAllocation, TurnReadingContext } from '~/files/reading';
 import type { ContentTraversalLimitError } from '../protection/adapters/nested';
 import type { SkillContentInput } from '../protection/adapters/submissions';
 import type { RepositoryInstructionSource } from '../code/instructions';
@@ -80,6 +82,12 @@ import {
   type CodeEnvironmentConfig,
   type CodeExecutionContext,
 } from './execution';
+import {
+  isModelBoundAttachmentFile,
+  assertAgentAttachmentLimits,
+  measureModelBoundAttachment,
+  resolveAgentAttachmentLimits,
+} from './attachments';
 import {
   resolveChatProjectFiles,
   resolveChatProjectPolicyFiles,
@@ -115,6 +123,11 @@ import {
   resolveAttachedWorkspaceCommandTimeoutDefault,
 } from '~/code/command';
 import {
+  applyTurnDelivery,
+  toClassicInspectionView,
+  resolveTurnDeliveryRouting,
+} from './files/delivery';
+import {
   formatChatProjectInstructions,
   hydrateChatProjectContextResources,
 } from '../projects/context';
@@ -124,10 +137,11 @@ import {
 } from './errors';
 import { assertChatProjectInstructions, ChatProjectResourcesChangedError } from '../projects/turn';
 import { extractAgentContent, extractSkillContent } from '../protection/adapters/submissions';
+import { buildTurnReadingContext, logTurnReading, settleTurnFiles } from '~/files/reading';
 import { createConfiguredContentInspector, inspectContent } from '../protection/runtime';
-import { assertAgentAttachmentLimits, isModelBoundAttachmentFile } from './attachments';
 import { assertModelBoundContent } from '../middleware/modelBoundContent';
 import { resolveAttachedWorkspaceReadFileLines } from '~/code/workspace';
+import { resolveConfiguredFileSizeLimit } from '~/files/encode/utils';
 import { isImplicitStatefulCodeRouteAvailable } from '../code/config';
 import { PARTIAL_RESOLVED_CONVERSATION } from './conversationSymbols';
 import { registerMemoryTools, memoryToolUsageGuard } from './memory';
@@ -136,15 +150,15 @@ import { prepareQueuedCodeFileContext } from '~/files/code/queued';
 import { ContentFilterError } from '../middleware/contentFilter';
 import { resolveToolRoleGrants } from '~/tools/rolePermissions';
 import { createRequestAgentExecutionContext } from './runtime';
-import { resolveTurnDeliveryRouting } from './files/delivery';
 import { filterFilesByEndpointRuntimeConfig } from '~/files';
 import { hasActiveFilePolicy } from '../protection/files';
+import { resolveFileTokenLimit } from '~/files/context';
 import { hasActiveFileFieldPolicy } from '~/protection';
 import { applyBackgroundToolCalls } from './background';
-import { applyTurnDelivery } from './files/delivery';
 import { generateArtifactsPrompt } from '~/prompts';
 import { getProviderConfig } from '~/endpoints';
 import { primeResources } from './resources';
+import Tokenizer from '~/utils/tokenizer';
 
 /**
  * Fraction of context budget reserved as headroom when no explicit maxContextTokens is set.
@@ -198,6 +212,69 @@ function sumUniqueBytes(files: Array<{ file_id?: string; bytes?: number }>): num
     total += file.bytes ?? 0;
   }
   return total;
+}
+
+type TurnAttachment = IMongoFile | TFile;
+
+/** The request attachments the endpoint runtime policy removed from the delivered set. */
+function selectDroppedRequestFiles<T extends { file_id: string }>(
+  delivered: readonly T[],
+  kept: readonly T[],
+  requestFileIds: ReadonlySet<string>,
+): T[] {
+  const keptFiles = new Set(kept);
+  return delivered.filter((file) => !keptFiles.has(file) && requestFileIds.has(file.file_id));
+}
+
+/** The encoding the prompt's file text budget counts with (`extractFileContext`). */
+const READING_TOKEN_ENCODING = 'o200k_base';
+
+interface TurnReadingSetup {
+  routing: TurnDeliveryRouting;
+  /** The provider the document encoder receives for this agent. */
+  provider: string;
+  model?: string;
+  endpoint?: string;
+  fileConfig?: AppConfig['fileConfig'];
+  req?: ServerRequest;
+  signal?: AbortSignal;
+}
+
+/**
+ * The automatic policy's reading evidence for one agent's turn, or nothing under classic, so a
+ * classic turn runs none of the reading steps. Text fit is judged synchronously, so the
+ * tokenizer is loaded first; if it cannot load, counts fall back to the tokenizer's estimate.
+ */
+async function prepareTurnReading({
+  routing,
+  provider,
+  model,
+  endpoint,
+  fileConfig,
+  req,
+  signal,
+}: TurnReadingSetup): Promise<TurnReadingContext | undefined> {
+  if (resolveLLMDeliveryPolicy(routing.endpointConfig) !== 'automatic') {
+    return undefined;
+  }
+  await Tokenizer.initEncoding(READING_TOKEN_ENCODING).catch((error: unknown) => {
+    logger.warn(
+      '[initializeAgent] Tokenizer unavailable; judging text fit with estimated counts',
+      getSafeErrorMetadata(error),
+    );
+  });
+  return buildTurnReadingContext({
+    routing,
+    provider,
+    model,
+    fileTokenLimit: resolveFileTokenLimit(req),
+    configuredFileSizeLimit: resolveConfiguredFileSizeLimit(fileConfig, {
+      provider: provider as Providers,
+      endpoint,
+    }),
+    countTokens: (text) => Tokenizer.getTokenCount(text, READING_TOKEN_ENCODING),
+    signal,
+  });
 }
 
 const temporalSpecialVarRegex = /{{\s*(current_date|current_datetime|iso_datetime)\s*}}/i;
@@ -1551,6 +1628,18 @@ export async function initializeAgent(
     },
     config: appConfig,
   });
+  const readingContext = await prepareTurnReading({
+    routing: deliveryRouting,
+    provider: agent.provider,
+    model: typeof llmConfig.model === 'string' ? llmConfig.model : (agent.model ?? undefined),
+    endpoint: agent.endpoint ?? undefined,
+    fileConfig: appConfig?.fileConfig,
+    req: params.req,
+    signal: params.signal,
+  });
+  if (readingContext != null) {
+    deliveryRouting.reading = readingContext;
+  }
 
   /** Resolve the per-agent Code API route before resource/tool priming. A
    * stateful agent must perform freshness checks and recovery uploads against
@@ -1848,8 +1937,24 @@ export async function initializeAgent(
   if (!paramEndpoints.has(agent.endpoint ?? '')) {
     endpointFileType = EModelEndpoint.custom;
   }
+  const admissionFileIds = new Set(
+    (authorizedRunFiles ?? requestUsageFiles).map((file) => file.file_id),
+  );
+  /** First-fit allocation of the request's direct content against the limits admission holds
+   *  it to, so allocation and the admission check cannot disagree. */
+  const requestAllocation = <T extends TurnAttachment>(): DirectContentAllocation<T> => ({
+    requestFileIds: [...admissionFileIds],
+    limits: resolveAgentAttachmentLimits({
+      fileConfig: appConfig?.fileConfig,
+      endpoint: agent.endpoint ?? '',
+      endpointType: endpointFileType,
+    }),
+    measure: measureModelBoundAttachment,
+    agentId: agent.id,
+  });
   if ((currentFiles && currentFiles.length) || deferredProvisionFiles.length > 0) {
     const endpointType = endpointFileType;
+    const deliveredFiles = currentFiles ?? [];
 
     currentFiles = filterFilesByEndpointRuntimeConfig(appConfig, {
       files: currentFiles,
@@ -1858,12 +1963,23 @@ export async function initializeAgent(
       skipTotalSizeLimit: true,
       preserveTextSources: true,
     });
-    const requestUsageFileIds = new Set(
-      (authorizedRunFiles ?? requestUsageFiles).map((file) => file.file_id),
-    );
+    /* Only filter survivors are allocated: a file the endpoint refuses never spends the
+     * request's direct-content allowance, and the reading records it as dropped. */
+    if (readingContext != null) {
+      readingContext.recordDropped(
+        selectDroppedRequestFiles(deliveredFiles, currentFiles, admissionFileIds),
+      );
+      currentFiles = await settleTurnFiles({
+        routing: deliveryRouting,
+        consumers: fileConsumers,
+        files: currentFiles,
+        allocation: requestAllocation(),
+        signal: params.signal,
+      });
+    }
     assertAgentAttachmentLimits({
       attachments: currentFiles.filter(
-        (file) => requestUsageFileIds.has(file.file_id) && isModelBoundAttachmentFile(file),
+        (file) => admissionFileIds.has(file.file_id) && isModelBoundAttachmentFile(file),
       ),
       fileConfig: appConfig?.fileConfig,
       endpoint: agent.endpoint ?? '',
@@ -1871,8 +1987,9 @@ export async function initializeAgent(
     });
 
     /* The same endpoint configuration governs both paths. A file this endpoint refuses
-     * by size, MIME type, or a files-disabled setting must not reach the Code API or
-     * RAG through provisioning just because it left the delivery set. */
+     * by MIME type, a files-disabled setting, or (outside the automatic reading policy,
+     * where size is delivery capacity) size must not reach the Code API or RAG through
+     * provisioning just because it left the delivery set. */
     if (deferredProvisionFiles.length > 0) {
       /* One request, one total-size allowance. Filtering each set from zero would let a
        * delivery attachment and a provisioning candidate that each fit alone exceed the
@@ -1905,7 +2022,7 @@ export async function initializeAgent(
 
   assertModelBoundContent({
     filters: appConfig?.filters,
-    files: currentFiles,
+    files: currentFiles && toClassicInspectionView(currentFiles, deliveryRouting, fileConsumers),
   });
 
   /* Provisioning candidates are inspected under the same policy before their bytes can
@@ -1976,6 +2093,7 @@ export async function initializeAgent(
    * and current content policy checks. Ignore returned rows so priming cannot
    * observe a different post-inspection snapshot.
    */
+  const readingSettled = readingContext?.flush();
   if (requestFileOwnerId && requestUsageFiles.length > 0) {
     await db.updateFilesUsage(requestUsageFiles, undefined, {
       user: requestFileOwnerId,
@@ -1988,6 +2106,7 @@ export async function initializeAgent(
       tenantId: user?.tenantId,
     });
   }
+  await readingSettled;
 
   let runtimeToolResources = agent.tool_resources;
   if (attachedEnvironmentOptOut && runtimeToolResources != null) {
@@ -2629,30 +2748,47 @@ export async function initializeAgent(
     fileConsumers.executeCode !== finalFileConsumers.executeCode ||
     fileConsumers.fileSearch !== finalFileConsumers.fileSearch;
   Object.assign(fileConsumers, finalFileConsumers);
-  const finalizeAttachments = (files: Array<TFile | undefined> | undefined): IMongoFile[] => {
-    const hydrated = toMongoFiles(files);
-    return consumersChanged
-      ? applyTurnDelivery(hydrated, { routing: deliveryRouting, consumers: fileConsumers })
-      : hydrated;
-  };
-  const finalAttachments = finalizeAttachments(primedAttachments);
-  const finalRequestAttachments = consumersChanged
-    ? applyTurnDelivery(
-        (primedRequestAttachments ?? []).filter((file): file is TFile => file != null),
-        {
+  readingContext?.setSearchEvidence({
+    queued: (provisionState?.vectorDBFiles ?? []).map((file) => file.file_id),
+    registered: runtimeToolResources?.[EToolResources.file_search]?.file_ids ?? [],
+  });
+  const primedRequestFiles = (primedRequestAttachments ?? []).filter(
+    (file): file is TFile => file != null,
+  );
+  const primedFiles = toMongoFiles(primedAttachments);
+  const primedContextFiles = toMongoFiles(primedAgentContextAttachments);
+  const redeliver = <T extends TurnAttachment>(files: T[]): T[] =>
+    consumersChanged
+      ? applyTurnDelivery(files, { routing: deliveryRouting, consumers: fileConsumers })
+      : files;
+  /* The reading decides the request again whether or not a reader dropped out: search
+   * evidence is known only now, so a file left for a search that never received it moves on.
+   * Request files are the only ones the automatic policy reads, so the other sets take the
+   * settled request copies and keep classic routing for everything else. */
+  const finalRequestAttachments =
+    readingContext != null
+      ? await settleTurnFiles({
           routing: deliveryRouting,
           consumers: fileConsumers,
-        },
-      )
-    : primedRequestAttachments;
+          files: primedRequestFiles,
+          allocation: requestAllocation<TFile>(),
+          signal: params.signal,
+        })
+      : redeliver(primedRequestFiles);
   const requestAttachments = toMongoFiles(finalRequestAttachments);
-  const agentContextAttachments = finalizeAttachments(primedAgentContextAttachments);
-  if (consumersChanged) {
+  const readingChanged = readingContext != null && finalRequestAttachments !== primedRequestFiles;
+  const settledRequestCopies = new Map(
+    readingChanged ? requestAttachments.map((file) => [file.file_id, file] as const) : [],
+  );
+  const finalizeShared = (files: IMongoFile[]): IMongoFile[] =>
+    settledRequestCopies.size === 0
+      ? redeliver(files)
+      : redeliver(files).map((file) => settledRequestCopies.get(file.file_id) ?? file);
+  const finalAttachments = finalizeShared(primedFiles);
+  const agentContextAttachments = finalizeShared(primedContextFiles);
+  if (consumersChanged || readingChanged) {
     /* A loader may drop a reader, including a skill extra on retry. Newly model-bound text
      * must pass admission before it can escape initialization, just like initial fallback. */
-    const admissionFileIds = new Set(
-      (authorizedRunFiles ?? requestUsageFiles).map((file) => file.file_id),
-    );
     assertAgentAttachmentLimits({
       attachments: requestAttachments.filter(
         (file) => admissionFileIds.has(file.file_id) && isModelBoundAttachmentFile(file),
@@ -2663,9 +2799,14 @@ export async function initializeAgent(
     });
     assertModelBoundContent({
       filters: appConfig?.filters,
-      files: [...finalAttachments, ...requestAttachments, ...agentContextAttachments],
+      files: toClassicInspectionView(
+        [...finalAttachments, ...requestAttachments, ...agentContextAttachments],
+        deliveryRouting,
+        fileConsumers,
+      ),
     });
   }
+  await readingContext?.flush();
   const currentRequestFileIds = new Set(requestFileIds);
   const currentRequestAttachments: TFile[] = (finalRequestAttachments ?? [])
     .filter((file): file is TFile => file != null && currentRequestFileIds.has(file.file_id))
@@ -2763,5 +2904,6 @@ export async function initializeAgent(
       files: [{ content: queuedFileContext }],
     });
   }
+  logTurnReading(initializedAgent, 'init');
   return initializedAgent;
 }

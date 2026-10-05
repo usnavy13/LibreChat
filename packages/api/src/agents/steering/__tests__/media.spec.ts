@@ -1,8 +1,12 @@
-import type { IMongoFile } from '@librechat/data-schemas';
+import { FileContext, resolveTurnLLMDeliveryPath } from 'librechat-data-provider';
+import type { AppConfig, IMongoFile } from '@librechat/data-schemas';
+import type { SteerMediaClient, SteerReadingAgent } from '../media';
 import type { SteerFileFetcher } from '../request';
-import type { SteerMediaClient } from '../media';
+import type { ServerRequest } from '~/types';
 import { buildSteerMedia, collectSteerStampTargets, stampSteerPartMedia } from '../media';
+import { applyTurnDelivery, resolveTurnDeliveryRouting } from '../../files/delivery';
 import { AttachmentObjectNotFoundError } from '~/files/encode/utils';
+import { extractFileContext } from '~/files/context';
 
 jest.spyOn(console, 'log').mockImplementation();
 
@@ -516,5 +520,118 @@ describe('stampSteerPartMedia', () => {
     expect(stamped).toHaveLength(1);
     expect(stamped[0].media).toEqual([{ type: 'text', text: '> kept excerpt\n\nquoted turn' }]);
     expect((message.content as Array<Record<string, unknown>>)[1]).toBe(filesOnlyPart);
+  });
+});
+
+describe('buildSteerMedia file reading', () => {
+  const steerText = 'use the sheet';
+  const holdNote =
+    '"quarterly.xlsx" is attached; Run Code can open it starting with your next message.';
+  /** A workbook extracted at upload, so classic routing reads it as text. */
+  const workbook = {
+    file_id: 'xlsx',
+    filename: 'quarterly.xlsx',
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    source: 'local',
+    context: FileContext.message_attachment,
+    bytes: 2048,
+    text: 'SENTINEL-7F3A',
+    llmDeliveryPath: 'text',
+    metadata: { destinationChosen: false },
+  } as Partial<IMongoFile> as IMongoFile;
+  const routingFor = (fileConfig: AppConfig['fileConfig']) =>
+    resolveTurnDeliveryRouting({ agent: { provider: 'openAI' }, config: { fileConfig } });
+  const automatic = routingFor({ endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } });
+  const classic = routingFor({});
+
+  /**
+   * The AgentClient surface over the real turn routing and text extraction: like BaseClient, it
+   * applies the running agent's routing and exposes the agent only through `options`.
+   */
+  function createRoutedClient(
+    agent: SteerReadingAgent | undefined,
+  ): SteerMediaClient & { processAttachments: jest.Mock } {
+    const req = { body: {}, config: {} } as ServerRequest;
+    const routing = agent?.deliveryRouting;
+    return {
+      options: { agent },
+      resolveTurnAttachments: (files, consumers = agent?.fileConsumers) =>
+        applyTurnDelivery(files, { routing, consumers }),
+      addFileContextToMessage: async (message, files, consumers = agent?.fileConsumers) => {
+        const fileContext = await extractFileContext({
+          attachments: files.filter((file) => {
+            const path = resolveTurnLLMDeliveryPath(routing, file, consumers);
+            return path == null || path === 'text';
+          }),
+          req,
+          tokenCountFn: (text) => text.length,
+        });
+        if (fileContext) {
+          message.fileContext = fileContext;
+        }
+      },
+      processAttachments: jest.fn(
+        async (_message: Record<string, unknown>, files: IMongoFile[]) => files,
+      ),
+    };
+  }
+
+  const steer = (client: SteerMediaClient) =>
+    buildSteerMedia({
+      client,
+      user,
+      item: steerItem([{ file_id: 'xlsx' }], steerText),
+      getFiles: jest.fn(async () => [workbook]),
+    });
+  const textOf = (result: Awaited<ReturnType<typeof steer>>) =>
+    (result?.content ?? []).map((part) => part.text).join('\n');
+
+  it('holds a spreadsheet for Run Code under the automatic policy and says so', async () => {
+    /* The run's code queue cannot take a mid-run file, so the workbook waits for the next
+     * message's provisioning rather than reaching the prompt as text. */
+    const client = createRoutedClient({
+      deliveryRouting: automatic,
+      fileConsumers: { executeCode: true, fileSearch: true },
+    });
+
+    const result = await steer(client);
+
+    expect(result?.content).toEqual([{ type: 'text', text: `${steerText}\n\n${holdNote}` }]);
+    expect(textOf(result)).not.toContain('SENTINEL-7F3A');
+    expect(client.processAttachments).toHaveBeenCalledWith(
+      expect.anything(),
+      [{ ...workbook, llmDeliveryPath: 'none' }],
+      { executeCode: true, fileSearch: false },
+    );
+  });
+
+  it('delivers the text of a spreadsheet when the automatic run has no Run Code', async () => {
+    const client = createRoutedClient({
+      deliveryRouting: automatic,
+      fileConsumers: { executeCode: false, fileSearch: true },
+    });
+
+    const result = await steer(client);
+
+    expect(textOf(result)).toContain('SENTINEL-7F3A');
+    expect(textOf(result)).not.toContain(holdNote);
+  });
+
+  it('steers exactly as before under classic routing, even with Run Code loaded', async () => {
+    const withCode = createRoutedClient({
+      deliveryRouting: classic,
+      fileConsumers: { executeCode: true, fileSearch: false },
+    });
+    const withoutAgent = createRoutedClient(undefined);
+
+    const [coded, bare] = await Promise.all([steer(withCode), steer(withoutAgent)]);
+
+    expect(coded).toEqual(bare);
+    expect(textOf(coded)).toContain('SENTINEL-7F3A');
+    expect(textOf(coded)).not.toContain(holdNote);
+    expect(withCode.processAttachments).toHaveBeenCalledWith(expect.anything(), [workbook], {
+      executeCode: false,
+      fileSearch: false,
+    });
   });
 });

@@ -1,0 +1,425 @@
+import { logger } from '@librechat/data-schemas';
+import { FileContext, FileSources } from 'librechat-data-provider';
+import type { TFileConfig, TurnDeliveryRouting } from 'librechat-data-provider';
+import type { BuildTurnReadingContextParams, FileTextDeriver, TurnReadingFile } from './turn';
+import { buildTurnReadingContext, getTurnReadingContext, getTurnTextOptions } from './turn';
+import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
+
+type EndpointFileConfigInput = NonNullable<TFileConfig['endpoints']>[string];
+
+const MB = 1024 * 1024;
+const PDF = 'application/pdf';
+const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+const routingFor = (
+  endpoint: string,
+  endpointConfig: EndpointFileConfigInput = { llmDeliveryPolicy: 'automatic' },
+): TurnDeliveryRouting =>
+  resolveTurnDeliveryRouting({
+    agent: { provider: endpoint, endpoint },
+    config: { fileConfig: { endpoints: { [endpoint]: endpointConfig } } },
+  });
+
+const attachment = (
+  overrides: Partial<TurnReadingFile> & Pick<TurnReadingFile, 'file_id'>,
+): TurnReadingFile => ({
+  type: PDF,
+  bytes: MB,
+  source: FileSources.local,
+  context: FileContext.message_attachment,
+  llmDeliveryPath: 'provider',
+  metadata: { destinationChosen: false },
+  ...overrides,
+});
+
+const countByLength = (text: string): number => text.length;
+
+function contextFor(overrides: Partial<BuildTurnReadingContextParams> = {}) {
+  const params: BuildTurnReadingContextParams = {
+    routing: routingFor('openAI'),
+    provider: 'openAI',
+    model: 'gpt-4o',
+    fileTokenLimit: 100_000,
+    configuredFileSizeLimit: undefined,
+    countTokens: countByLength,
+    ...overrides,
+  };
+  const context = buildTurnReadingContext(params);
+  if (context == null) {
+    throw new Error('expected a reading context');
+  }
+  return context;
+}
+
+const nativeVerdict = (
+  provider: string,
+  file: TurnReadingFile,
+  overrides: Partial<BuildTurnReadingContextParams> = {},
+) => contextFor({ routing: routingFor(provider), provider, ...overrides }).judge(file).native;
+
+describe('buildTurnReadingContext', () => {
+  it('builds nothing under the classic policy without a text deriver', () => {
+    const params = {
+      provider: 'openAI',
+      fileTokenLimit: 100_000,
+      configuredFileSizeLimit: undefined,
+      countTokens: countByLength,
+    };
+    expect(buildTurnReadingContext({ ...params, routing: routingFor('openAI', {}) })).toBe(
+      undefined,
+    );
+    expect(
+      buildTurnReadingContext({
+        ...params,
+        routing: routingFor('openAI', { llmDeliveryPolicy: 'classic' }),
+      }),
+    ).toBe(undefined);
+    expect(
+      buildTurnReadingContext({
+        ...params,
+        routing: routingFor('openAI', { llmDeliveryPolicy: 'automatic', legacyFileUploadUX: true }),
+      }),
+    ).toBe(undefined);
+  });
+
+  it('builds a derive-only context under the classic policy when a deriver is wired', () => {
+    const deriveText: FileTextDeriver = jest.fn();
+    const context = contextFor({ routing: routingFor('openAI', {}), deriveText });
+    const file = attachment({ file_id: 'pdf', text: 'x'.repeat(10), bytes: 500 * MB });
+
+    expect(context.policy).toBe('classic');
+    expect(context.canDerive).toBe(true);
+    expect(context.judge(file)).toEqual({});
+
+    context.addOverflow(['pdf']);
+    context.recordRejections([{ file_id: 'pdf', reason: 'capacity' }]);
+    context.markTextFailed('pdf');
+    expect(context.judge(file)).toEqual({ textFailed: true });
+  });
+
+  it('cannot derive under the automatic policy without a deriver', () => {
+    const context = contextFor();
+    expect(context.policy).toBe('automatic');
+    expect(context.canDerive).toBe(false);
+  });
+
+  it('is found again through the routing it is attached to', () => {
+    const routing = routingFor('openAI');
+    const context = contextFor({ routing });
+    expect(getTurnReadingContext(routing)).toBe(undefined);
+
+    routing.reading = context;
+    expect(getTurnReadingContext(routing)).toBe(context);
+    expect(getTurnReadingContext({ reading: { judge: () => ({}), canDerive: false } })).toBe(
+      undefined,
+    );
+    expect(getTurnReadingContext(undefined)).toBe(undefined);
+  });
+
+  it('is still found after the routing that carries it is copied', () => {
+    const routing = routingFor('openAI');
+    const context = contextFor({ routing });
+    routing.reading = context;
+
+    expect(getTurnReadingContext({ ...routing })).toBe(context);
+  });
+});
+
+describe('getTurnTextOptions', () => {
+  it('supplies nothing without a reading context', () => {
+    expect(getTurnTextOptions(undefined)).toEqual({});
+    expect(getTurnTextOptions(routingFor('openAI'))).toEqual({});
+  });
+
+  it('reuses judged counts and marks truncation under the automatic policy', () => {
+    const routing = routingFor('openAI');
+    const context = contextFor({ routing, fileTokenLimit: 10, countTokens: () => 4 });
+    routing.reading = context;
+    const file = attachment({ file_id: 'notes', text: 'x'.repeat(40), llmDeliveryPath: 'text' });
+    context.judge(file);
+
+    const options = getTurnTextOptions(routing);
+
+    expect(options.markTruncation).toBe(true);
+    expect(options.knownTokenCount?.(file)).toBe(4);
+  });
+
+  it('reuses counts without marking truncation in a derive-only classic context', () => {
+    const routing = routingFor('openAI', {});
+    routing.reading = contextFor({ routing, deriveText: jest.fn() });
+
+    expect(getTurnTextOptions(routing)).toMatchObject({ markTruncation: false });
+  });
+});
+
+describe('text verdicts', () => {
+  it('settles text within the limit by its byte length without counting tokens', () => {
+    const countTokens = jest.fn(countByLength);
+    const context = contextFor({ fileTokenLimit: 10, countTokens });
+
+    expect(context.judge(attachment({ file_id: 'short', text: 'tiny' })).text).toBe('fits');
+    expect(countTokens).not.toHaveBeenCalled();
+    expect(context.knownTokenCount(attachment({ file_id: 'short', text: 'tiny' }))).toBe(undefined);
+  });
+
+  it('counts tokens once when the byte length exceeds the limit', () => {
+    const countTokens = jest.fn((text: string) => Math.ceil(text.length / 4));
+    const context = contextFor({ fileTokenLimit: 10, countTokens });
+    const file = attachment({ file_id: 'long', text: 'x'.repeat(40) });
+
+    expect(context.judge(file).text).toBe('fits');
+    expect(context.judge({ ...file }).text).toBe('fits');
+    expect(countTokens).toHaveBeenCalledTimes(1);
+    expect(context.knownTokenCount(file)).toBe(10);
+  });
+
+  it('exceeds when the complete text has more tokens than the limit', () => {
+    const context = contextFor({ fileTokenLimit: 10 });
+    const file = attachment({ file_id: 'long', text: 'x'.repeat(11) });
+
+    expect(context.judge(file).text).toBe('exceeds');
+    expect(context.knownTokenCount(file)).toBe(11);
+  });
+
+  it.each([0, undefined])('exceeds when the token limit is %p', (fileTokenLimit) => {
+    const countTokens = jest.fn(countByLength);
+    const context = contextFor({ fileTokenLimit, countTokens });
+
+    expect(context.judge(attachment({ file_id: 'text', text: 'a' })).text).toBe('exceeds');
+    expect(countTokens).not.toHaveBeenCalled();
+  });
+
+  it('judges the text again once its length changes', () => {
+    const countTokens = jest.fn(countByLength);
+    const context = contextFor({ fileTokenLimit: 10, countTokens });
+
+    expect(context.judge(attachment({ file_id: 'grows', text: 'x'.repeat(12) })).text).toBe(
+      'exceeds',
+    );
+    expect(context.judge(attachment({ file_id: 'grows', text: 'x'.repeat(11) })).text).toBe(
+      'exceeds',
+    );
+    expect(countTokens).toHaveBeenCalledTimes(2);
+  });
+
+  it('judges no text verdict for a record without text', () => {
+    const context = contextFor();
+    expect(context.judge(attachment({ file_id: 'empty', text: '' }))).not.toHaveProperty('text');
+    expect(context.judge(attachment({ file_id: 'none' }))).not.toHaveProperty('text');
+  });
+});
+
+describe('native verdicts', () => {
+  it('reports a PDF on Azure OpenAI as unsupported, since the encoder emits nothing there', () => {
+    expect(nativeVerdict('azureOpenAI', attachment({ file_id: 'pdf' }))).toBe('unsupported');
+  });
+
+  it('reports a Word document on Anthropic as unsupported and a PDF as fitting', () => {
+    expect(nativeVerdict('anthropic', attachment({ file_id: 'docx', type: DOCX }))).toBe(
+      'unsupported',
+    );
+    expect(nativeVerdict('anthropic', attachment({ file_id: 'pdf' }))).toBe('fits');
+  });
+
+  it('applies Claude document capabilities to an OpenAI-compatible gateway', () => {
+    const docx = attachment({ file_id: 'docx', type: DOCX });
+    expect(nativeVerdict('openAI', docx, { model: 'claude-sonnet-4-5' })).toBe('unsupported');
+    expect(nativeVerdict('openAI', docx, { model: 'gpt-4o' })).toBe('fits');
+  });
+
+  it('exempts a Claude 4 PDF on Bedrock from the 4.5 MB document limit', () => {
+    const pdf = attachment({ file_id: 'pdf', bytes: 20 * MB });
+    expect(
+      nativeVerdict('bedrock', pdf, { model: 'us.anthropic.claude-sonnet-4-20250514-v1:0' }),
+    ).toBe('fits');
+    expect(
+      nativeVerdict('bedrock', pdf, { model: 'anthropic.claude-3-5-sonnet-20240620-v1:0' }),
+    ).toBe('capacity');
+  });
+
+  it('reports a type Bedrock cannot take as unsupported', () => {
+    expect(nativeVerdict('bedrock', attachment({ file_id: 'pptx', type: PPTX }))).toBe(
+      'unsupported',
+    );
+  });
+
+  it('reports capacity above the configured limit and fits within it', () => {
+    const configured = { configuredFileSizeLimit: MB };
+    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 2 * MB }), configured)).toBe(
+      'capacity',
+    );
+    expect(
+      nativeVerdict(
+        'openAI',
+        attachment({ file_id: 'docx', type: DOCX, bytes: 2 * MB }),
+        configured,
+      ),
+    ).toBe('capacity');
+    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: MB }), configured)).toBe(
+      'fits',
+    );
+  });
+
+  it('falls back to the provider limit when none is configured', () => {
+    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 11 * MB }))).toBe(
+      'capacity',
+    );
+    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 10 * MB }))).toBe('fits');
+  });
+
+  it('does not judge images, audio or video', () => {
+    expect(
+      contextFor().judge(attachment({ file_id: 'image', type: 'image/png' })),
+    ).not.toHaveProperty('native');
+  });
+
+  it('memoizes the verdict per file', () => {
+    const context = contextFor();
+    expect(context.judge(attachment({ file_id: 'pdf', bytes: MB })).native).toBe('fits');
+    expect(context.judge(attachment({ file_id: 'pdf', bytes: 50 * MB })).native).toBe('fits');
+    expect(context.judge(attachment({ file_id: 'other', bytes: 50 * MB })).native).toBe('capacity');
+  });
+});
+
+describe('request evidence', () => {
+  it('reports overflow, encode-time rejections and derivation failures per file', () => {
+    const context = contextFor();
+    const file = attachment({ file_id: 'pdf' });
+    expect(context.judge(file)).toEqual({ native: 'fits' });
+
+    context.addOverflow(new Set(['pdf']));
+    context.recordRejections([
+      { file_id: 'pdf', reason: 'integrity' },
+      { file_id: 'pdf', reason: 'capacity' },
+    ]);
+    context.markTextFailed('pdf');
+
+    expect(context.judge(file)).toEqual({
+      native: 'fits',
+      overflow: true,
+      rejected: 'integrity',
+      textFailed: true,
+    });
+    expect(context.judge(attachment({ file_id: 'other' }))).toEqual({ native: 'fits' });
+  });
+
+  it('judges File Search reachability only once search evidence is set', () => {
+    const context = contextFor();
+    const queued = attachment({ file_id: 'queued' });
+    const registered = attachment({ file_id: 'registered' });
+    const missing = attachment({ file_id: 'missing' });
+    const unsearchable = attachment({ file_id: 'zip', type: 'application/zip' });
+    const chosen = attachment({ file_id: 'chosen', metadata: { destinationChosen: true } });
+
+    expect(context.judge(missing)).not.toHaveProperty('search');
+
+    context.setSearchEvidence({ queued: ['queued'], registered: ['registered'] });
+
+    expect(context.judge(queued).search).toBe('reachable');
+    expect(context.judge(registered).search).toBe('reachable');
+    expect(context.judge(missing).search).toBe('unreachable');
+    expect(context.judge(unsearchable).search).toBe('reachable');
+    expect(context.judge(chosen).search).toBe('reachable');
+  });
+
+  it('keeps each dropped request file once', () => {
+    const context = contextFor();
+    const first = attachment({ file_id: 'a', bytes: 1 });
+    context.recordDropped([first, attachment({ file_id: 'b' })]);
+    context.recordDropped([attachment({ file_id: 'a', bytes: 2 })]);
+
+    expect(context.dropped().map((file) => file.file_id)).toEqual(['a', 'b']);
+    expect(context.dropped()[0]).toBe(first);
+    expect(context.stats()).toEqual({
+      overflow: 0,
+      rejected: 0,
+      textFailed: 0,
+      derived: 0,
+      dropped: 2,
+    });
+  });
+});
+
+describe('derive', () => {
+  const xlsx = attachment({
+    file_id: 'xlsx',
+    type: XLSX,
+    llmDeliveryPath: 'none',
+    metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+  });
+
+  it('derives each file once per request with the request signal', async () => {
+    const controller = new AbortController();
+    const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+      async () => ({
+        status: 'derived',
+        text: 'a,b',
+        textDerivation: { outcome: 'complete', extractor: 'document_parser' },
+      }),
+    );
+    const context = contextFor({ deriveText, signal: controller.signal });
+
+    const [first, second] = await Promise.all([context.derive(xlsx), context.derive({ ...xlsx })]);
+
+    expect(first).toBe(second);
+    expect(first).toMatchObject({ status: 'derived', text: 'a,b' });
+    expect(deriveText).toHaveBeenCalledTimes(1);
+    expect(deriveText).toHaveBeenCalledWith(xlsx, controller.signal);
+    expect(context.stats().derived).toBe(1);
+  });
+
+  it('skips without a deriver', async () => {
+    await expect(contextFor().derive(xlsx)).resolves.toEqual({
+      status: 'skipped',
+      reason: 'no_extractor',
+    });
+  });
+
+  it('turns a deriver error into a skipped derivation and logs only safe metadata', async () => {
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => logger);
+    try {
+      const context = contextFor({
+        deriveText: async () => {
+          throw new Error('secret path /data/report.xlsx');
+        },
+      });
+
+      await expect(context.derive(xlsx)).resolves.toEqual({
+        status: 'skipped',
+        reason: 'storage_unavailable',
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[readingText] file_id=xlsx outcome=skipped reason=derivation_error',
+        { type: 'Error' },
+      );
+      expect(context.stats().derived).toBe(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('flushes only after pending derivations settle', async () => {
+    let finish: (() => void) | undefined;
+    const context = contextFor({
+      deriveText: () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ status: 'skipped', reason: 'policy' });
+        }),
+    });
+    void context.derive(xlsx);
+
+    let flushed = false;
+    const flushing = context.flush().then(() => {
+      flushed = true;
+    });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+
+    finish?.();
+    await flushing;
+    expect(flushed).toBe(true);
+    await expect(context.flush()).resolves.toBeUndefined();
+  });
+});

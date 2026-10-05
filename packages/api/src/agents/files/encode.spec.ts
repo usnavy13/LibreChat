@@ -3,6 +3,7 @@ import type { TFile } from 'librechat-data-provider';
 import type { RunFileEncodingAgent, RunFileMessageEncoderDeps } from './encode';
 import type { ServerRequest } from '~/types';
 import { AgentAttachmentLimitError, AgentAttachmentPolicyError } from '../attachments';
+import { buildTurnReadingContext } from '~/files/reading';
 import { resolveTurnDeliveryRouting } from './delivery';
 import { createRunFileMessageEncoder } from './encode';
 
@@ -505,5 +506,124 @@ describe('createRunFileMessageEncoder', () => {
     await expect(harness.encode([], 'child')).resolves.toEqual([]);
     expect(harness.encodeDocuments).not.toHaveBeenCalled();
     expect(harness.extractText).not.toHaveBeenCalled();
+  });
+
+  describe('under the automatic policy', () => {
+    const runsCode = { executeCode: true, fileSearch: false };
+    const noReader = { executeCode: false, fileSearch: false };
+    const attachment = {
+      context: FileContext.message_attachment,
+      metadata: { destinationChosen: false },
+    };
+
+    it('admits an oversized file the child reads with Run Code and never counts it', async () => {
+      /* The endpoint size limit is the provider's capacity for a file the policy reads, and a
+       * file left to Run Code never reaches the provider, so it passes the limit and spends none
+       * of the count, byte or text budgets. Classic routing still refuses the same file. */
+      const workbook: TFile = {
+        ...pdf,
+        ...attachment,
+        file_id: 'input-xlsx',
+        filename: 'quarterly.xlsx',
+        filepath: '/files/quarterly.xlsx',
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        bytes: 2 * 1024 * 1024,
+        text: 'quarter,total\nQ1,4',
+        llmDeliveryPath: 'text',
+      };
+      const limits = { fileSizeLimit: 1, fileLimit: 1 };
+      const harness = setup({
+        agents: {
+          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: runsCode },
+          classic: { provider: 'openAI', endpoint: 'classic', fileConsumers: runsCode },
+        },
+        fileConfig: {
+          fileContextSizeLimit: 1,
+          fileContextCharLimit: 5,
+          endpoints: {
+            automatic: { ...limits, llmDeliveryPolicy: 'automatic' },
+            classic: limits,
+          },
+        },
+      });
+
+      await expect(
+        harness.encode([workbook, { ...workbook, file_id: 'second-xlsx' }], 'automatic'),
+      ).resolves.toEqual([]);
+      await expect(harness.encode([workbook], 'classic')).rejects.toBeInstanceOf(
+        AgentAttachmentPolicyError,
+      );
+      expect(harness.encodeDocuments).not.toHaveBeenCalled();
+      expect(harness.extractText).not.toHaveBeenCalled();
+      expect(workbook.llmDeliveryPath).toBe('text');
+    });
+
+    it('inspects a file the child reads with Run Code as classic routing would deliver it', async () => {
+      const csv: TFile = {
+        ...pdf,
+        ...attachment,
+        file_id: 'input-csv',
+        filename: 'sales.csv',
+        filepath: '/files/sales.csv',
+        type: 'text/csv',
+        text: 'region,total\nwest,4',
+        llmDeliveryPath: 'text',
+      };
+      const harness = setup({
+        agents: { child: { provider: 'openAI', fileConsumers: runsCode } },
+        fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } },
+      });
+      harness.req.config!.filters = {
+        files: { pii: { fields: ['content'], starterPatterns: [], uninspectable: 'block' } },
+      };
+
+      await expect(harness.encode([csv], 'child')).resolves.toEqual([]);
+      expect(harness.extractText).not.toHaveBeenCalled();
+    });
+
+    it('reuses the token count the reading judged and marks any truncation', async () => {
+      /* The byte length exceeds the 10-token limit, so the judge counts (3 tokens) and the
+       * text fits. Recounting with the host tokenizer (one per character) would truncate it. */
+      const csv: TFile = {
+        ...pdf,
+        ...attachment,
+        file_id: 'input-csv',
+        filename: 'sales.csv',
+        filepath: '/files/sales.csv',
+        type: 'text/csv',
+        text: 'region,total\nwest,4',
+        llmDeliveryPath: 'text',
+      };
+      const harness = setup({
+        agents: { child: { provider: 'openAI', fileConsumers: noReader } },
+        fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } },
+      });
+      harness.req.body = { fileTokenLimit: 10 };
+      const child = harness.getAgent('child');
+      const countTokens = jest.fn(() => 3);
+      const context =
+        child &&
+        buildTurnReadingContext({
+          routing: child.deliveryRouting,
+          provider: 'openAI',
+          fileTokenLimit: 10,
+          configuredFileSizeLimit: undefined,
+          countTokens,
+        });
+      if (child == null || context == null) {
+        throw new Error('expected an automatic reading context');
+      }
+      child.deliveryRouting.reading = context;
+
+      const [message] = await harness.encode([csv], 'child');
+
+      expect(harness.extractText).toHaveBeenCalledWith(
+        expect.objectContaining({ markTruncation: true, knownTokenCount: context.knownTokenCount }),
+      );
+      expect(countTokens).toHaveBeenCalledTimes(1);
+      expect(context.knownTokenCount(csv)).toBe(3);
+      expect(message.content).toEqual(expect.stringContaining('west,4'));
+      expect(message.content).toEqual(expect.not.stringContaining('[Truncated'));
+    });
   });
 });

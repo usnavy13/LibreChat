@@ -1,13 +1,16 @@
 import {
   mergeFileConfig,
+  decideFileReading,
   getEndpointFileConfig,
   resolveUseResponsesApi,
+  resolveLLMDeliveryPolicy,
   getCustomEndpointProvider,
   isSpeechProviderConfigured,
   resolveTurnLLMDeliveryPath,
   hasInferredLLMDeliveryPath,
 } from 'librechat-data-provider';
 import type {
+  TDefaultLLMDeliveryPath,
   TurnDeliveryRouting,
   TurnDeliveryFile,
   TurnFileConsumers,
@@ -56,41 +59,100 @@ export function resolveTurnDeliveryRouting({
   };
 }
 
+/** The routing an agent's turn delivers by and the tools judged as its readers. */
+export interface TurnDeliveryInputs {
+  routing?: TurnDeliveryRouting;
+  consumers?: TurnFileConsumers;
+}
+
+const isAutomaticRouting = (routing?: TurnDeliveryRouting): boolean =>
+  resolveLLMDeliveryPolicy(routing?.endpointConfig) === 'automatic';
+
+const withDeliveryPath = <T extends TurnDeliveryFile>(
+  file: T,
+  llmDeliveryPath: TDefaultLLMDeliveryPath | undefined,
+): T =>
+  llmDeliveryPath == null || llmDeliveryPath === file.llmDeliveryPath
+    ? file
+    : { ...file, llmDeliveryPath };
+
+/** Maps each file, returning the input array itself when no file was replaced. */
+function mapTurnCopies<T extends TurnDeliveryFile>(files: T[], map: (file: T) => T): T[] {
+  let changed = false;
+  const result = files.map((file) => {
+    const next = map(file);
+    changed ||= next !== file;
+    return next;
+  });
+  return changed ? result : files;
+}
+
 /** Materialize the exact turn route before admission without mutating stored records. */
 export function applyTurnDelivery<T extends TurnDeliveryFile>(
   files: T[],
-  { routing, consumers }: { routing?: TurnDeliveryRouting; consumers?: TurnFileConsumers },
+  { routing, consumers }: TurnDeliveryInputs,
 ): T[] {
   if (routing == null) {
     return files;
   }
-  let changed = false;
-  const result = files.map((file) => {
-    if (!hasInferredLLMDeliveryPath(file)) {
-      return file;
-    }
-    const llmDeliveryPath = resolveTurnLLMDeliveryPath(routing, file, consumers);
-    if (llmDeliveryPath == null || llmDeliveryPath === file.llmDeliveryPath) {
-      return file;
-    }
-    changed = true;
-    return { ...file, llmDeliveryPath };
-  });
-  return changed ? result : files;
+  return mapTurnCopies(files, (file) =>
+    hasInferredLLMDeliveryPath(file)
+      ? withDeliveryPath(file, resolveTurnLLMDeliveryPath(routing, file, consumers))
+      : file,
+  );
 }
+
+/**
+ * The turn copies as classic routing would deliver them, for the full-set content checks.
+ *
+ * Inspection coverage keys on the text route, so a file the automatic policy hands to a tool
+ * instead of the prompt would otherwise lose the text coverage classic routing gives it, and
+ * rerouting must not change what is inspected. Returns its input under classic routing and
+ * whenever no copy differs; stored records and the input copies are never changed.
+ */
+export function toClassicInspectionView<T extends TurnDeliveryFile>(
+  files: T[],
+  routing?: TurnDeliveryRouting,
+  consumers?: TurnFileConsumers,
+): T[] {
+  if (!isAutomaticRouting(routing)) {
+    return files;
+  }
+  return mapTurnCopies(files, (file) => {
+    const { automatic, classicPath } = decideFileReading({ routing, file, consumers });
+    return automatic ? withDeliveryPath(file, classicPath) : file;
+  });
+}
+
+/** Charges text a referenced inferred tool file may have been delivered as fallback. */
+const chargeRetainedFallbackText = <T extends TurnDeliveryFile>(file: T): T =>
+  hasInferredLLMDeliveryPath(file) && file.llmDeliveryPath === 'none' && file.text
+    ? { ...file, llmDeliveryPath: 'text' }
+    : file;
 
 /**
  * Checkpoints replay already encoded content; current tools and policy cannot remove it.
  * A referenced inferred tool file carrying extracted text may have been delivered as fallback.
  * Charge that text conservatively even if fallback was since disabled. Explicit destinations
  * and records predating routing keep their existing accounting; no stored record is changed.
+ *
+ * Under the automatic policy a file it reads is charged by the resuming agent's own decision,
+ * so text that policy withheld for a tool is not charged; the conservative charge still covers
+ * every file the decision leaves on its classic route.
  */
-export function applyCheckpointDelivery<T extends TurnDeliveryFile>(files: T[]): T[] {
-  return files.map((file) =>
-    hasInferredLLMDeliveryPath(file) && file.llmDeliveryPath === 'none' && file.text
-      ? { ...file, llmDeliveryPath: 'text' }
-      : file,
-  );
+export function applyCheckpointDelivery<T extends TurnDeliveryFile>(
+  files: T[],
+  { routing, consumers }: TurnDeliveryInputs = {},
+): T[] {
+  if (!isAutomaticRouting(routing)) {
+    return files.map(chargeRetainedFallbackText);
+  }
+  return files.map((file) => {
+    const reading = decideFileReading({ routing, file, consumers });
+    return reading.automatic
+      ? withDeliveryPath(file, reading.path)
+      : chargeRetainedFallbackText(file);
+  });
 }
 
 /**

@@ -1,11 +1,12 @@
 import {
-  FileSources,
-  getEndpointFileConfig,
-  mergeFileConfig,
   fileConfig,
+  FileSources,
+  mergeFileConfig,
+  getEndpointFileConfig,
+  isAutomaticReadingRecord,
 } from 'librechat-data-provider';
+import type { RegexLike, TFile, TurnDeliveryFile } from 'librechat-data-provider';
 import type { AppConfig, IMongoFile } from '@librechat/data-schemas';
-import type { RegexLike, TFile } from 'librechat-data-provider';
 import type { ServerRequest } from '~/types';
 
 /**
@@ -65,10 +66,13 @@ export function isLegacyFileUploadUX(
   return endpointFileConfig?.legacyFileUploadUX === true;
 }
 
-type EndpointPolicyFile = Pick<TFile, 'bytes' | 'type'> & {
-  source?: string;
-  metadata?: { routingMimeType?: string };
-};
+type EndpointPolicyFile = Pick<TFile, 'bytes' | 'type'> &
+  Pick<TurnDeliveryFile, 'file_id' | 'source' | 'context' | 'text' | 'llmDeliveryPath'> & {
+    metadata?: Pick<
+      NonNullable<TurnDeliveryFile['metadata']>,
+      'routingMimeType' | 'destinationChosen' | 'textDerivation'
+    > | null;
+  };
 
 export function filterFilesByEndpointRuntimeConfig<T extends EndpointPolicyFile>(
   appConfig: AppConfig | undefined,
@@ -81,6 +85,9 @@ export function filterFilesByEndpointRuntimeConfig<T extends EndpointPolicyFile>
     consumedBytes?: number;
     skipTotalSizeLimit?: boolean;
     preserveTextSources?: boolean;
+    /** Hold copies already routed to the provider to the size limit even when the automatic
+     *  policy reads them: another agent's decision put their bytes on this endpoint's path. */
+    bindProviderCopies?: boolean;
   },
 ): T[] {
   const {
@@ -90,6 +97,7 @@ export function filterFilesByEndpointRuntimeConfig<T extends EndpointPolicyFile>
     consumedBytes = 0,
     skipTotalSizeLimit = false,
     preserveTextSources = false,
+    bindProviderCopies = false,
   } = params;
 
   if (!files || files.length === 0) {
@@ -116,11 +124,16 @@ export function filterFilesByEndpointRuntimeConfig<T extends EndpointPolicyFile>
   /** Filter files based on individual file size and MIME type */
   let filteredFiles = files;
 
-  /** Filter by individual file size limit */
+  /** Filter by individual file size limit. For a record the automatic policy reads, the limit
+   *  is native-delivery capacity its reading decision already applies, not admission. */
   if (fileSizeLimit !== undefined && fileSizeLimit > 0) {
-    filteredFiles = filteredFiles.filter((file) => {
-      return file.bytes <= fileSizeLimit;
-    });
+    const readingConfig = { endpointConfig: endpointFileConfig, fileConfig: mergedFileConfig };
+    const isCapacityOnly = (file: T): boolean =>
+      !(bindProviderCopies && file.llmDeliveryPath === 'provider') &&
+      isAutomaticReadingRecord(readingConfig, file);
+    filteredFiles = filteredFiles.filter(
+      (file) => file.bytes <= fileSizeLimit || isCapacityOnly(file),
+    );
   }
 
   /** Filter by MIME type, against the type the upload was accepted as. Conversion rewrites

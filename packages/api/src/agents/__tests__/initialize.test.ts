@@ -142,6 +142,9 @@ jest.mock('../../middleware/modelBoundContent', () => {
 import { initializeAgent } from '../initialize';
 import { primeResources } from '../resources';
 import { isFatalAgentInitializationError } from '../errors';
+import { filterFilesByEndpointRuntimeConfig as filterByEndpointPolicy } from '~/files/filter';
+import { assertModelBoundContent } from '../../middleware/modelBoundContent';
+import { getTurnReadingContext } from '~/files/reading';
 
 const realUtils = jest.requireActual<typeof import('~/utils')>('~/utils');
 
@@ -5843,5 +5846,271 @@ describe('initializeAgent turn delivery routing', () => {
     const [toolsOrder] = loadTools.mock.invocationCallOrder;
     expect(optionsOrder).toBeLessThan(filesOrder);
     expect(filesOrder).toBeLessThan(toolsOrder);
+  });
+});
+
+describe('initializeAgent automatic delivery policy', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  /** A spreadsheet uploaded under classic routing: extracted at upload, route inferred. */
+  const classicEraXlsx = () =>
+    ({
+      file_id: 'xlsx-file',
+      filename: 'quarterly.xlsx',
+      filepath: '/uploads/user-1/quarterly.xlsx',
+      type: XLSX_TYPE,
+      bytes: 2048,
+      source: FileSources.local,
+      context: FileContext.message_attachment,
+      text: 'Q1,1200\nQ2,1400',
+      llmDeliveryPath: 'text',
+      metadata: { destinationChosen: false },
+    }) as IMongoFile;
+
+  const oversizedPdf = () =>
+    ({
+      file_id: 'pdf-file',
+      filename: 'annual.pdf',
+      filepath: '/uploads/user-1/annual.pdf',
+      type: 'application/pdf',
+      bytes: 3 * 1024 * 1024,
+      source: FileSources.local,
+      context: FileContext.message_attachment,
+      llmDeliveryPath: 'provider',
+      metadata: { destinationChosen: false },
+    }) as IMongoFile;
+
+  async function initializeWith({
+    file,
+    policy,
+    tools = [],
+    skillTools,
+    endpointConfig = {},
+    fileContextCharLimit,
+    contextFiles = [],
+  }: {
+    file: IMongoFile;
+    /** Persistent agent files priming adds to the delivered and agent-context sets. */
+    contextFiles?: IMongoFile[];
+    policy?: 'automatic' | 'classic';
+    tools?: string[];
+    /** Tools a manual skill adds; the loader loads none of them. */
+    skillTools?: string[];
+    endpointConfig?: { fileSizeLimit?: number };
+    fileContextCharLimit?: number;
+  }) {
+    const { filterFilesByEndpointRuntimeConfig } = jest.requireMock('~/files') as {
+      filterFilesByEndpointRuntimeConfig: jest.Mock;
+    };
+    filterFilesByEndpointRuntimeConfig.mockImplementation(filterByEndpointPolicy);
+    const { agent, req, res, loadTools, db } = createMocks();
+    agent.tools = tools;
+    loadTools.mockResolvedValue({ tools: [], toolContextMap: {}, toolDefinitions: [] });
+    (primeResources as jest.Mock).mockImplementationOnce(async ({ attachments }) => {
+      const files = await attachments;
+      return {
+        attachments: [...files, ...contextFiles],
+        requestAttachments: files,
+        agentContextAttachments: contextFiles,
+        tool_resources: {},
+      };
+    });
+    req.config = {
+      fileConfig: {
+        fileContextCharLimit,
+        endpoints: {
+          [Providers.OPENAI]: {
+            ...(policy != null && { llmDeliveryPolicy: policy }),
+            ...endpointConfig,
+          },
+        },
+      },
+    } as unknown as ServerRequest['config'];
+    (db.getFiles as jest.Mock).mockResolvedValueOnce([file]);
+
+    const { Types } = await import('mongoose');
+    const skillId = new Types.ObjectId();
+    const skillParams =
+      skillTools == null
+        ? {}
+        : { accessibleSkillIds: [skillId], manualSkills: ['spreadsheet-analysis'] };
+    const skillDb =
+      skillTools == null
+        ? {}
+        : {
+            listSkillsByAccess: async () => ({ skills: [], has_more: false, after: null }),
+            getSkillByName: jest.fn().mockResolvedValue({
+              _id: skillId,
+              name: 'spreadsheet-analysis',
+              body: 'Analyze spreadsheets.',
+              author: { toString: () => 'user-1' } as unknown as import('mongoose').Types.ObjectId,
+              allowedTools: skillTools,
+            }) as InitializeAgentDbMethods['getSkillByName'],
+          };
+
+    return initializeAgent(
+      {
+        req,
+        res,
+        agent,
+        loadTools,
+        requestFiles: [file],
+        codeEnvAvailable: true,
+        fileSearchAvailable: true,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        isInitialAgent: true,
+        ...skillParams,
+      },
+      { ...db, ...skillDb },
+    );
+  }
+
+  it('leaves a classic-era spreadsheet to Run Code without counting or rewriting it', async () => {
+    const xlsx = classicEraXlsx();
+    const stored = structuredClone(xlsx);
+
+    const result = await initializeWith({
+      file: xlsx,
+      policy: 'automatic',
+      tools: [Tools.execute_code],
+      fileContextCharLimit: 3,
+    });
+
+    expect(result.fileConsumers).toEqual({ executeCode: true, fileSearch: false });
+    expect(result.requestAttachments).toEqual([{ ...stored, llmDeliveryPath: 'none' }]);
+    expect(result.currentRequestAttachments.map((file) => file.llmDeliveryPath)).toEqual(['none']);
+    expect(xlsx).toEqual(stored);
+    expect(result.deliveryRouting.reading).toBeDefined();
+  });
+
+  it('inspects the classic route of a spreadsheet the automatic policy hands to Run Code', async () => {
+    const xlsx = classicEraXlsx();
+
+    await initializeWith({ file: xlsx, policy: 'automatic', tools: [Tools.execute_code] });
+
+    const inspected = (assertModelBoundContent as jest.Mock).mock.calls
+      .flatMap(([input]: [{ files?: IMongoFile[] }]) => input.files ?? [])
+      .filter((file) => file.file_id === xlsx.file_id);
+    expect(inspected.length).toBeGreaterThan(0);
+    expect(inspected.every((file) => file.llmDeliveryPath === 'text')).toBe(true);
+  });
+
+  it('delivers the spreadsheet text once the loader drops the Run Code tool', async () => {
+    const xlsx = classicEraXlsx();
+
+    const result = await initializeWith({
+      file: xlsx,
+      policy: 'automatic',
+      skillTools: [Tools.execute_code],
+    });
+
+    expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: false });
+    expect(result.requestAttachments).toEqual([{ ...xlsx, llmDeliveryPath: 'text' }]);
+    expect(xlsx.llmDeliveryPath).toBe('text');
+  });
+
+  it('leaves the text out rather than failing the turn when it no longer fits the allowance', async () => {
+    const xlsx = classicEraXlsx();
+
+    const result = await initializeWith({
+      file: xlsx,
+      policy: 'automatic',
+      skillTools: [Tools.execute_code],
+      fileContextCharLimit: 3,
+    });
+
+    expect(result.requestAttachments).toEqual([{ ...xlsx, llmDeliveryPath: 'none' }]);
+    expect(getTurnReadingContext(result.deliveryRouting)?.stats()).toMatchObject({
+      overflow: 1,
+      dropped: 0,
+    });
+  });
+
+  it.each([undefined, 'classic' as const])(
+    'keeps classic routing and attaches no reading evidence when the policy is %p',
+    async (policy) => {
+      const xlsx = classicEraXlsx();
+
+      const result = await initializeWith({ file: xlsx, policy, tools: [Tools.execute_code] });
+
+      expect(result.deliveryRouting.reading).toBeUndefined();
+      expect(result.requestAttachments).toEqual([xlsx]);
+    },
+  );
+
+  it('keeps an oversized PDF the automatic policy reads past the endpoint size limit', async () => {
+    const pdf = oversizedPdf();
+
+    const result = await initializeWith({
+      file: pdf,
+      policy: 'automatic',
+      endpointConfig: { fileSizeLimit: 1 },
+    });
+
+    expect(result.requestAttachments.map((file) => file.file_id)).toEqual([pdf.file_id]);
+    expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
+    expect(getTurnReadingContext(result.deliveryRouting)?.stats().dropped).toBe(0);
+  });
+
+  it('drops the same oversized PDF under classic routing', async () => {
+    const result = await initializeWith({
+      file: oversizedPdf(),
+      endpointConfig: { fileSizeLimit: 1 },
+    });
+
+    expect(result.requestAttachments).toEqual([]);
+  });
+
+  it('leaves persistent agent files on their stored route when no reading changed', async () => {
+    /* Agent files are never read by the automatic policy. Re-resolving this stored text route
+     * to its classic provider route every turn would re-run the full-set checks classic skips. */
+    const agentFile = {
+      file_id: 'agent-pdf',
+      filename: 'handbook.pdf',
+      filepath: '/uploads/user-1/handbook.pdf',
+      type: 'application/pdf',
+      bytes: 2048,
+      source: FileSources.local,
+      context: FileContext.agents,
+      text: 'handbook text',
+      llmDeliveryPath: 'text',
+      metadata: {},
+    } as IMongoFile;
+
+    const result = await initializeWith({
+      file: classicEraXlsx(),
+      policy: 'automatic',
+      contextFiles: [agentFile],
+    });
+
+    expect(result.agentContextAttachments).toEqual([agentFile]);
+    const inspectedAgentFile = (assertModelBoundContent as jest.Mock).mock.calls
+      .flatMap(([input]: [{ files?: IMongoFile[] }]) => input.files ?? [])
+      .filter((file) => file.file_id === agentFile.file_id);
+    expect(inspectedAgentFile).toEqual([]);
+  });
+
+  it('records a request file the endpoint still refuses under the automatic policy', async () => {
+    const image = {
+      ...oversizedPdf(),
+      file_id: 'image-file',
+      filename: 'scan.png',
+      type: 'image/png',
+    } as IMongoFile;
+
+    const result = await initializeWith({
+      file: image,
+      policy: 'automatic',
+      endpointConfig: { fileSizeLimit: 1 },
+    });
+
+    expect(result.requestAttachments).toEqual([]);
+    const context = getTurnReadingContext(result.deliveryRouting);
+    expect(context?.dropped().map((file) => file.file_id)).toEqual([image.file_id]);
   });
 });

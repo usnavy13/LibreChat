@@ -1,9 +1,20 @@
-import type { TurnFileConsumers, TurnDeliveryFile } from 'librechat-data-provider';
+import { FileContext, FileSources } from 'librechat-data-provider';
+import type {
+  TurnReadingInputs,
+  TurnFileConsumers,
+  TurnDeliveryFile,
+  ReadingEvidence,
+  FiltersConfig,
+} from 'librechat-data-provider';
 import {
   applyTurnDelivery as materializeTurnDelivery,
-  resolveTurnDeliveryRouting,
   resolveScopedTurnAttachments,
+  resolveTurnDeliveryRouting,
+  toClassicInspectionView,
+  applyCheckpointDelivery,
 } from './delivery';
+import { assertModelBoundContent } from '~/middleware/modelBoundContent';
+import { UninspectableFileError } from '~/protection/files';
 
 function applyTurnDelivery<T extends TurnDeliveryFile>(
   files: T[],
@@ -320,5 +331,175 @@ describe('resolveScopedTurnAttachments', () => {
         sharedRunAttachmentIds: new Set(['csv']),
       }).get('handoff'),
     ).toEqual([]);
+  });
+});
+
+describe('the automatic policy', () => {
+  const agent = { provider: 'openAI' };
+  const automatic = {
+    fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' as const } } },
+  };
+  const searchesFiles: TurnFileConsumers = { executeCode: false, fileSearch: true };
+  /** The turn's evidence seam, answering every file with the same verdicts. */
+  const withEvidence = (evidence: ReadingEvidence) => ({
+    ...resolveTurnDeliveryRouting({ agent, config: automatic }),
+    reading: { judge: () => evidence, canDerive: false } satisfies TurnReadingInputs,
+  });
+  const attachment = {
+    source: FileSources.local,
+    context: FileContext.message_attachment,
+    metadata: { destinationChosen: false },
+  };
+  /** A PDF too large for the provider, with complete extracted text that fits the prompt. */
+  const largePdf = {
+    ...attachment,
+    file_id: 'large-pdf',
+    type: 'application/pdf',
+    bytes: 40 * 1024 * 1024,
+    text: 'quarterly totals',
+    llmDeliveryPath: 'provider',
+  };
+  /** A spreadsheet extracted at upload under classic routing. */
+  const csv = {
+    ...attachment,
+    file_id: 'csv',
+    type: 'text/csv',
+    bytes: 20,
+    text: 'region,total\nwest,4',
+    llmDeliveryPath: 'text',
+  };
+
+  describe('applyTurnDelivery', () => {
+    it('leaves a file File Search will receive with it, then delivers text once it will not', () => {
+      /* The automatic counterpart of "delivers text for a file File Search has yet to receive":
+       * before tools load, an enabled search is a prospective reader even without embedding;
+       * once the final pass shows the store will never receive the file, its text still lands
+       * because it fits. */
+      const files = [largePdf];
+      const firstPass = materializeTurnDelivery(files, {
+        routing: withEvidence({ native: 'capacity', text: 'fits' }),
+        consumers: searchesFiles,
+      });
+      const finalPass = materializeTurnDelivery(files, {
+        routing: withEvidence({ native: 'capacity', text: 'fits', search: 'unreachable' }),
+        consumers: searchesFiles,
+      });
+
+      expect(firstPass).toEqual([{ ...largePdf, llmDeliveryPath: 'none' }]);
+      expect(finalPass).toEqual([{ ...largePdf, llmDeliveryPath: 'text' }]);
+      expect(largePdf.llmDeliveryPath).toBe('provider');
+    });
+
+    it('leaves the file unread rather than sending text that exceeds the limit', () => {
+      expect(
+        materializeTurnDelivery([largePdf], {
+          routing: withEvidence({ native: 'capacity', text: 'exceeds', search: 'unreachable' }),
+          consumers: searchesFiles,
+        }),
+      ).toEqual([{ ...largePdf, llmDeliveryPath: 'none' }]);
+    });
+
+    it('gives a classic-era spreadsheet to Run Code and back to text without changing it', () => {
+      const routing = withEvidence({});
+      const files = [csv];
+
+      expect(materializeTurnDelivery(files, { routing, consumers: runsCode })).toEqual([
+        { ...csv, llmDeliveryPath: 'none' },
+      ]);
+      expect(materializeTurnDelivery(files, { routing, consumers: noReader })).toBe(files);
+    });
+  });
+
+  describe('toClassicInspectionView', () => {
+    const routing = withEvidence({});
+    const strictContent = {
+      files: { pii: { fields: ['content'], starterPatterns: [], uninspectable: 'block' } },
+    } as FiltersConfig;
+
+    it('shows a spreadsheet Run Code reads with the text route classic routing gives it', () => {
+      const copies = materializeTurnDelivery([csv], { routing, consumers: runsCode });
+
+      const view = toClassicInspectionView(copies, routing, runsCode);
+
+      expect(view).toEqual([{ ...csv, llmDeliveryPath: 'text' }]);
+      expect(view).not.toBe(copies);
+      expect(copies).toEqual([{ ...csv, llmDeliveryPath: 'none' }]);
+    });
+
+    it('keeps the inspected content of a rerouted file under a fail-closed content filter', () => {
+      /* Coverage reads the text route, so the code-routed copy alone would read as
+       * uninspectable although classic routing inspects and delivers the same text. */
+      const copies = materializeTurnDelivery([csv], { routing, consumers: runsCode });
+
+      expect(() => assertModelBoundContent({ filters: strictContent, files: copies })).toThrow(
+        UninspectableFileError,
+      );
+      expect(() =>
+        assertModelBoundContent({
+          filters: strictContent,
+          files: toClassicInspectionView(copies, routing, runsCode),
+        }),
+      ).not.toThrow();
+    });
+
+    it('returns its input when no copy differs from its classic route', () => {
+      const pdf = { ...largePdf, bytes: 20 };
+      const copies = materializeTurnDelivery([pdf, csv], { routing, consumers: noReader });
+
+      expect(toClassicInspectionView(copies, routing, noReader)).toBe(copies);
+    });
+
+    it('returns its input under classic routing', () => {
+      const classic = resolveTurnDeliveryRouting({ agent, config });
+      const copies = [{ ...csv, llmDeliveryPath: 'none' }];
+
+      expect(toClassicInspectionView(copies, classic, runsCode)).toBe(copies);
+      expect(toClassicInspectionView(copies, undefined, runsCode)).toBe(copies);
+    });
+  });
+});
+
+describe('applyCheckpointDelivery', () => {
+  const agent = { provider: 'openAI' };
+  const routing = resolveTurnDeliveryRouting({
+    agent,
+    config: { fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } } },
+  });
+  const csv = {
+    file_id: 'csv',
+    type: 'text/csv',
+    bytes: 20,
+    source: FileSources.local,
+    context: FileContext.message_attachment,
+    text: 'region,total\nwest,4',
+    llmDeliveryPath: 'none',
+    metadata: { destinationChosen: false },
+  };
+  /** A record written before uploads marked whether a destination was chosen. */
+  const unmarked = { ...csv, file_id: 'unmarked', metadata: {} };
+
+  it('charges retained fallback text for every inferred tool file under classic routing', () => {
+    const classic = resolveTurnDeliveryRouting({ agent, config });
+
+    expect(applyCheckpointDelivery([csv, unmarked])).toEqual([
+      { ...csv, llmDeliveryPath: 'text' },
+      { ...unmarked, llmDeliveryPath: 'text' },
+    ]);
+    expect(applyCheckpointDelivery([csv], { routing: classic, consumers: runsCode })).toEqual([
+      { ...csv, llmDeliveryPath: 'text' },
+    ]);
+  });
+
+  it('charges the automatic decision for files it reads and the fallback for the rest', () => {
+    /* Text the policy withheld for Run Code never reached the checkpoint, so charging it would
+     * spend the resumed turn's budget on content the model never received. */
+    const charged = applyCheckpointDelivery([csv, unmarked], { routing, consumers: runsCode });
+
+    expect(charged[0]).toBe(csv);
+    expect(charged[1]).toEqual({ ...unmarked, llmDeliveryPath: 'text' });
+    expect(applyCheckpointDelivery([csv], { routing, consumers: noReader })).toEqual([
+      { ...csv, llmDeliveryPath: 'text' },
+    ]);
+    expect(csv.llmDeliveryPath).toBe('none');
   });
 });

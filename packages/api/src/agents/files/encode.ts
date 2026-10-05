@@ -14,6 +14,7 @@ import type {
 } from 'librechat-data-provider';
 import type { BaseMessage } from '@librechat/agents/langchain';
 import type { ServerRequest, StrategyFunctions } from '~/types';
+import type { TurnTextOptions } from '~/files/reading';
 import type { TokenCountFn } from '~/utils/text';
 import {
   isToolOwnedAttachment,
@@ -23,6 +24,8 @@ import {
 } from '../attachments';
 import { assertModelBoundContent } from '~/middleware/modelBoundContent';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
+import { toClassicInspectionView } from './delivery';
+import { getTurnTextOptions } from '~/files/reading';
 import { countTokens } from '~/utils/tokenizer';
 
 type ContentBlock = Exclude<BaseMessage['content'], string>[number];
@@ -63,11 +66,13 @@ export interface RunFileMessageEncoderDeps {
   encodeAudios: MediaEncoder<{ audios: ContentBlock[] }>;
   encodeVideos: MediaEncoder<{ videos: ContentBlock[] }>;
   getStrategyFunctions: (source: string) => StrategyFunctions;
-  extractText: (params: {
-    attachments: TFile[];
-    req: ServerRequest;
-    tokenCountFn: TokenCountFn;
-  }) => Promise<string | undefined>;
+  extractText: (
+    params: {
+      attachments: TFile[];
+      req: ServerRequest;
+      tokenCountFn: TokenCountFn;
+    } & TurnTextOptions,
+  ) => Promise<string | undefined>;
 }
 
 export interface RunFileMessageEncoder {
@@ -127,7 +132,10 @@ export function createRunFileMessageEncoder(
       req: deps.req,
       endpoint,
     });
-    assertModelBoundContent({ filters: deps.req.config?.filters, files: sharedFiles });
+    assertModelBoundContent({
+      filters: deps.req.config?.filters,
+      files: toClassicInspectionView(sharedFiles, deliveryRouting, agent.fileConsumers),
+    });
     return { agent, params, sharedFiles, fileConfig, endpointConfig };
   }
 
@@ -193,7 +201,12 @@ export function createRunFileMessageEncoder(
       encodeMedia(deps.encodeAudios, audios, { audios: [] }),
       encodeMedia(deps.encodeVideos, videos, { videos: [] }),
       textFiles.length > 0
-        ? deps.extractText({ attachments: textFiles, req: deps.req, tokenCountFn: countTokens })
+        ? deps.extractText({
+            attachments: textFiles,
+            req: deps.req,
+            tokenCountFn: countTokens,
+            ...getTurnTextOptions(agent.deliveryRouting),
+          })
         : Promise.resolve(undefined),
     ]);
     if (

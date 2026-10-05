@@ -228,6 +228,62 @@ describe('resolveDefaultLLMDeliveryPath', () => {
     }
   });
 
+  describe('the turn route of an inferred upload of the same types', () => {
+    const turnRoute = (
+      type: string,
+      endpointConfig: EndpointFileConfig,
+      consumers: TurnFileConsumers,
+      text?: string,
+    ) =>
+      resolveTurnLLMDeliveryPath({
+        endpoint: 'openAI',
+        endpointConfig,
+        fileConfig: mergeFileConfig(undefined),
+        sttConfigured: true,
+        consumers,
+        file: {
+          type,
+          text,
+          bytes: 2048,
+          source: 'local',
+          context: 'message_attachment',
+          llmDeliveryPath: 'text',
+          metadata: { destinationChosen: false },
+        },
+      });
+    const spreadsheets = [
+      'text/csv',
+      'application/vnd.ms-excel',
+      'application/vnd.oasis.opendocument.spreadsheet',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
+    const archives = ['application/zip', 'application/vnd.apache.parquet'];
+    const codeOnly: TurnFileConsumers = { executeCode: true, fileSearch: false };
+    const noTools: TurnFileConsumers = { executeCode: false, fileSearch: false };
+    const automatic: EndpointFileConfig = { llmDeliveryPolicy: 'automatic' };
+
+    it('keeps spreadsheets on text under classic routing even where Run Code runs', () => {
+      for (const type of spreadsheets) {
+        expect(turnRoute(type, {}, codeOnly, 'region,total')).toBe('text');
+        expect(turnRoute(type, {}, noTools, 'region,total')).toBe('text');
+      }
+    });
+
+    it('leaves spreadsheets to Run Code under the automatic policy, and reads them as text without it', () => {
+      for (const type of spreadsheets) {
+        expect(turnRoute(type, automatic, codeOnly, 'region,total')).toBe('none');
+        expect(turnRoute(type, automatic, noTools, 'region,total')).toBe('text');
+      }
+    });
+
+    it('keeps archives and columnar data off the model path under the automatic policy', () => {
+      for (const type of archives) {
+        expect(turnRoute(type, automatic, codeOnly)).toBe('none');
+        expect(turnRoute(type, automatic, noTools)).toBe('none');
+      }
+    });
+  });
+
   it('still honors an explicit override for an unparsable type', () => {
     expect(
       resolveDefaultLLMDeliveryPath(
@@ -1101,6 +1157,107 @@ describe('resolveTurnLLMDeliveryPath', () => {
         endpointConfig,
       }),
     ).toBe('none');
+  });
+
+  describe('under the automatic policy', () => {
+    const automaticCsv = {
+      ...routedCsv,
+      source: 'local',
+      context: 'message_attachment',
+    };
+    const slides = {
+      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      text: 'slide text',
+      source: 'local',
+      context: 'message_attachment',
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false },
+    };
+
+    it('delivers stored text as a primary reader on an endpoint without the fallback flag', () => {
+      expect(
+        resolveTurnLLMDeliveryPath({ file: slides, consumers: noReader, endpointConfig: {} }),
+      ).toBe('none');
+      expect(
+        resolveTurnLLMDeliveryPath({
+          file: slides,
+          consumers: noReader,
+          endpointConfig: { llmDeliveryPolicy: 'automatic' },
+        }),
+      ).toBe('text');
+    });
+
+    it('keeps an explicit none override with the fallback flag off', () => {
+      const overridden: EndpointFileConfig = {
+        llmDeliveryPolicy: 'automatic',
+        defaultLLMDeliveryPath: endpointConfig.defaultLLMDeliveryPath,
+      };
+
+      expect(
+        resolveTurnLLMDeliveryPath({
+          file: automaticCsv,
+          consumers: noReader,
+          endpointConfig: overridden,
+        }),
+      ).toBe('none');
+      expect(
+        resolveTurnLLMDeliveryPath({
+          file: automaticCsv,
+          consumers: noReader,
+          endpointConfig: { llmDeliveryPolicy: 'automatic' },
+        }),
+      ).toBe('text');
+    });
+  });
+
+  describe('a record the automatic policy marked, read under classic routing', () => {
+    const sheet = {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      source: 'local',
+      context: 'message_attachment',
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false },
+    };
+    const marked = {
+      ...sheet,
+      metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' as const } },
+    };
+    const classicRoute = {
+      endpoint: 'openAI',
+      endpointConfig: {},
+      fileConfig: mergeFileConfig(undefined),
+      sttConfigured: true,
+      consumers: noReader,
+    };
+
+    it('delivers nothing rather than the empty text its classic route names', () => {
+      expect(resolveClassicTurnLLMDeliveryPath(classicRoute, marked, noReader)).toBe('text');
+      expect(resolveTurnLLMDeliveryPath({ ...classicRoute, file: marked })).toBe('none');
+      expect(
+        resolveTurnLLMDeliveryPath({
+          ...classicRoute,
+          endpointConfig: { llmDeliveryPolicy: 'classic' },
+          file: marked,
+        }),
+      ).toBe('none');
+    });
+
+    it('keeps the text route where the turn can derive that text', () => {
+      expect(
+        resolveTurnLLMDeliveryPath({
+          ...classicRoute,
+          reading: { judge: () => ({}), canDerive: true },
+          file: marked,
+        }),
+      ).toBe('text');
+    });
+
+    it('leaves an unmarked record on its classic route', () => {
+      expect(resolveTurnLLMDeliveryPath({ ...classicRoute, file: sheet })).toBe('text');
+      expect(
+        resolveTurnLLMDeliveryPath({ ...classicRoute, file: { ...marked, text: 'a,b' } }),
+      ).toBe('text');
+    });
   });
 });
 
@@ -2341,5 +2498,18 @@ describe('classic equivalence', () => {
 
     expect(combinations).toBe(2 * endpoints.length * mimeTypes.length * shapes.length * 5);
     expect(mismatches).toEqual([]);
+  });
+
+  it('leaves an inferred spreadsheet with text to Run Code under the automatic policy', () => {
+    const routing: Partial<TurnDeliveryRouting> = {
+      endpoint: 'openAI',
+      endpointConfig: automaticConfig,
+      fileConfig: mergeFileConfig(undefined),
+      sttConfigured: true,
+    };
+    const sheet = attachment(XLSX, { text: 'stored text' });
+
+    expect(resolveStoredTurnPath(routing, sheet, CODE_ONLY)).toBe('none');
+    expect(resolveClassicTurnLLMDeliveryPath(routing, sheet, CODE_ONLY)).toBe('text');
   });
 });

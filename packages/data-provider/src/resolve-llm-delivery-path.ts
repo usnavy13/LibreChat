@@ -565,13 +565,25 @@ export function resolveClassicTurnLLMDeliveryPath(
   return path;
 }
 
-/** Delivery path for one attachment on one agent's turn: the name every turn reader resolves. */
+/**
+ * Delivery path for one attachment on one agent's turn: the name every turn reader resolves.
+ *
+ * Returns the path of {@link decideFileReading}. Under classic routing a record the automatic
+ * policy never marked gets exactly the classic path from that decision, so it is returned from
+ * {@link resolveClassicTurnLLMDeliveryPath} directly, without classifying the file.
+ */
 export function resolveTurnLLMDeliveryPath(
   routing: Partial<TurnDeliveryRouting> | undefined,
   file: TurnDeliveryFile,
   consumers?: TurnFileConsumers,
 ): TDefaultLLMDeliveryPath | undefined {
-  return resolveClassicTurnLLMDeliveryPath(routing, file, consumers);
+  if (
+    resolveLLMDeliveryPolicy(routing?.endpointConfig) !== 'automatic' &&
+    file.metadata?.textDerivation == null
+  ) {
+    return resolveClassicTurnLLMDeliveryPath(routing, file, consumers);
+  }
+  return decideFileReading({ routing, file, consumers }).path;
 }
 
 /**
