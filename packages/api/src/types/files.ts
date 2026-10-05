@@ -124,6 +124,21 @@ export type DocumentBlock =
   | OpenAIInputFileBlock
   | BedrockDocumentBlock;
 
+/**
+ * `capacity`: larger than the provider accepts.
+ * `integrity`: the stored bytes could not be read or are not a usable file.
+ */
+export type ValidationFailureReason = 'capacity' | 'integrity';
+
+/** Whether the document encoder fails the turn on an invalid file or leaves the file out. */
+export type NativeValidationMode = 'throw' | 'skip';
+
+/** A document the encoder left out in skip mode instead of failing the turn, and why. */
+export interface DocumentRejection {
+  file_id: string;
+  reason: ValidationFailureReason | 'unsupported';
+}
+
 export interface DocumentResult {
   documents: DocumentBlock[];
   files: Array<{
@@ -134,6 +149,8 @@ export interface DocumentResult {
     filename: string;
     type: string;
   }>;
+  /** Present only when encoding with `onValidationFailure: 'skip'` */
+  rejected?: DocumentRejection[];
 }
 
 /** Google audio block format */

@@ -1,12 +1,16 @@
 import { Readable } from 'node:stream';
 import { Providers } from '@librechat/agents';
-import { audioMimeTypes } from 'librechat-data-provider';
+import { mbToBytes, audioMimeTypes, fileConfig as baseFileConfig } from 'librechat-data-provider';
+import type { TFileConfig } from 'librechat-data-provider';
+import type { FileSizeLimitParams } from './utils';
 import type { ServerRequest } from '~/types';
 import {
-  AttachmentObjectNotFoundError,
   getAudioFormat,
   getFileStream,
+  getConfiguredFileSizeLimit,
+  AttachmentObjectNotFoundError,
   isConfiguredProviderMediaType,
+  resolveConfiguredFileSizeLimit,
 } from './utils';
 
 const file = {
@@ -197,4 +201,99 @@ describe('getAudioFormat', () => {
       expect(getAudioFormat(mimeType, 'recording')).toBeDefined();
     }
   });
+});
+
+describe('resolveConfiguredFileSizeLimit', () => {
+  const inheritedLimit = baseFileConfig.endpoints.default.fileSizeLimit;
+
+  it('is undefined without a fileConfig', () => {
+    expect(
+      resolveConfiguredFileSizeLimit(undefined, { provider: Providers.OPENAI }),
+    ).toBeUndefined();
+  });
+
+  it('resolves the inherited 512 MB default for an empty fileConfig', () => {
+    expect(inheritedLimit).toBe(mbToBytes(512));
+    expect(resolveConfiguredFileSizeLimit({}, { provider: Providers.OPENAI })).toBe(inheritedLimit);
+  });
+
+  it('converts an explicit endpoint limit to bytes', () => {
+    const config: TFileConfig = { endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 } } };
+    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI })).toBe(
+      mbToBytes(15),
+    );
+  });
+
+  it('looks up the endpoint name before the provider', () => {
+    const config: TFileConfig = {
+      endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 }, MyGateway: { fileSizeLimit: 3 } },
+    };
+    expect(
+      resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI, endpoint: 'MyGateway' }),
+    ).toBe(mbToBytes(3));
+    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI })).toBe(
+      mbToBytes(15),
+    );
+  });
+
+  it('inherits endpoints.default when the endpoint has no entry of its own', () => {
+    const config: TFileConfig = { endpoints: { default: { fileSizeLimit: 7 } } };
+    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.BEDROCK })).toBe(
+      mbToBytes(7),
+    );
+  });
+
+  /** `getConfiguredFileSizeLimit` and its resolver agree for every fileConfig shape. */
+  const parityCases: Array<
+    [string, TFileConfig | undefined, FileSizeLimitParams, number | undefined]
+  > = [
+    ['no fileConfig', undefined, { provider: Providers.OPENAI }, undefined],
+    ['an empty fileConfig', {}, { provider: Providers.ANTHROPIC }, inheritedLimit],
+    [
+      'an explicit provider limit',
+      { endpoints: { [Providers.GOOGLE]: { fileSizeLimit: 25 } } },
+      { provider: Providers.GOOGLE },
+      mbToBytes(25),
+    ],
+    [
+      'an endpoint name shadowing the provider',
+      {
+        endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 }, MyGateway: { fileSizeLimit: 3 } },
+      },
+      { provider: Providers.OPENAI, endpoint: 'MyGateway' },
+      mbToBytes(3),
+    ],
+    [
+      'an endpoint name with no entry, which does not fall back to the provider entry',
+      { endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 } } },
+      { provider: Providers.OPENAI, endpoint: 'Unlisted' },
+      inheritedLimit,
+    ],
+    [
+      'a configured default',
+      { endpoints: { default: { fileSizeLimit: 7 } } },
+      { provider: Providers.BEDROCK },
+      mbToBytes(7),
+    ],
+    [
+      'a configured default for a provider with a built-in entry',
+      { endpoints: { default: { fileSizeLimit: 7 } } },
+      { provider: Providers.ANTHROPIC },
+      inheritedLimit,
+    ],
+    [
+      'a configured 0',
+      { endpoints: { [Providers.OPENAI]: { fileSizeLimit: 0 } } },
+      { provider: Providers.OPENAI },
+      0,
+    ],
+  ];
+
+  it.each(parityCases)(
+    'resolves %s like getConfiguredFileSizeLimit',
+    (_label, config, params, expected) => {
+      expect(resolveConfiguredFileSizeLimit(config, params)).toBe(expected);
+      expect(getConfiguredFileSizeLimit(reqWith(config), params)).toBe(expected);
+    },
+  );
 });
