@@ -486,6 +486,51 @@ describe('theme registry', () => {
     expect(untouched.colors['rgb-switch-thumb']).toBe(darkTheme['rgb-switch-thumb']);
   });
 
+  it('keeps the tooltip and the error alert on the roles a theme repainted before they existed', () => {
+    const resolved = resolveTheme(
+      {
+        version: 1,
+        name: 'legacy-overlays',
+        modes: {
+          light: {
+            colors: {
+              'rgb-surface-primary': '20 21 22',
+              'rgb-text-primary': '1 2 3',
+              'rgb-status-error-subtle': '4 5 6',
+              'rgb-status-error-border': '7 8 9',
+            },
+          },
+        },
+      },
+      'light',
+    );
+
+    expect(resolved.colors['rgb-surface-tooltip']).toBe('20 21 22');
+    expect(resolved.colors['rgb-text-tooltip']).toBe('1 2 3');
+    expect(resolved.colors['rgb-alert-error-fill']).toBe('4 5 6');
+    expect(resolved.colors['rgb-alert-error-border']).toBe('7 8 9');
+  });
+
+  it('preserves an explicit tooltip surface and falls back to the bundled one otherwise', () => {
+    const explicit = resolveTheme(
+      {
+        version: 1,
+        name: 'explicit-tooltip',
+        modes: {
+          dark: { colors: { 'rgb-surface-primary': '20 21 22', 'rgb-surface-tooltip': '1 2 3' } },
+        },
+      },
+      'dark',
+    );
+    const untouched = resolveTheme(
+      { version: 1, name: 'no-surface', modes: { dark: { colors: {} } } },
+      'dark',
+    );
+
+    expect(explicit.colors['rgb-surface-tooltip']).toBe('1 2 3');
+    expect(untouched.colors['rgb-surface-tooltip']).toBe(darkTheme['rgb-surface-tooltip']);
+  });
+
   it('keeps a self-sticking table header on the dialog surface a theme repainted', () => {
     const legacy = resolveTheme(
       {

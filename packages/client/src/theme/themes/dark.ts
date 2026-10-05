@@ -86,6 +86,10 @@ export const darkTheme: IThemeRGB = {
   'rgb-border-field-focus': '236 236 236', // #ececec (gray-100, matching focus-control)
   'rgb-field-fill': '13 13 13', // #0d0d0d (gray-900, matching surface-primary)
   'rgb-field-text': '236 236 236', // #ececec (gray-100, matching text-primary)
+  'rgb-surface-tooltip': '13 13 13', // matching surface-primary
+  'rgb-text-tooltip': '236 236 236', // matching text-primary
+  'rgb-alert-error-fill': '69 10 10', // matching status-error-subtle
+  'rgb-alert-error-border': '153 27 27', // matching status-error-border
   'rgb-surface-disabled': '47 47 47', // #2f2f2f (gray-700)
   'rgb-text-disabled': '153 150 150', // #999696 (gray-400)
   'rgb-border-disabled': '57 57 57', // #393939 (gray-650)

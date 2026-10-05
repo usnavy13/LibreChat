@@ -381,6 +381,12 @@ Each status family has a foreground, a `-subtle` background, a `-border`, and a
   names those and not these. Fields stay clear unless the theme's
   `fieldFillStyle` appearance role is `fill` (the default is `transparent`),
   read from the nearest themed root through the `theme-field-fill:` variant.
+- `bg-surface-tooltip` / `text-tooltip` - The tooltip chip and its label. They follow
+  `surface-primary` and `text-primary` when a theme names those and not these. The padding and
+  text size are the `tooltipPaddingX`, `tooltipPaddingY` and `tooltipTextSize` appearance roles
+  (0.5rem, 0.25rem and 1rem by default).
+- `bg-alert-error-fill` / `border-alert-error-border` - The error `Alert`'s fill and edge. They
+  follow `status-error-subtle` and `status-error-border`, which the badges, tags and diffs keep.
 - `border-border-field-focus` - A form field's edge while it holds focus, under
   `fieldFocusStyle: border`. Follows `focus-control` when a theme names only that.
 - Form fields and labels - `h-theme-field` (`fieldHeight`) sizes `Input`, `Dropdown`

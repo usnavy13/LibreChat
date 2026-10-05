@@ -158,6 +158,10 @@ html {
   --border-field-focus: var(--focus-control);
   --field-fill: var(--surface-primary);
   --field-text: var(--text-primary);
+  --surface-tooltip: var(--surface-primary);
+  --text-tooltip: var(--text-primary);
+  --alert-error-fill: var(--status-error-subtle);
+  --alert-error-border: var(--status-error-border);
   --focus-control: var(--gray-800);
   --border-disabled: var(--gray-200);
   --status-success: var(--green-700);
@@ -219,6 +223,9 @@ html {
   --theme-large-surface-radius: 1.5rem;
   --theme-menu-radius: 0.7rem;
   --theme-tooltip-radius: 0.275rem;
+  --theme-tooltip-padding-x: 0.5rem;
+  --theme-tooltip-padding-y: 0.25rem;
+  --theme-tooltip-text-size: 1rem;
   --theme-tab-radius: 0.185rem;
   --theme-tab-min-width: 100px;
   --theme-list-min-width: 8rem;
@@ -405,6 +412,10 @@ html {
   --border-field-focus: var(--focus-control);
   --field-fill: var(--surface-primary);
   --field-text: var(--text-primary);
+  --surface-tooltip: var(--surface-primary);
+  --text-tooltip: var(--text-primary);
+  --alert-error-fill: var(--status-error-subtle);
+  --alert-error-border: var(--status-error-border);
   --focus-control: var(--gray-100);
   --border-disabled: var(--gray-650);
   --status-success: var(--green-300);

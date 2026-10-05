@@ -84,6 +84,10 @@ export const themeColorTokens = Object.freeze([
   'rgb-border-field-focus',
   'rgb-field-fill',
   'rgb-field-text',
+  'rgb-surface-tooltip',
+  'rgb-text-tooltip',
+  'rgb-alert-error-fill',
+  'rgb-alert-error-border',
   'rgb-surface-disabled',
   'rgb-text-disabled',
   'rgb-border-disabled',
@@ -359,6 +363,10 @@ const appearanceValidators = {
   /** A menu panel's, a tooltip's and a tab trigger's corner. */
   menuRadius: isLength,
   tooltipRadius: isLength,
+  /** A tooltip's padding and text size. */
+  tooltipPaddingX: isLength,
+  tooltipPaddingY: isLength,
+  tooltipTextSize: isLength,
   tabRadius: isLength,
   tabMinWidth: isTableLength,
   /** A Select list's narrowest width (`0` to size it by its trigger), and the height it scrolls

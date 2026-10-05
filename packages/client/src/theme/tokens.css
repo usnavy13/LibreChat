@@ -124,6 +124,12 @@
   /* Follow the canvas and the primary ink, for a stylesheet that predates them. */
   --color-field-fill: rgb(var(--field-fill, var(--surface-primary)));
   --color-field-text: rgb(var(--field-text, var(--text-primary)));
+  /* Follow the roles they were painted in before they had their own, for a stylesheet that
+     predates them. */
+  --color-surface-tooltip: rgb(var(--surface-tooltip, var(--surface-primary)));
+  --color-text-tooltip: rgb(var(--text-tooltip, var(--text-primary)));
+  --color-alert-error-fill: rgb(var(--alert-error-fill, var(--status-error-subtle)));
+  --color-alert-error-border: rgb(var(--alert-error-border, var(--status-error-border)));
   --color-border-disabled: rgb(var(--border-disabled));
 
   /* status */

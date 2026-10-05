@@ -2,6 +2,8 @@ const { logger, getTenantId } = require('@librechat/data-schemas');
 const { Calculator, createSearchTool, createCodeExecutionTool } = require('@librechat/agents');
 const {
   checkAccess,
+  createGitHubCompareTool,
+  getProxyDispatcher,
   toolkitParent,
   toolRolePermissions,
   checkToolRolePermission,
@@ -226,6 +228,13 @@ const loadTools = async ({
   };
 
   const customConstructors = {
+    github_compare: () =>
+      createGitHubCompareTool({
+        config: options.req?.config?.githubCompare,
+        toolRegistry: options.toolRegistry,
+        fetch,
+        getDispatcher: getProxyDispatcher,
+      }),
     image_gen_oai: async (_toolContextMap, dynamicToolContextMap) => {
       const authFields = getAuthFields('image_gen_oai');
       const authValues = await loadAuthValues({ userId: user, authFields });
@@ -394,6 +403,7 @@ const loadTools = async ({
               conversation: options.req?.resolvedConversation,
               request: options.req?.body,
             }),
+            inheritedEnvironments: options.req?.codeWorkspaceInheritance,
             environments:
               options.req?.config?.endpoints?.agents?.statefulCodeSessions?.environments,
             userId: user,
@@ -685,8 +695,8 @@ const loadTools = async ({
       getAvailableTools: (userId, serverName, config) =>
         getMCPServerTools(userId, serverName, config, capabilityProfile),
       context: {
-        mcpPermissionContext,
         agentId: agent?.id,
+        mcpPermissionContext,
         signal,
         user: safeUser,
         userMCPAuthMap,

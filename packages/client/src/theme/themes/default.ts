@@ -86,6 +86,10 @@ export const defaultTheme: IThemeRGB = {
   'rgb-border-field-focus': '33 33 33', // #212121 (gray-800, matching focus-control)
   'rgb-field-fill': '255 255 255', // #fff (white, matching surface-primary)
   'rgb-field-text': '33 33 33', // #212121 (gray-800, matching text-primary)
+  'rgb-surface-tooltip': '255 255 255', // matching surface-primary
+  'rgb-text-tooltip': '33 33 33', // matching text-primary
+  'rgb-alert-error-fill': '254 242 242', // matching status-error-subtle
+  'rgb-alert-error-border': '252 165 165', // matching status-error-border
   'rgb-surface-disabled': '236 236 236', // #ececec (gray-100)
   'rgb-text-disabled': '153 150 150', // #999696 (gray-400)
   'rgb-border-disabled': '227 227 227', // #e3e3e3 (gray-200)

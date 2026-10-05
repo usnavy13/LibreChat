@@ -156,7 +156,7 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-illustration-subtle': 'palette.info.200',
     'rgb-illustration': 'palette.info.400',
     'rgb-illustration-strong': 'palette.info.600',
-    'rgb-file-document': 'palette.fuchsia.600',
+    'rgb-file-document': 'palette.info.700',
     'rgb-file-sheet': 'palette.success.700',
     'rgb-file-code': 'palette.warning.600',
     'rgb-file-artifact': 'palette.slate.800',
@@ -185,6 +185,8 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-table-header-text': 'click.table.header.color.title.default',
     'rgb-table-header-fill': 'click.table.header.color.background.default',
     'rgb-presentation': 'global.color.background.default',
+    'rgb-surface-tooltip': 'click.tooltip.color.background.default',
+    'rgb-text-tooltip': 'click.tooltip.color.label.default',
   },
   dark: {
     'rgb-text-primary': 'global.color.text.default',
@@ -286,7 +288,7 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-illustration-subtle': 'palette.info.200',
     'rgb-illustration': 'palette.info.400',
     'rgb-illustration-strong': 'palette.info.600',
-    'rgb-file-document': 'palette.fuchsia.600',
+    'rgb-file-document': 'palette.info.400',
     'rgb-file-sheet': 'palette.success.700',
     'rgb-file-code': 'palette.warning.600',
     'rgb-file-artifact': 'palette.slate.800',
@@ -315,6 +317,8 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-table-header-text': 'click.table.header.color.title.default',
     'rgb-table-header-fill': 'click.table.header.color.background.default',
     'rgb-presentation': 'global.color.background.default',
+    'rgb-surface-tooltip': 'palette.neutral.712',
+    'rgb-text-tooltip': 'click.tooltip.color.label.default',
   },
 };
 
@@ -326,17 +330,24 @@ const AVATAR_EDGE_REASON =
 const MEDIA_SCRIM_DEPARTURE =
   'the dialog scrim is the nearest Click UI job; a lightbox frames the user image in black instead';
 
+const ALERT_ALPHA_REASON =
+  'Click UI draws the danger alert as feedback.danger at 10% (light) or 20% (dark) alpha with no edge; a role holds an opaque triplet, so the theme takes the fill blended over the page and the edge equals it';
+
 /** Values the theme sets on purpose without a Click UI source, and why. */
 const unsourcedColors: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> = {
   light: {
     'rgb-surface-media-overlay': MEDIA_OVERLAY_REASON,
     'rgb-avatar-edge': AVATAR_EDGE_REASON,
+    'rgb-alert-error-fill': ALERT_ALPHA_REASON,
+    'rgb-alert-error-border': ALERT_ALPHA_REASON,
   },
   dark: {
     'rgb-surface-overlay':
       'Click UI dark dialog.color.opaqueBackground is a gray that leaves the dialog under 3:1',
     'rgb-surface-media-overlay': MEDIA_OVERLAY_REASON,
     'rgb-avatar-edge': AVATAR_EDGE_REASON,
+    'rgb-alert-error-fill': ALERT_ALPHA_REASON,
+    'rgb-alert-error-border': ALERT_ALPHA_REASON,
   },
 };
 
@@ -360,6 +371,16 @@ interface Departure {
  */
 const departures: Record<ThemeMode, Partial<Record<keyof IThemeRGB, Departure>>> = {
   light: {
+    'rgb-alert-error-fill': {
+      counterpart: 'click.alert.color.background.danger',
+      status: 'mismatch',
+      reason: ALERT_ALPHA_REASON,
+    },
+    'rgb-alert-error-border': {
+      counterpart: 'click.alert.color.background.danger',
+      status: 'mismatch',
+      reason: ALERT_ALPHA_REASON,
+    },
     'rgb-avatar-edge': {
       counterpart: 'global.color.stroke.default',
       status: 'near',
@@ -466,6 +487,22 @@ const departures: Record<ThemeMode, Partial<Record<keyof IThemeRGB, Departure>>>
       counterpart: 'click.dialog.color.opaqueBackground.default',
       status: 'mismatch',
       reason: MEDIA_SCRIM_DEPARTURE,
+    },
+    'rgb-alert-error-fill': {
+      counterpart: 'click.alert.color.background.danger',
+      status: 'mismatch',
+      reason: ALERT_ALPHA_REASON,
+    },
+    'rgb-alert-error-border': {
+      counterpart: 'click.alert.color.background.danger',
+      status: 'mismatch',
+      reason: ALERT_ALPHA_REASON,
+    },
+    'rgb-surface-tooltip': {
+      counterpart: 'click.tooltip.color.background.default',
+      status: 'near',
+      reason:
+        'tooltip.color.background.default is the #282828 canvas in dark, which hides the chip; one step up the neutral ramp keeps white 4.5:1 and lifts it off the page',
     },
     'rgb-avatar-edge': {
       counterpart: 'global.color.stroke.default',
@@ -600,6 +637,9 @@ const appearanceSources: Partial<Record<keyof IThemeAppearance, string>> = {
   spaceNormal: 'spaces.3',
   menuRadius: 'click.genericMenu.panel.radii.all',
   tooltipRadius: 'click.tooltip.radii.all',
+  tooltipPaddingX: 'click.tooltip.space.x',
+  tooltipPaddingY: 'click.tooltip.space.y',
+  tooltipTextSize: 'click.tooltip.typography.label.default',
   tabRadius: 'click.tabs.radii.all',
   fontFamily: 'typography.font.families.regular',
   monoFontFamily: 'typography.font.families.mono',
@@ -836,6 +876,7 @@ const fontShorthandParts: Partial<
   labelFontWeight: 'weight',
   labelSize: 'size',
   labelLeading: 'leading',
+  tooltipTextSize: 'size',
 };
 
 function comparable(key: keyof IThemeAppearance, raw: string | number): string {

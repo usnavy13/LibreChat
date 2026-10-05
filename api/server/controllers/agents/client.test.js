@@ -105,6 +105,94 @@ describe('AgentClient code approval persistence', () => {
     });
   });
 
+  /** Reproduces the "no workspace" failure: no agent has an attached execution context, yet the
+   *  request still carries the mode the reader picked for a workspace. */
+  const noWorkspaceClient = ({ requested, stored, agent = { id: 'terra' } }) => {
+    const client = Object.create(AgentClient.prototype);
+    client.agentConfigs = new Map();
+    client.conversationId = 'convo-1';
+    client.options = {
+      endpoint: EModelEndpoint.agents,
+      agent,
+      req: {
+        body: { conversationId: 'convo-1', codeApprovalMode: requested },
+        _codeEnvironmentDecision: { mode: 'without_attached' },
+        resolvedConversation: {
+          conversationId: 'convo-1',
+          codeEnvironmentMode: 'without_attached',
+          ...(stored != null && { codeApprovalMode: stored }),
+        },
+        config: { endpoints: { [EModelEndpoint.agents]: {} } },
+      },
+    };
+    return client;
+  };
+
+  /** The write `BaseClient` performs with these options: an omitted key is `$unset` from the
+   *  stored row unless the write preserves it. */
+  const turnWrite = (client) =>
+    client.getTurnConversationFields(
+      client.options,
+      'convo-1',
+      client.getSaveOptions(),
+      'client.test approval mode',
+    );
+
+  it.each(['fullAccess', 'acceptEdits', 'ask', undefined])(
+    'saves a turn without a workspace that carries %s, keeping the stored mode as it is',
+    (requested) => {
+      const write = turnWrite(noWorkspaceClient({ requested, stored: 'acceptEdits' }));
+      expect(write.endpointOptions).not.toHaveProperty('codeApprovalMode');
+      expect(write.preservedFields).toEqual(['codeApprovalMode']);
+    },
+  );
+
+  it('preserves nothing once the turn runs on an attached machine', () => {
+    const agent = {
+      id: 'terra',
+      codeExecutionContext: {
+        environmentId: 'terra-vm',
+        environmentType: 'attached',
+        codeEnvironmentConfigSchema: {
+          permissions: { fileWrite: { allowed: ['allow', 'ask'], default: 'ask' } },
+        },
+      },
+    };
+    const write = turnWrite(noWorkspaceClient({ requested: 'acceptEdits', agent }));
+    expect(write.endpointOptions).toMatchObject({ codeApprovalMode: 'acceptEdits' });
+    expect(write.preservedFields).toEqual([]);
+  });
+
+  it('still rejects a value that is not an approval mode without a workspace', () => {
+    expect(() =>
+      noWorkspaceClient({ requested: 'unrestricted', stored: 'fullAccess' }).getSaveOptions(),
+    ).toThrow('not permitted');
+  });
+
+  it('validates the mode against a subagent machine when the parent has no workspace', () => {
+    const agent = {
+      id: 'terra',
+      lazySubagentConfigs: [
+        {
+          id: 'builder',
+          codeExecutionContext: {
+            environmentId: 'builder-vm',
+            environmentType: 'attached',
+            codeEnvironmentConfigSchema: {
+              permissions: { fileWrite: { allowed: ['ask'], default: 'ask' } },
+            },
+          },
+        },
+      ],
+    };
+    expect(() =>
+      noWorkspaceClient({ requested: 'fullAccess', stored: 'fullAccess', agent }).getSaveOptions(),
+    ).toThrow('not permitted');
+    expect(
+      noWorkspaceClient({ requested: 'ask', stored: 'fullAccess', agent }).getSaveOptions(),
+    ).toMatchObject({ codeApprovalMode: 'ask' });
+  });
+
   it('never writes its run-start decision over a stored one a move replaced', () => {
     const client = Object.create(AgentClient.prototype);
     client.agentConfigs = new Map();
@@ -1969,6 +2057,11 @@ jest.mock('~/server/services/Config', () => ({
 
 jest.mock('~/server/services/MCP', () => ({
   resolveConfigServers: jest.fn().mockResolvedValue({}),
+}));
+
+const mockLinkedInstructionsResolver = jest.fn();
+jest.mock('~/server/services/Endpoints/agents/linkedInstructions', () => ({
+  getLinkedInstructionsResolver: jest.fn(() => mockLinkedInstructionsResolver),
 }));
 
 jest.mock('~/models', () => ({
@@ -9221,6 +9314,29 @@ describe('AgentClient - titleConvo', () => {
       expect(mockInitializeAgent).toHaveBeenCalledWith(
         expect.objectContaining({
           agent: mockAgent,
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it('passes the shared linked-instructions resolver, without recording usage, so a linked memory agent still resolves its instructions', async () => {
+      mockCheckAccess.mockResolvedValue(true);
+      mockInitializeAgent.mockResolvedValue({
+        ...mockAgent,
+        provider: EModelEndpoint.openAI,
+      });
+      mockCreateMemoryProcessor.mockResolvedValue([undefined, jest.fn()]);
+
+      client = new AgentClient(mockOptions);
+      client.conversationId = 'convo-123';
+      client.responseMessageId = 'response-123';
+
+      await client.useMemory();
+
+      expect(mockInitializeAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resolveLinkedInstructions: mockLinkedInstructionsResolver,
+          recordLinkedPromptUsage: false,
         }),
         expect.any(Object),
       );

@@ -2,6 +2,7 @@ import type { IThemeAppearance, IThemeBrands, IThemeRGB, ResolvedThemeDefinition
 import {
   controlBorderFallback,
   focusFallbacks,
+  overlayFallbacks,
   pressedFallbacks,
   primaryButtonFallbacks,
   primaryInkFallbacks,
@@ -81,6 +82,10 @@ function mapColors(colors: IThemeRGB, base?: IThemeRGB): Array<[string, string]>
   if (colors['rgb-field-fill'] === undefined && colors['rgb-surface-primary'] !== undefined) {
     variables.push(['--field-fill', colors['rgb-surface-primary']]);
   }
+
+  Object.entries(overlayFallbacks(colors)).forEach(([role, value]) => {
+    variables.push([colorProperty(role as keyof IThemeRGB), value]);
+  });
 
   if (colors['rgb-table-header-text'] === undefined && colors['rgb-text-secondary'] !== undefined) {
     variables.push(['--table-header-text', colors['rgb-text-secondary']]);

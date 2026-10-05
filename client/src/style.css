@@ -1709,14 +1709,14 @@ html {
 .webkit-dark-styles,
 .webkit-dark-styles:focus {
   background-clip: content-box;
-  -webkit-box-shadow: 0 0 0 50vh #fff inset;
+  -webkit-box-shadow: 0 0 0 50vh rgb(var(--field-fill, var(--surface-primary))) inset;
 }
 
 .dark .webkit-dark-styles,
 .dark .webkit-dark-styles:focus {
-  -webkit-text-fill-color: #fff;
+  -webkit-text-fill-color: rgb(var(--field-text, var(--text-primary)));
   background-clip: content-box;
-  -webkit-box-shadow: 0 0 0 50vh #0d0d0d inset;
+  -webkit-box-shadow: 0 0 0 50vh rgb(var(--field-fill, var(--surface-primary))) inset;
 }
 
 /* Ordered Listing */
@@ -1970,14 +1970,14 @@ html {
   z-index: 150;
   cursor: pointer;
   border-radius: var(--theme-tooltip-radius, 0.275rem);
-  background-color: rgb(var(--surface-primary));
-  padding-top: 0.25rem;
-  padding-bottom: 0.25rem;
-  padding-left: 0.5rem;
-  padding-right: 0.5rem;
-  font-size: 1rem;
-  line-height: 1.5rem;
-  color: rgb(var(--text-primary));
+  background-color: rgb(var(--surface-tooltip, var(--surface-primary)));
+  padding-top: var(--theme-tooltip-padding-y, 0.25rem);
+  padding-bottom: var(--theme-tooltip-padding-y, 0.25rem);
+  padding-left: var(--theme-tooltip-padding-x, 0.5rem);
+  padding-right: var(--theme-tooltip-padding-x, 0.5rem);
+  font-size: var(--theme-tooltip-text-size, 1rem);
+  line-height: 1.5;
+  color: rgb(var(--text-tooltip, var(--text-primary)));
   box-shadow: var(--theme-tooltip-shadow, 0 2px 4px 0 rgb(0 0 0 / 0.25));
 }
 

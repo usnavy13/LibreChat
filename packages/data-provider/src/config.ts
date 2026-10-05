@@ -22,17 +22,19 @@ import {
   MAX_PII_PATTERN_LENGTH,
 } from './filters';
 import {
+  REFILL_INTERVAL_UNITS,
+  BALANCE_DISPLAY_MODES,
+  BALANCE_REFILL_MODES,
+  MIN_BALANCE_RESERVATION_TTL_MS,
+  DEFAULT_BALANCE_RESERVATION_TTL_MS,
+} from './balance';
+import {
   EModelEndpoint,
   eModelEndpointSchema,
   isAgentsEndpoint,
   eReasoningParameterFormatSchema,
   eReasoningResponseKeySchema,
 } from './schemas';
-import {
-  REFILL_INTERVAL_UNITS,
-  MIN_BALANCE_RESERVATION_TTL_MS,
-  DEFAULT_BALANCE_RESERVATION_TTL_MS,
-} from './balance';
 import {
   scheduledMCPResourceBindingSchema,
   scheduledMCPReadOnlyPolicySchema,
@@ -53,6 +55,7 @@ import {
   CODE_ENVIRONMENT_MOVE_VERSION,
   CODE_ENVIRONMENT_TRANSITION_VERSION,
   CODE_WORKSPACE_RECOVERY_VERSION,
+  CODE_WORKSPACE_INHERITANCE_VERSION,
   MAX_AGENT_CODE_ENVIRONMENT_CHOICES,
 } from './code/workspace';
 import { ComponentTypes, SettingTypes, OptionTypes } from './generate';
@@ -1455,6 +1458,7 @@ export const DEFAULT_AVATAR_REFRESH_COVERAGE_LIMIT = 1000;
 export const DEFAULT_MAX_PROVIDER_ERROR_CHARS = 2000;
 export const DEFAULT_AGENT_MODEL_RESPONSE_BODY_TIMEOUT_MS = 900_000;
 export const DEFAULT_AGENT_MODEL_RESPONSE_HEADERS_TIMEOUT_MS = 300_000;
+export const DEFAULT_CACHE_CLEAR_TIMEOUT_MS = 1000;
 
 export const HOST_FILE_EDIT_HARD_MAX_COUNT = 100;
 
@@ -1527,6 +1531,29 @@ export const agentsEndpointSchema = baseEndpointSchema
       repositoryInstructions: z
         .object({
           timeoutMs: z.number().int().min(100).max(30_000).optional().default(2000),
+        })
+        .optional(),
+      /** Budget and cache configuration for resolving an agent's linked prompt-group
+       * instructions. Omitting the block applies the defaults below. */
+      linkedInstructions: z
+        .object({
+          timeoutMs: z.number().int().min(100).max(30_000).optional().default(2000),
+          native: z
+            .object({
+              /** Content cache TTL for a resolved native prompt link; `0` disables the cache. */
+              cacheTtlMs: z.number().int().min(0).max(3_600_000).optional().default(300_000),
+              /** Max wait for the cache clear a prompt write triggers before the write's
+               * response continues without it. */
+              cacheClearTimeoutMs: z
+                .number()
+                .int()
+                .min(1)
+                .max(30_000)
+                .optional()
+                .default(DEFAULT_CACHE_CLEAR_TIMEOUT_MS),
+            })
+            .optional()
+            .default({}),
         })
         .optional(),
       maxRecursionLimit: z.number().optional(),
@@ -2553,8 +2580,8 @@ export const interfaceSchema = z
     customWelcome: z.string().optional(),
     mcpServers: mcpServersSchema.optional(),
     modelSelect: z.boolean().optional(),
-    /** Enable only after every API replica supports title ownership and old title jobs drain. */
-    runningChatRename: z.boolean().default(false),
+    /** Set to false during a rolling upgrade, until every API replica supports title ownership and old title jobs drain. */
+    runningChatRename: z.boolean().default(true),
     /** Milliseconds between syntax highlights while a code block streams. */
     codeHighlightThrottleMs: z.number().int().min(0).max(60_000).default(300),
     /** Most agents the agents panel selector lists before a search term is
@@ -2730,6 +2757,17 @@ export const interfaceSchema = z
               readOnlyPolicy: z.record(scheduledMCPReadOnlyPolicySchema).optional(),
             })
             .optional(),
+          /** Bounded exponential receipt retry interval; equal jitter prevents outage waves. */
+          mcpReceiptRetry: z
+            .object({
+              baseMs: z.number().int().min(100).max(60_000).optional(),
+              maxMs: z.number().int().min(100).max(600_000).optional(),
+            })
+            .refine(
+              (value) => (value.maxMs ?? 30_000) >= (value.baseMs ?? 250),
+              'Receipt retry maxMs must be at least baseMs',
+            )
+            .optional(),
           mcpPreflightConcurrency: z.number().int().min(1).max(10).optional(),
           mcpPreflightTimeoutMs: z.number().int().min(1000).max(600000).optional(),
           /** Refuse schedules that are not filed under a chat project. Enforced on
@@ -2791,7 +2829,7 @@ export const interfaceSchema = z
   })
   .default({
     modelSelect: true,
-    runningChatRename: false,
+    runningChatRename: true,
     codeHighlightThrottleMs: 300,
     agentSelectorLimit: DEFAULT_AGENT_SELECTOR_LIMIT,
     parameters: true,
@@ -3043,6 +3081,9 @@ export type TStartupConfig = {
   /** Additive recovery support. Clients require this and the move capability before replacing
    * a missing workspace. Keeping it separate preserves exact-version checks in older clients. */
   codeWorkspaceRecoveryVersion?: typeof CODE_WORKSPACE_RECOVERY_VERSION;
+  /** Subagents follow their parent's attached machine. Clients mirror that routing only when this
+   * is advertised. */
+  codeWorkspaceInheritanceVersion?: typeof CODE_WORKSPACE_INHERITANCE_VERSION;
   interface?: TInterfaceConfig;
   turnstile?: TTurnstileConfig;
   balance?: TBalanceConfig;
@@ -3343,20 +3384,37 @@ export const ocrSchema = z.object({
   strategy: z.nativeEnum(OCRStrategy).default(OCRStrategy.MISTRAL_OCR),
 });
 
-export const balanceSchema = z.object({
-  enabled: z.boolean().optional().default(false),
-  startBalance: z.number().optional().default(20000),
-  autoRefillEnabled: z.boolean().optional().default(false),
-  refillIntervalValue: z.number().optional().default(30),
-  refillIntervalUnit: z.enum(REFILL_INTERVAL_UNITS).optional().default('days'),
-  refillAmount: z.number().optional().default(10000),
-  reservationTtlMs: z
-    .number()
-    .int()
-    .min(MIN_BALANCE_RESERVATION_TTL_MS)
-    .optional()
-    .default(DEFAULT_BALANCE_RESERVATION_TTL_MS),
-});
+export const balanceSchema = z
+  .object({
+    enabled: z.boolean().optional().default(false),
+    startBalance: z.number().optional().default(20000),
+    autoRefillEnabled: z.boolean().optional().default(false),
+    refillIntervalValue: z.number().optional().default(30),
+    refillIntervalUnit: z.enum(REFILL_INTERVAL_UNITS).optional().default('days'),
+    refillAmount: z.number().optional().default(10000),
+    /** Add credits on exhaustion, or replace the allowance on the next read/request once due. */
+    refillMode: z.enum(BALANCE_REFILL_MODES).optional().default('add'),
+    reservationTtlMs: z
+      .number()
+      .int()
+      .min(MIN_BALANCE_RESERVATION_TTL_MS)
+      .optional()
+      .default(DEFAULT_BALANCE_RESERVATION_TTL_MS),
+    /** How the UI presents the balance; `credits` keeps the raw figure. */
+    display: z.enum(BALANCE_DISPLAY_MODES).optional().default('credits'),
+  })
+  .superRefine((balance, ctx) => {
+    if (
+      balance.refillMode === 'reset' &&
+      !(Number.isInteger(balance.refillIntervalValue) && balance.refillIntervalValue > 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['refillIntervalValue'],
+        message: 'Reset intervals must be positive integers',
+      });
+    }
+  });
 
 export const transactionsSchema = z.object({
   enabled: z.boolean().optional().default(true),
@@ -3693,6 +3751,24 @@ export const conversationListConfigSchema = z.object({
 
 export type TConversationListConfig = z.infer<typeof conversationListConfigSchema>;
 
+/**
+ * Bounded previews of settled tool calls on conversation loads. A client that asks for them
+ * receives the start and end of each long output and argument string, without subagent
+ * transcripts, and fetches a part in full only when the reader opens it. `enabled: false` sends
+ * every load in full, as before previews existed.
+ */
+export const toolCallPreviewsConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Characters of `output` kept per tool call, half from the start and half from the end.
+   *  JSON output stays valid JSON, and an exit-status trailer is always kept whole. */
+  outputChars: z.number().int().min(256).max(1_000_000).default(512),
+  /** Characters of serialized `args` kept per tool call. JSON arguments stay valid JSON with
+   *  every field present; only the longest strings are shortened. */
+  argsChars: z.number().int().min(256).max(1_000_000).default(512),
+});
+
+export type TToolCallPreviewsConfig = z.infer<typeof toolCallPreviewsConfigSchema>;
+
 export const configSchema = z.object({
   version: z.string(),
   permissions: z.object({ maxWriteAttempts: permissionWriteAttemptsSchema }).optional(),
@@ -3700,6 +3776,13 @@ export const configSchema = z.object({
   projects: chatProjectsConfigSchema,
   ocr: ocrSchema.optional(),
   webSearch: webSearchSchema.optional(),
+  githubCompare: z
+    .object({
+      enabled: z.boolean().default(false),
+      timeoutMs: z.number().int().min(1).max(30000).default(10000),
+    })
+    .strict()
+    .optional(),
   langfuse: langfuseConfigSchema.optional(),
   memory: memorySchema.optional(),
   summarization: summarizationConfigSchema.optional(),
@@ -3708,6 +3791,9 @@ export const configSchema = z.object({
   imageOutputType: z.nativeEnum(EImageOutputType).default(EImageOutputType.PNG),
   conversationList: conversationListConfigSchema.default(() =>
     conversationListConfigSchema.parse({}),
+  ),
+  toolCallPreviews: toolCallPreviewsConfigSchema.default(() =>
+    toolCallPreviewsConfigSchema.parse({}),
   ),
   includedTools: z.array(z.string()).optional(),
   filteredTools: z.array(z.string()).optional(),
@@ -4395,6 +4481,10 @@ export enum CacheKeys {
    * Key for cached prompt group access ID sets (accessible, public, owned).
    */
   PROMPT_GROUPS_ACCESS = 'PROMPT_GROUPS_ACCESS',
+  /**
+   * Key for cached resolved content of an agent's linked native prompt-group instructions.
+   */
+  AGENT_LINKED_INSTRUCTIONS = 'AGENT_LINKED_INSTRUCTIONS',
   /**
    * Key for per-conversation stateful code sandbox prewarm/warm state.
    */

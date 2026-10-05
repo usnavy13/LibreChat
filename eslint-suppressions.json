@@ -88,22 +88,22 @@
   },
   "client/src/components/Auth/LoginForm.tsx": {
     "shadcn/no-restyle": {
-      "count": 39
+      "count": 37
     }
   },
   "client/src/components/Auth/Registration.tsx": {
     "shadcn/no-restyle": {
-      "count": 39
+      "count": 37
     }
   },
   "client/src/components/Auth/RequestPasswordReset.tsx": {
     "shadcn/no-restyle": {
-      "count": 15
+      "count": 14
     }
   },
   "client/src/components/Auth/ResetPassword.tsx": {
     "shadcn/no-restyle": {
-      "count": 54
+      "count": 52
     }
   },
   "client/src/components/Auth/TwoFactorScreen.tsx": {
@@ -308,9 +308,6 @@
     }
   },
   "client/src/components/Chat/Input/TokenUsage/index.tsx": {
-    "shadcn/no-arbitrary-values": {
-      "count": 1
-    },
     "shadcn/no-restyle": {
       "count": 1
     }
@@ -1581,14 +1578,6 @@
   "client/src/components/SidePanel/Agents/Images.tsx": {
     "shadcn/no-inline-styles": {
       "count": 3
-    }
-  },
-  "client/src/components/SidePanel/Agents/Instructions.tsx": {
-    "shadcn/no-arbitrary-values": {
-      "count": 1
-    },
-    "shadcn/no-restyle": {
-      "count": 5
     }
   },
   "client/src/components/SidePanel/Agents/MCPIcon.tsx": {

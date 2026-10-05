@@ -1002,7 +1002,7 @@ function Palette({
                 )}
                 <span className="flex min-w-0 flex-1 flex-col justify-center">
                   <span className="truncate">{file.filename}</span>
-                  <span className="text-text-secondary truncate text-xs opacity-80">
+                  <span className="text-text-secondary truncate text-xs">
                     {formatFileDate(file)}
                   </span>
                 </span>
@@ -1087,9 +1087,7 @@ function Palette({
                 {/* The dot is color only, so the status is still said aloud. */}
                 {status != null && <span className="sr-only">{status.label}</span>}
                 {description != null && description !== '' && (
-                  <span className="text-text-secondary truncate text-xs opacity-80">
-                    {description}
-                  </span>
+                  <span className="text-text-secondary truncate text-xs">{description}</span>
                 )}
               </span>
             </button>

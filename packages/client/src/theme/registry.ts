@@ -138,6 +138,25 @@ export function primaryInkFallbacks(colors: IThemeRGB): IThemeRGB {
   );
 }
 
+/** Roles that were painted in another role before they had their own. */
+export const overlayFallbackSources: ReadonlyArray<readonly [keyof IThemeRGB, keyof IThemeRGB]> = [
+  ['rgb-surface-tooltip', 'rgb-surface-primary'],
+  ['rgb-text-tooltip', 'rgb-text-primary'],
+  ['rgb-alert-error-fill', 'rgb-status-error-subtle'],
+  ['rgb-alert-error-border', 'rgb-status-error-border'],
+];
+
+/** A theme that repaints a source role keeps the tooltip and the error alert on it, unless it
+ *  names them. */
+export function overlayFallbacks(colors: IThemeRGB): IThemeRGB {
+  return Object.fromEntries(
+    overlayFallbackSources.flatMap(([role, source]) => {
+      const value = colors[source];
+      return colors[role] === undefined && value !== undefined ? [[role, value]] : [];
+    }),
+  );
+}
+
 /**
  * The focus roles for a stored or environment theme that predates them. The
  * global outline followed a theme's `rgb-ring-primary` whenever it named one,
@@ -165,6 +184,9 @@ export const themeAppearanceProperties: Readonly<
   largeSurfaceRadius: '--theme-large-surface-radius',
   menuRadius: '--theme-menu-radius',
   tooltipRadius: '--theme-tooltip-radius',
+  tooltipPaddingX: '--theme-tooltip-padding-x',
+  tooltipPaddingY: '--theme-tooltip-padding-y',
+  tooltipTextSize: '--theme-tooltip-text-size',
   tabRadius: '--theme-tab-radius',
   tabMinWidth: '--theme-tab-min-width',
   listMinWidth: '--theme-list-min-width',
@@ -253,6 +275,9 @@ export const defaultAppearance: IThemeAppearance = Object.freeze({
   largeSurfaceRadius: '1.5rem',
   menuRadius: '0.7rem',
   tooltipRadius: '0.275rem',
+  tooltipPaddingX: '0.5rem',
+  tooltipPaddingY: '0.25rem',
+  tooltipTextSize: '1rem',
   tabRadius: '0.185rem',
   tabMinWidth: '100px',
   listMinWidth: '8rem',
@@ -668,6 +693,7 @@ export function resolveTheme(theme: ThemeDefinition, mode: ThemeMode): ResolvedT
   const primaryButtonFallback: IThemeRGB =
     customColors != null ? primaryButtonFallbacks(customColors) : {};
   const primaryInks: IThemeRGB = customColors != null ? primaryInkFallbacks(customColors) : {};
+  const overlayFallback: IThemeRGB = customColors != null ? overlayFallbacks(customColors) : {};
   /**
    * Slot 8 arrived after the seven-slot scale shipped, so a stored or
    * environment theme that paints its own scale cannot name it. Filling the
@@ -732,6 +758,7 @@ export function resolveTheme(theme: ThemeDefinition, mode: ThemeMode): ResolvedT
       ...chartWidgetStrokeFallback,
       ...switchThumbFallback,
       ...fieldFillFallback,
+      ...overlayFallback,
       ...tableHeaderTextFallback,
       ...tableHeaderFillFallback,
       ...borderControlFallback,

@@ -61,8 +61,12 @@ const {
   buildToolApprovalExecutionConfig,
   collectAttachedCodeEnvironmentAgentIds,
   collectAttachedCodeEnvironmentPolicySettings,
+  collectAttachedCodeApprovalPolicies,
+  collectAttachedCodeRoutePolicies,
   buildAttachedCodeEnvironmentAdmissionHooks,
   resolveAttachedCodeApprovalMode,
+  resolvePersistedCodeApprovalMode,
+  getCodeApprovalPreservedFields,
   markNativeCodeToolApprovalRequests,
   markToolApprovalAllowAlways,
   resolveRunToolApprovalAllows,
@@ -240,6 +244,9 @@ const {
 const { filterFilesByAgentAccess } = require('~/server/services/Files/permissions');
 const { encodeAndFormat } = require('~/server/services/Files/images/encode');
 const { createContextHandlers } = require('~/app/clients/prompts');
+const {
+  getLinkedInstructionsResolver,
+} = require('~/server/services/Endpoints/agents/linkedInstructions');
 const { resolveConfigServers, getAccessibleMcpServerNames } = require('~/server/services/MCP');
 const { getMCPServerTools } = require('~/server/services/Config');
 const { getAccessibleMCPServers } = require('~/server/services/MCP');
@@ -2001,11 +2008,11 @@ class AgentClient extends BaseClient {
 
     const agentsEConfig = this.options.req.config?.endpoints?.[EModelEndpoint.agents];
     const topLevelAgents = [this.options.agent, ...(this.agentConfigs?.values() ?? [])];
-    const codeApprovalMode = resolveAttachedCodeApprovalMode(
-      this.options.req.body.codeApprovalMode,
-      collectAttachedCodeEnvironmentPolicySettings(topLevelAgents),
-      agentsEConfig?.toolApproval?.enabled !== false,
-    );
+    const codeApprovalMode = resolvePersistedCodeApprovalMode({
+      requested: this.options.req.body.codeApprovalMode,
+      policies: collectAttachedCodeApprovalPolicies(topLevelAgents),
+      approvalsEnabled: agentsEConfig?.toolApproval?.enabled !== false,
+    });
     const persistedCodeEnvironmentDecision = resolvePersistableCodeEnvironmentDecision({
       conversationId: this.options.req.body.conversationId,
       decision: this.options.req._codeEnvironmentDecision,
@@ -2032,6 +2039,17 @@ class AgentClient extends BaseClient {
         runOptions,
       ),
     );
+  }
+
+  getTurnConversationFields(options, conversationId, endpointOptions, context) {
+    const topLevelAgents = [options.agent, ...(this.agentConfigs?.values() ?? [])];
+    return {
+      ...super.getTurnConversationFields(options, conversationId, endpointOptions, context),
+      preservedFields: getCodeApprovalPreservedFields(
+        collectAttachedCodeApprovalPolicies(topLevelAgents),
+        options.req?.config?.endpoints?.[EModelEndpoint.agents]?.toolApproval?.enabled !== false,
+      ),
+    };
   }
 
   /**
@@ -3435,6 +3453,13 @@ class AgentClient extends BaseClient {
         codeEnvAvailable: memoryCodeEnabled && memoryToolGrants?.runCode === true,
         statefulSessionsAvailable: memoryCapabilities.has(AgentCapabilities.stateful_code_sessions),
         useChatProjectContext: false,
+        /** A saved memory agent may itself link its instructions to a native
+         *  prompt group; without a resolver `initializeAgent` falls back to
+         *  empty instructions for it. This path never counts a generation —
+         *  it primes memory extraction, not a model-facing turn the user
+         *  asked for. */
+        resolveLinkedInstructions: getLinkedInstructionsResolver(),
+        recordLinkedPromptUsage: false,
       },
       {
         getProjectFiles: db.getProjectFiles,
@@ -4596,7 +4621,7 @@ class AgentClient extends BaseClient {
         collectAttachedCodeEnvironmentPolicySettings(topLevelAgents);
       const codeApprovalMode = resolveAttachedCodeApprovalMode(
         this.options.req.body.codeApprovalMode,
-        attachedCodeEnvironmentSettings,
+        collectAttachedCodeApprovalPolicies(topLevelAgents),
         agentsEConfig?.toolApproval?.enabled !== false,
       );
       const effectiveToolApprovalPolicy = resolveToolApprovalPolicy({
@@ -4617,6 +4642,7 @@ class AgentClient extends BaseClient {
           attachedCodeEnvironmentAgentIds,
           attachedCodeEnvironmentSettings,
           codeApprovalMode,
+          collectAttachedCodeRoutePolicies(topLevelAgents),
         ),
       ];
       const askUserQuestionAdminDisabled = isAskUserQuestionAdminDisabled(appConfig);
