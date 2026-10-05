@@ -5,7 +5,7 @@ const {
   countTokens,
   checkBalance,
   getBalanceConfig,
-  buildMessageFiles,
+  buildUserMessageFiles,
   sanitizeFileForTransmit,
   extractFileContext,
   getReferencedQuotes,
@@ -898,7 +898,7 @@ class BaseClient {
     if (!isEdited && !this.skipSaveUserMessage) {
       const reqFiles = this.options.req?.body?.files;
       if (reqFiles && Array.isArray(this.options.attachments)) {
-        const files = buildMessageFiles(reqFiles, this.options.attachments);
+        const files = buildUserMessageFiles(reqFiles, this.options.attachments, this.options.agent);
         if (files.length > 0) {
           userMessage.files = files;
         }

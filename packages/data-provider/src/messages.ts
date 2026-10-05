@@ -24,6 +24,20 @@ export function stripReasoningLabelMetadata(part: TMessageContentParts): TMessag
 
 export type ParentMessage = TMessage & { children: TMessage[]; depth: number };
 
+type MessageFile = NonNullable<TMessage['files']>[number];
+
+/**
+ * The stored record stands in for a message's file, but how that message's turn read the file
+ * lives only on the message's copy, so its reading notice is carried over.
+ */
+export function hydrateMessageFile(file: MessageFile, fileMap: Record<string, TFile>): MessageFile {
+  const stored = fileMap[file.file_id ?? ''];
+  if (stored == null) {
+    return file;
+  }
+  return file.reading == null ? stored : { ...stored, reading: file.reading };
+}
+
 /**
  * Memoizes built trees per messages-array identity. The same query data feeds
  * several independent `select`s (ChatView plus the branch-tail helpers), which
@@ -93,7 +107,7 @@ export function buildTree({
     };
 
     if (message.files && fileMap) {
-      extendedMessage.files = message.files.map((file) => fileMap[file.file_id ?? ''] ?? file);
+      extendedMessage.files = message.files.map((file) => hydrateMessageFile(file, fileMap));
     }
 
     messageMap[message.messageId] = extendedMessage;

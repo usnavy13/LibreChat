@@ -13,7 +13,7 @@ const {
   getViolationInfo,
   applyForcedTemporaryRequest,
   resolveResumableRetention,
-  buildMessageFiles,
+  buildUserMessageFiles,
   getReferencedQuotes,
   resolveTitleTiming,
   GenerationJobManager,
@@ -2995,7 +2995,11 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         }
 
         if (req.body.files && Array.isArray(client.options.attachments)) {
-          const files = buildMessageFiles(req.body.files, client.options.attachments);
+          const files = buildUserMessageFiles(
+            req.body.files,
+            client.options.attachments,
+            client.options.agent,
+          );
           if (files.length > 0) {
             userMessage.files = files;
           }

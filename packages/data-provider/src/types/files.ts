@@ -164,6 +164,7 @@ export type TFileReadingNotice = {
     | 'code_unavailable'
     | 'too_large_direct'
     | 'text_too_long'
+    | 'text_truncated'
     | 'too_large_together'
     | 'not_prepared'
     | 'text_only'

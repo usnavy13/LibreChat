@@ -147,6 +147,22 @@ describe('buildTree', () => {
     expect(tree?.[0].files?.[0]).toBe(file);
   });
 
+  it("keeps the message's reading notice on the stored record that stands in for its file", () => {
+    const file = { file_id: 'f1', filename: 'hydrated.csv', preview: 'fresh' } as TFile;
+    const reading = { reader: 'unavailable', limitation: 'code_unavailable' } as const;
+    const tree = buildTree({
+      messages: [
+        msg('u1', '00000000-0000-0000-0000-000000000000', {
+          files: [{ file_id: 'f1', filename: 'stub.csv', reading }],
+        }),
+      ],
+      fileMap: { f1: file },
+    });
+
+    expect(tree?.[0].files?.[0]).toEqual({ ...file, reading });
+    expect(file).not.toHaveProperty('reading');
+  });
+
   describe('memoization', () => {
     const chain = () => [
       msg('u1', '00000000-0000-0000-0000-000000000000', { isCreatedByUser: true }),

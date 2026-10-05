@@ -11,6 +11,25 @@ E2E_TITLE_CONVO=true npx playwright test --config=e2e/playwright.config.mock.ts 
   conversation-management.spec.ts --grep 'first-turn|final-title polling'
 ```
 
+## Automatic upload reading
+
+`automatic-upload.spec.ts` drives the `llmDeliveryPolicy: automatic` acceptance rows against
+`Mock Auto Provider` and `Mock Auto Small Provider`, named so that they do not contain
+`Mock Provider A`, since `selectMockEndpoint` matches option names by substring. The global setup
+writes its fixtures (one workbook as xlsx, xls and ods, a CSV and TSV of its first sheet, a large
+CSV and two PDFs) to `e2e/.generated/uploads/` from `e2e/setup/uploads.ts`, which also exports the
+totals the spec asserts and checks them against the workbook's rows. The fake model runs inside the
+server and has no HTTP surface, so it writes the prompts of its latest runs to
+`e2e/.generated/last-request.json` (`E2E_MODEL_REQUEST_LOG` overrides the path), which
+`getModelRun` in `helpers.ts` reads. The fake code server keeps uploaded bytes (64 MB in total),
+reports their `sha256` at `/__debug/uploads` along with the files each exec mounted, and answers
+`E2E_WORKBOOK:<file>` and `E2E_CSV:<file>` execs only from an upload the exec mounted. The fake RAG
+server numbers embeds and queries in one sequence, so a spec can show indexing preceded search:
+
+```sh
+npx playwright test --config=e2e/playwright.config.mock.ts automatic-upload.spec.ts
+```
+
 ## Deployed-instance smoke test
 
 The deployed profile exercises an existing LibreChat deployment without starting another app or

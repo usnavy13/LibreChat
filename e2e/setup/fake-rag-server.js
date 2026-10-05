@@ -15,6 +15,9 @@
  *
  * Every embed is recorded and surfaced at `GET /__debug/embedded` so specs can
  * assert a file's bytes actually reached the RAG env, independent of the DB write.
+ * Embeds and queries share one sequence (`seq`, never reset): an embed takes its
+ * number once its upload is fully received and a query when it arrives, so a spec
+ * can show a file was indexed before it was searched.
  */
 
 const http = require('http');
@@ -23,10 +26,11 @@ const busboy = require('busboy');
 const PORT = parseInt(process.env.E2E_RAG_API_PORT || '8791', 10);
 const HOST = '127.0.0.1';
 
-/** @type {Array<{ file_id: string; filename: string; entity_id: string; bytes: number; auth: string }>} */
+/** @type {Array<{ seq: number; file_id: string; filename: string; entity_id: string; bytes: number; auth: string }>} */
 const embedded = [];
-/** @type {Array<{ file_id: string; query: string }>} */
+/** @type {Array<{ seq: number; file_id: string; query: string }>} */
 const queries = [];
+let sequence = 0;
 /** @type {string[]} */
 const deleted = [];
 
@@ -81,6 +85,7 @@ function readJson(req) {
 async function handleEmbed(req, res) {
   const { fields, files } = await parseMultipart(req);
   embedded.push({
+    seq: ++sequence,
     file_id: fields.file_id || '',
     filename: files[0]?.filename || '',
     entity_id: fields.entity_id || '',
@@ -91,8 +96,9 @@ async function handleEmbed(req, res) {
 }
 
 async function handleQuery(req, res) {
+  const seq = ++sequence;
   const body = await readJson(req);
-  queries.push({ file_id: body.file_id || '', query: body.query || '' });
+  queries.push({ seq, file_id: body.file_id || '', query: body.query || '' });
   sendJson(res, 200, []);
 }
 

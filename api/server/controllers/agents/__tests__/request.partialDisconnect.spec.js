@@ -71,7 +71,7 @@ jest.mock('@librechat/api', () => ({
     pendingRequests: 3,
     score: 1,
   })),
-  buildMessageFiles: jest.fn(() => []),
+  buildUserMessageFiles: jest.fn(() => []),
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,

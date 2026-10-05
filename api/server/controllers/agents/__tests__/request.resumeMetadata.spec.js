@@ -293,7 +293,8 @@ jest.mock('@librechat/api', () => ({
     return { text, fileIds: fileIds.sort() };
   }),
   getViolationInfo: (...args) => mockGetViolationInfo(...args),
-  buildMessageFiles: jest.fn(() => []),
+  /** Real, because the reading notices the final user-message save carries are under test. */
+  buildUserMessageFiles: jest.requireActual('@librechat/api').buildUserMessageFiles,
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,
@@ -446,6 +447,8 @@ jest.mock('~/server/services/Agents/triggers', () => ({
 
 const AgentController = require('../request');
 const { AttachmentStorageError, encodeAndFormatImages } = require('@librechat/api');
+const { buildTurnReadingContext, resolveTurnDeliveryRouting } =
+  jest.requireActual('@librechat/api');
 const { ErrorTypes } = require('librechat-data-provider');
 const { disposeClient: mockDisposeClient } = require('~/server/cleanup');
 const { getMCPRequestContext } = require('~/server/services/MCPRequestContext');
@@ -3335,6 +3338,130 @@ describe('ResumableAgentController resume metadata', () => {
       expect.objectContaining({ streamId: 'conversation-123', status: 'complete' }),
     ]);
     expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalled();
+  });
+
+  describe('user message files on the final save', () => {
+    const brief = {
+      user: 'user-123',
+      file_id: 'brief',
+      filename: 'brief.pdf',
+      filepath: '/uploads/brief.pdf',
+      type: 'application/pdf',
+      bytes: 2048,
+      object: 'file',
+      embedded: false,
+      usage: 0,
+      source: 'local',
+      context: 'message_attachment',
+      llmDeliveryPath: 'provider',
+      metadata: { destinationChosen: false },
+      text: 'extracted text that should be stripped',
+      _id: 'mongo-brief',
+    };
+    const scan = {
+      user: 'user-123',
+      file_id: 'scan',
+      filename: 'scan.tiff',
+      type: 'image/tiff',
+      bytes: 4096,
+      _id: 'mongo-scan',
+    };
+    const { text: _briefText, _id: _briefId, ...savedBrief } = brief;
+    const { _id: _scanId, ...savedScan } = scan;
+
+    const routeAgent = (endpointConfig) => {
+      const agent = {
+        id: 'agent-1',
+        provider: 'openAI',
+        endpoint: 'openAI',
+        fileConsumers: { executeCode: false, fileSearch: false },
+        currentRequestAttachments: [brief],
+      };
+      const routing = resolveTurnDeliveryRouting({
+        agent,
+        config: { fileConfig: { endpoints: { openAI: endpointConfig } } },
+      });
+      routing.reading = buildTurnReadingContext({
+        routing,
+        provider: 'openAI',
+        model: 'gpt-4o',
+        fileTokenLimit: 100000,
+        configuredFileSizeLimit: undefined,
+        countTokens: (text) => text.length,
+      });
+      routing.reading?.recordDropped([scan]);
+      agent.deliveryRouting = routing;
+      return agent;
+    };
+
+    const savedUserFiles = async (agent) => {
+      const userMessage = {
+        messageId: 'user-msg',
+        parentMessageId: 'parent-msg',
+        conversationId: 'conversation-123',
+        text: 'Summarize the brief',
+      };
+      let signalFinished;
+      const finished = new Promise((resolve) => {
+        signalFinished = resolve;
+      });
+      mockGenerationJobManager.finishTerminalJob.mockImplementation(async () => signalFinished());
+      const client = {
+        options: { attachments: [brief], agent },
+        skipSaveUserMessage: false,
+        sendMessage: jest.fn(async (_text, options) => {
+          options.onStart(userMessage, 'response-msg');
+          return {
+            messageId: 'response-msg',
+            databasePromise: Promise.resolve({
+              conversation: { conversationId: 'conversation-123' },
+            }),
+          };
+        }),
+      };
+      const req = {
+        user: { id: 'user-123' },
+        body: {
+          text: userMessage.text,
+          messageId: userMessage.messageId,
+          parentMessageId: userMessage.parentMessageId,
+          conversationId: 'conversation-123',
+          files: [{ file_id: 'brief' }, { file_id: 'scan' }],
+          endpointOption: { endpoint: 'agents', modelOptions: { model: 'gpt-4.1' } },
+        },
+        config: {},
+      };
+
+      await AgentController(
+        req,
+        createResumableResponse(),
+        jest.fn(),
+        jest.fn().mockResolvedValue({ client }),
+        null,
+      );
+      await finished;
+      const [, saved] = mockSaveMessage.mock.calls.find(
+        ([, message]) => message?.messageId === userMessage.messageId,
+      );
+      return saved.files;
+    };
+
+    it('keeps how the automatic policy read each request file, including a refused one', async () => {
+      const files = await savedUserFiles(routeAgent({ llmDeliveryPolicy: 'automatic' }));
+
+      expect(files).toEqual([
+        { ...savedBrief, reading: { reader: 'provider' } },
+        { ...savedScan, reading: { reader: 'unavailable', limitation: 'not_allowed' } },
+      ]);
+      expect(brief).not.toHaveProperty('reading');
+    });
+
+    it('saves the attached request files as before under the classic policy', async () => {
+      const files = await savedUserFiles(routeAgent({}));
+
+      expect(files).toEqual([savedBrief]);
+      expect(files[0]).not.toHaveProperty('reading');
+    });
   });
 
   it('does not consume a recovered steer when the explicit HITL user save fails', async () => {

@@ -3068,6 +3068,106 @@ describe('BaseClient', () => {
       expect(userSave[0].files).toHaveLength(1);
       expect(userSave[0].files[0].file_id).toBe('file-abc');
     });
+
+    describe('reading notices', () => {
+      const brief = {
+        user: 'user-1',
+        file_id: 'brief',
+        filename: 'brief.pdf',
+        filepath: '/uploads/brief.pdf',
+        type: 'application/pdf',
+        bytes: 2048,
+        object: 'file',
+        embedded: false,
+        usage: 0,
+        source: 'local',
+        context: 'message_attachment',
+        llmDeliveryPath: 'provider',
+        metadata: { destinationChosen: false },
+        text: 'extracted text that should be stripped',
+        _id: 'mongo-brief',
+      };
+      const scan = {
+        user: 'user-1',
+        file_id: 'scan',
+        filename: 'scan.tiff',
+        type: 'image/tiff',
+        bytes: 4096,
+        _id: 'mongo-scan',
+      };
+      const { text: _briefText, _id: _briefId, ...savedBrief } = brief;
+      const { _id: _scanId, ...savedScan } = scan;
+
+      const routeAgent = (endpointConfig, deriveText) => {
+        const config = { fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } } };
+        const agent = {
+          id: 'agent-1',
+          provider: EModelEndpoint.openAI,
+          endpoint: EModelEndpoint.openAI,
+          fileConsumers: { executeCode: false, fileSearch: false },
+          currentRequestAttachments: [brief],
+        };
+        const routing = resolveTurnDeliveryRouting({ agent, config });
+        routing.reading = buildTurnReadingContext({
+          routing,
+          provider: EModelEndpoint.openAI,
+          model: 'gpt-4o',
+          fileTokenLimit: 100000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+          deriveText,
+        });
+        routing.reading?.recordDropped([scan]);
+        agent.deliveryRouting = routing;
+        return agent;
+      };
+
+      const saveUserFiles = async () => {
+        TestClient.saveMessageToDatabase = jest.fn().mockResolvedValue({ message: {} });
+        await TestClient.sendMessage('Hello');
+        const userSave = TestClient.saveMessageToDatabase.mock.calls.find(
+          ([msg]) => msg.isCreatedByUser,
+        );
+        return userSave[0].files;
+      };
+
+      beforeEach(() => {
+        TestClient.options.req = { body: { files: [{ file_id: 'brief' }, { file_id: 'scan' }] } };
+        TestClient.options.attachments = [brief];
+      });
+
+      afterEach(() => {
+        delete TestClient.options.agent;
+      });
+
+      test('saves how the automatic policy read each request file, including a refused one', async () => {
+        TestClient.options.agent = routeAgent({ llmDeliveryPolicy: 'automatic' });
+
+        const files = await saveUserFiles();
+
+        expect(files).toEqual([
+          { ...savedBrief, reading: { reader: 'provider' } },
+          { ...savedScan, reading: { reader: 'unavailable', limitation: 'not_allowed' } },
+        ]);
+        expect(brief).not.toHaveProperty('reading');
+        expect(TestClient.options.attachments).toEqual([brief]);
+      });
+
+      test.each([
+        ['without a reading context', undefined],
+        ['with a derive-only reading context', jest.fn()],
+      ])('saves the same files as before under the classic policy %s', async (_label, derive) => {
+        TestClient.options.agent = routeAgent({}, derive);
+        expect(TestClient.options.agent.deliveryRouting.reading?.policy).toBe(
+          derive ? 'classic' : undefined,
+        );
+
+        const files = await saveUserFiles();
+
+        expect(JSON.stringify(files)).toBe(JSON.stringify([savedBrief]));
+        expect(files[0]).not.toHaveProperty('reading');
+      });
+    });
   });
 
   describe('addPreviousAttachments authorization', () => {

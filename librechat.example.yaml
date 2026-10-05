@@ -1327,6 +1327,16 @@ endpoints:
 #   # Existing files without extracted text are not backfilled. Paused runs retain encoded text
 #   # and conservatively count referenced fallback text against current limits on resume.
 #   textFallbackWithoutTools: false
+#   # How unified attachments are read. "classic" (default) keeps current routing. "automatic"
+#   # reads spreadsheets (xlsx, xls, ods, csv, tsv, parquet) with Run Code when it is available,
+#   # with no upload-time text extraction. Other documents go to the provider within its existing
+#   # limits, then complete extracted text when it fits, then File Search, then Run Code; a
+#   # document too large to send directly tries File Search and Run Code before text. Each
+#   # attachment's access is listed for the model and shown on the user's message.
+#   # Explicit destinations, legacyFileUploadUX and defaultLLMDeliveryPath still win.
+#   # Also configurable under endpoints.default or a provider/custom endpoint name. Enable only
+#   # after every server replica runs this version.
+#   llmDeliveryPolicy: classic
 #   fileContextSizeLimit: 128  # Maximum aggregate model-bound attachment size in one agent turn (MB)
 #   fileContextCharLimit: 1000000  # Maximum aggregate extracted-text characters in one agent turn
 #   endpoints:

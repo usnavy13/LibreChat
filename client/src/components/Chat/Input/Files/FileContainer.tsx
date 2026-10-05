@@ -37,7 +37,8 @@ const FileContainer = ({
    * the deferred-preview flow to surface "Preparing preview…" /
    * "Preview unavailable" inline within the chip rather than as a
    * loose-feeling annotation below it. Pass a ReactNode so callers
-   * can include icons (spinner, alert) alongside the text.
+   * can include icons (spinner, alert) alongside the text; a string
+   * keeps the default subtitle's typography.
    */
   subtitle?: ReactNode;
   /**
@@ -59,6 +60,15 @@ const FileContainer = ({
   onClick?: React.MouseEventHandler<HTMLButtonElement>;
 }) => {
   const fileType = getFileType(overrideType ?? file.type);
+  const subtitleText = typeof subtitle === 'string' ? subtitle : fileType.title;
+  const subtitleLine =
+    subtitle == null || typeof subtitle === 'string' ? (
+      <div className="text-text-secondary truncate" title={subtitleText}>
+        {subtitleText}
+      </div>
+    ) : (
+      subtitle
+    );
   const visibleName = displayName ?? file.filename ?? '';
   const interactive = onClick != null;
   const surfaceClassName = cn(
@@ -105,11 +115,7 @@ const FileContainer = ({
               {subtitleAction.label}
             </button>
           ) : (
-            (subtitle ?? (
-              <div className="text-text-secondary truncate" title={fileType.title}>
-                {fileType.title}
-              </div>
-            ))
+            subtitleLine
           )}
         </div>
       </div>

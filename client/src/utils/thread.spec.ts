@@ -123,6 +123,16 @@ describe('resolveThreadRows with a file map', () => {
     );
     expect(remapped[0]).not.toBe(next[0]);
   });
+
+  it("keeps the reading notice the message's own file copy carries", () => {
+    const reading = { reader: 'unavailable', limitation: 'code_unavailable' } as const;
+    const stored = { file_id: 'f1', filename: 'ledger.csv', preview: 'fresh' } as TFile;
+    const user = { ...message('u1', ROOT), files: [{ file_id: 'f1', reading }] };
+
+    const [row] = resolveThreadRows(buildThreadIndex([user], { f1: stored }), 'c', () => 0, null);
+
+    expect(row.message.files).toEqual([{ ...stored, reading }]);
+  });
 });
 
 describe('reconcileSiblingIdx', () => {
