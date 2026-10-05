@@ -1,0 +1,156 @@
+name: Fork Image Publish (GHCR)
+
+# Fork-only workflow. Builds this branch's LibreChat images on native runners and
+# publishes multi-architecture manifests to the fork's GHCR namespace with the workflow
+# token, so a branch can be run on other machines with docker compose and nothing else
+# needs Docker Hub credentials. It lives on the `fork/image` branch, never on a branch
+# that becomes a pull request. To publish a new build, merge the branch under test into
+# `fork/image` and push. Tags: `IMAGE_TAG` below and the short commit SHA.
+
+on:
+  push:
+    branches:
+      - fork/image
+  workflow_dispatch:
+
+env:
+  # Stamped as BUILD_BRANCH (Settings -> About) and used as the stable image tag.
+  SOURCE_BRANCH: feat/unified-upload-routing
+  IMAGE_TAG: unified-upload-routing
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.image.image_name }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { target: node, file: Dockerfile, image_name: librechat-dev }
+          - { target: api-build, file: Dockerfile.multi, image_name: librechat-dev-api }
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare environment
+        run: cp .env.example .env
+
+      # Registry names must be lowercase, and the repository owner is not guaranteed to be.
+      - name: Compute build metadata
+        env:
+          IMAGE_NAME: ${{ matrix.image.image_name }}
+        run: |
+          set -euo pipefail
+          printf 'GHCR_IMAGE=ghcr.io/%s/%s\n' "${GITHUB_REPOSITORY_OWNER,,}" "$IMAGE_NAME" >> "$GITHUB_ENV"
+          printf 'BUILD_COMMIT=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          printf 'BUILD_DATE=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.image.file }}
+          platforms: linux/${{ matrix.arch }}
+          target: ${{ matrix.image.target }}
+          cache-from: type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+          outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            BUILD_COMMIT=${{ env.BUILD_COMMIT }}
+            BUILD_BRANCH=${{ env.SOURCE_BRANCH }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+
+      - name: Export digest
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BUILD_DIGEST" ]; then
+            echo "Build produced no digest." >&2
+            exit 1
+          fi
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${BUILD_DIGEST#sha256:}"
+
+      # The `-arch-` separator keeps librechat-dev's artifacts out of librechat-dev-api's glob.
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.image_name }}-arch-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  merge:
+    name: Merge manifests (${{ matrix.image_name }})
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image_name: [librechat-dev, librechat-dev-api]
+
+    steps:
+      - name: Resolve GHCR image name
+        env:
+          IMAGE_NAME: ${{ matrix.image_name }}
+        run: printf 'GHCR_IMAGE=ghcr.io/%s/%s\n' "${GITHUB_REPOSITORY_OWNER,,}" "$IMAGE_NAME" >> "$GITHUB_ENV"
+
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          pattern: digests-${{ matrix.image_name }}-arch-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          digests=(*)
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "Expected 2 platform digests (amd64 arm64), found ${#digests[@]}: ${digests[*]}" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            -t "${GHCR_IMAGE}:${IMAGE_TAG}" \
+            -t "${GHCR_IMAGE}:${GITHUB_SHA::7}" \
+            "${digests[@]/#/${GHCR_IMAGE}@sha256:}"
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect "${GHCR_IMAGE}:${IMAGE_TAG}"
