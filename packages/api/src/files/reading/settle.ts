@@ -28,6 +28,11 @@ export interface DirectContentAllocation<T extends TurnReadingFile> {
   measure: (file: T) => DirectContentEntry;
   /** Content already charged against the same limits, such as replayed history. */
   committedExtra?: readonly T[];
+  /**
+   * Content already charged that the caller measured itself, such as replayed history, which
+   * spends the context budgets but counts as the checks on it count repeated copies.
+   */
+  committedEntries?: readonly DirectContentEntry[];
   agentId?: string;
   scope?: AllocationScope;
 }
@@ -113,9 +118,9 @@ function allocate<T extends TurnReadingFile>(
   allocation: DirectContentAllocation<T>,
   step: SettleStep,
 ): T[] {
-  const { measure, limits, committedExtra = [] } = allocation;
+  const { measure, limits, committedExtra = [], committedEntries = [] } = allocation;
   const candidates: DirectContentEntry[] = [];
-  const committed: DirectContentEntry[] = committedExtra.map(measure);
+  const committed: DirectContentEntry[] = [...committedEntries, ...committedExtra.map(measure)];
   for (const file of selectRequestFiles(files, allocation.requestFileIds)) {
     (isDirectReading(file, step) ? candidates : committed).push(measure(file));
   }

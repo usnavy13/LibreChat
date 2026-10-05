@@ -16,6 +16,8 @@ const {
   encodeAndFormatVideos,
   getTransactionsConfig,
   encodeAndFormatDocuments,
+  encodeNativeDocuments,
+  recordNativeRejections,
   getLangfuseTraceMessageFields,
   isContentFilterError,
   assertModelBoundProviderContent,
@@ -1741,22 +1743,35 @@ class BaseClient {
   }
 
   async addDocuments(message, attachments) {
-    const documentResult = await encodeAndFormatDocuments(
-      this.options.req,
+    const documentResult = await encodeNativeDocuments(
       attachments,
-      {
-        provider: this.options.agent?.provider ?? this.options.endpoint,
-        endpoint: this.options.agent?.endpoint ?? this.options.endpoint,
-        useResponsesApi: this.usesResponsesApi(),
-        model: this.modelOptions?.model ?? this.model,
-      },
-      getStrategyFunctions,
+      this.options.agent,
+      (files, onValidationFailure) =>
+        encodeAndFormatDocuments(
+          this.options.req,
+          files,
+          {
+            provider: this.options.agent?.provider ?? this.options.endpoint,
+            endpoint: this.options.agent?.endpoint ?? this.options.endpoint,
+            useResponsesApi: this.usesResponsesApi(),
+            model: this.modelOptions?.model ?? this.model,
+            onValidationFailure,
+          },
+          getStrategyFunctions,
+        ),
+      { requestOnly: true },
     );
+    recordNativeRejections(this.getConversationAgents(), documentResult.rejected);
     message.documents =
       documentResult.documents && documentResult.documents.length
         ? documentResult.documents
         : undefined;
     return documentResult.files;
+  }
+
+  /** The agents whose messages carry this conversation's encoded attachments. */
+  getConversationAgents() {
+    return [this.options.agent];
   }
 
   async addVideos(message, attachments) {

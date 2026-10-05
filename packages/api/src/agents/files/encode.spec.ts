@@ -4,7 +4,7 @@ import type { RunFileEncodingAgent, RunFileMessageEncoderDeps } from './encode';
 import type { FileTextDeriver } from '~/files/reading';
 import type { ServerRequest } from '~/types';
 import { AgentAttachmentLimitError, AgentAttachmentPolicyError } from '../attachments';
-import { buildTurnReadingContext } from '~/files/reading';
+import { buildTurnReadingContext, getTurnReadingContext } from '~/files/reading';
 import { resolveTurnDeliveryRouting } from './delivery';
 import { createRunFileMessageEncoder } from './encode';
 
@@ -58,7 +58,10 @@ function setup({
     ]),
   );
   const encodeImages = jest.fn(async () => ({ image_urls: [nativeImage] }));
-  const encodeDocuments = jest.fn(async () => ({ documents: [nativeDocument] }));
+  const encodeDocuments = jest.fn<
+    ReturnType<RunFileMessageEncoderDeps['encodeDocuments']>,
+    Parameters<RunFileMessageEncoderDeps['encodeDocuments']>
+  >(async () => ({ documents: [nativeDocument] }));
   const encodeAudios = jest.fn(async () => ({ audios: [{ type: 'media', data: 'audio' }] }));
   const encodeVideos = jest.fn(async () => ({ videos: [{ type: 'media', data: 'video' }] }));
   const extractText = jest.fn<
@@ -75,7 +78,7 @@ function setup({
     getStrategyFunctions: jest.fn(),
     extractText,
   };
-  return { ...deps, ...createRunFileMessageEncoder(deps) };
+  return { ...deps, encodeDocuments, ...createRunFileMessageEncoder(deps) };
 }
 
 describe('createRunFileMessageEncoder', () => {
@@ -580,6 +583,103 @@ describe('createRunFileMessageEncoder', () => {
 
       await expect(harness.encode([csv], 'child')).resolves.toEqual([]);
       expect(harness.extractText).not.toHaveBeenCalled();
+    });
+
+    it('leaves out a document the child cannot accept and records it for the next decision', async () => {
+      const brief: TFile = { ...pdf, ...attachment, text: undefined };
+      const harness = setup({
+        agents: {
+          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: noReader },
+          classic: { provider: 'openAI', endpoint: 'classic', fileConsumers: noReader },
+        },
+        fileConfig: { endpoints: { automatic: { llmDeliveryPolicy: 'automatic' } } },
+      });
+      const child = harness.getAgent('automatic');
+      const context =
+        child &&
+        buildTurnReadingContext({
+          routing: child.deliveryRouting,
+          provider: 'openAI',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+        });
+      if (child == null || context == null) {
+        throw new Error('expected an automatic reading context');
+      }
+      child.deliveryRouting.reading = context;
+      harness.encodeDocuments.mockResolvedValueOnce({
+        documents: [],
+        rejected: [{ file_id: brief.file_id, reason: 'capacity' }],
+      });
+
+      const [message] = await harness.encode([brief], 'automatic');
+      await harness.encode([brief], 'classic');
+
+      expect(harness.encodeDocuments.mock.calls.map(([, , params]) => params)).toEqual([
+        expect.objectContaining({ endpoint: 'automatic', onValidationFailure: 'skip' }),
+        expect.objectContaining({ endpoint: 'classic', onValidationFailure: 'throw' }),
+      ]);
+      expect(context.judge(brief).rejected).toBe('capacity');
+      expect(context.stats().rejected).toBe(1);
+      expect(getTurnReadingContext(harness.getAgent('classic')?.deliveryRouting)).toBeUndefined();
+      expect(message.content).toBe(
+        [
+          '- Shared files left out of this message (file contents are not listed here):',
+          '\t- "report.pdf" (PDF): cannot be read on this turn (the model could not accept it). Say so if asked; do not claim to have read it.',
+        ].join('\n'),
+      );
+    });
+
+    it('still fails on a document the child reads as classic, beside one it may leave out', async () => {
+      const brief: TFile = { ...pdf, ...attachment, text: undefined };
+      const chosen: TFile = {
+        ...brief,
+        file_id: 'chosen-pdf',
+        metadata: { destinationChosen: true },
+      };
+      const harness = setup({
+        agents: {
+          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: noReader },
+        },
+        fileConfig: { endpoints: { automatic: { llmDeliveryPolicy: 'automatic' } } },
+      });
+      const child = harness.getAgent('automatic');
+      const context =
+        child &&
+        buildTurnReadingContext({
+          routing: child.deliveryRouting,
+          provider: 'openAI',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+        });
+      if (child == null || context == null) {
+        throw new Error('expected an automatic reading context');
+      }
+      child.deliveryRouting.reading = context;
+      harness.encodeDocuments.mockImplementation(async (_req, files, params) => {
+        if (params.onValidationFailure === 'throw') {
+          throw new Error('PDF validation failed');
+        }
+        return {
+          documents: [],
+          rejected: files.map(({ file_id }) => ({ file_id, reason: 'integrity' as const })),
+        };
+      });
+
+      await expect(harness.encode([brief, chosen], 'automatic')).rejects.toThrow(
+        'PDF validation failed',
+      );
+      expect(
+        harness.encodeDocuments.mock.calls.map(([, files, params]) => [
+          files.map(({ file_id }) => file_id),
+          params.onValidationFailure,
+        ]),
+      ).toEqual([
+        [['input-pdf'], 'skip'],
+        [['chosen-pdf'], 'throw'],
+      ]);
     });
 
     it('derives the text a file needs inside encode, and validates it without the text', async () => {

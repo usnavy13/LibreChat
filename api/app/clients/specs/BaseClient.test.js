@@ -1,4 +1,12 @@
-const { Constants, ContentTypes, EModelEndpoint } = require('librechat-data-provider');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  Constants,
+  ContentTypes,
+  EModelEndpoint,
+  resolveTurnLLMDeliveryPath,
+} = require('librechat-data-provider');
 const BaseClientClass = require('../BaseClient');
 const {
   ContentFilterError,
@@ -4671,6 +4679,122 @@ describe('BaseClient attachment text under a reading context', () => {
     expect(withDeriver).toContain('# "notes.txt"');
     expect(withDeriver).not.toContain(notice);
     expect(withoutContext).toBe(withDeriver);
+  });
+});
+
+describe('BaseClient native documents under a reading context', () => {
+  const brokenPdf = {
+    user: 'user1',
+    file_id: 'broken-pdf',
+    filename: 'brief.pdf',
+    filepath: '/uploads/brief.pdf',
+    type: 'application/pdf',
+    bytes: 18,
+    source: 'local',
+    context: 'message_attachment',
+    llmDeliveryPath: 'provider',
+    metadata: { destinationChosen: false },
+  };
+  const consumers = { executeCode: false, fileSearch: true };
+  let uploads;
+
+  beforeAll(() => {
+    uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'baseclient-documents-'));
+    fs.writeFileSync(path.join(uploads, 'brief.pdf'), 'not a pdf document');
+  });
+
+  afterAll(() => {
+    fs.rmSync(uploads, { recursive: true, force: true });
+  });
+
+  const routeBrokenPdf = (endpointConfig, deriveText) => {
+    const client = initializeFakeClient(apiKey, { modelOptions: { model: 'claude-sonnet-4' } }, []);
+    const config = {
+      paths: { uploads },
+      fileConfig: { endpoints: { [EModelEndpoint.anthropic]: endpointConfig } },
+    };
+    client.options.req = { config, user: { id: 'user1' } };
+    client.options.agent = {
+      provider: EModelEndpoint.anthropic,
+      endpoint: EModelEndpoint.anthropic,
+      fileConsumers: consumers,
+      currentRequestAttachments: [brokenPdf],
+    };
+    const routing = resolveTurnDeliveryRouting({ agent: client.options.agent, config });
+    routing.reading = buildTurnReadingContext({
+      routing,
+      provider: EModelEndpoint.anthropic,
+      fileTokenLimit: 100000,
+      configuredFileSizeLimit: undefined,
+      countTokens: (text) => text.length,
+      deriveText,
+    });
+    client.options.agent.deliveryRouting = routing;
+    return { client, routing };
+  };
+
+  test('leaves a rejected document out and records it under the automatic policy', async () => {
+    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+    const recordRejections = jest.spyOn(routing.reading, 'recordRejections');
+    expect(resolveTurnLLMDeliveryPath(routing, brokenPdf, consumers)).toBe('provider');
+    const message = {};
+
+    const files = await client.addDocuments(message, [brokenPdf]);
+
+    expect(files).toEqual([]);
+    expect(message.documents).toBeUndefined();
+    expect(recordRejections).toHaveBeenCalledWith([{ file_id: 'broken-pdf', reason: 'integrity' }]);
+    expect(routing.reading.stats().rejected).toBe(1);
+    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
+    expect(resolveTurnLLMDeliveryPath(routing, brokenPdf, consumers)).not.toBe('provider');
+  });
+
+  test.each([
+    ['a chosen destination', { ...brokenPdf, metadata: { destinationChosen: true } }],
+    ['an unmarked record', { ...brokenPdf, metadata: {} }],
+  ])('still fails the turn on %s the automatic policy leaves classic', async (_label, file) => {
+    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+    client.options.agent.currentRequestAttachments = [file];
+    const message = {};
+
+    await expect(client.addDocuments(message, [file])).rejects.toThrow('PDF validation failed');
+    expect(message.documents).toBeUndefined();
+    expect(routing.reading.stats().rejected).toBe(0);
+  });
+
+  test('still fails the turn on a replayed document outside the request', async () => {
+    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+    client.options.agent.currentRequestAttachments = [];
+
+    await expect(client.addDocuments({}, [brokenPdf])).rejects.toThrow('PDF validation failed');
+    expect(routing.reading.stats().rejected).toBe(0);
+  });
+
+  test('records a rejection on every agent the conversation agents list', async () => {
+    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+    const { routing: handoffRouting } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+    const handoff = { deliveryRouting: handoffRouting };
+    client.getConversationAgents = () => [client.options.agent, handoff];
+
+    await client.addDocuments({}, [brokenPdf]);
+
+    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
+    expect(handoffRouting.reading.judge(brokenPdf).rejected).toBe('integrity');
+  });
+
+  test.each([
+    ['without a reading context', undefined],
+    ['with a derive-only reading context', jest.fn()],
+  ])('still fails the turn under the classic policy %s', async (_label, deriveText) => {
+    const { client, routing } = routeBrokenPdf({}, deriveText);
+    expect(routing.reading?.policy).toBe(deriveText ? 'classic' : undefined);
+    const message = {};
+
+    await expect(client.addDocuments(message, [brokenPdf])).rejects.toThrow(
+      'PDF validation failed',
+    );
+    expect(message.documents).toBeUndefined();
+    expect(routing.reading?.stats().rejected ?? 0).toBe(0);
   });
 });
 

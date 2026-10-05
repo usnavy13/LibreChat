@@ -53,6 +53,7 @@ import type { IMongoFile } from '@librechat/data-schemas';
 import type { Agent, TFile, FiltersConfig } from 'librechat-data-provider';
 import type { ServerRequest, InitializeResultBase, EndpointTokenConfig } from '~/types';
 import type { InitializeAgentDbMethods } from '../initialize';
+import type { ProvisionState } from '../resources';
 import type { CodeExecutionContext } from '../execution';
 import type { GraphSubagentHostConfig } from '../discovery';
 import type { ProjectFileRecord } from '../../projects/resources';
@@ -144,6 +145,7 @@ import { primeResources } from '../resources';
 import { isFatalAgentInitializationError } from '../errors';
 import { filterFilesByEndpointRuntimeConfig as filterByEndpointPolicy } from '~/files/filter';
 import { assertModelBoundContent } from '../../middleware/modelBoundContent';
+import { ContentFilterError } from '../../middleware/contentFilter';
 import { getTurnReadingContext } from '~/files/reading';
 import type { FileTextDeriver } from '~/files/reading';
 
@@ -5896,8 +5898,20 @@ describe('initializeAgent automatic delivery policy', () => {
     contextFiles = [],
     deriveText,
     saveFileTextDerivation,
+    loaded = {},
+    provisionState,
+    filters,
   }: {
     file: IMongoFile;
+    /** What the loader returns beyond the tools the agent lists. */
+    loaded?: {
+      toolNames?: string[];
+      dynamicToolContextMap?: Record<string, unknown>;
+      primedSearchFiles?: Array<{ file_id: string; filename: string; fromAgent: boolean }>;
+    };
+    /** The provisioning queues priming hands back. */
+    provisionState?: ProvisionState;
+    filters?: FiltersConfig;
     /** The host's text deriver, which also builds a derive-only context under classic. */
     deriveText?: FileTextDeriver;
     saveFileTextDerivation?: InitializeAgentDbMethods['saveFileTextDerivation'];
@@ -5916,7 +5930,13 @@ describe('initializeAgent automatic delivery policy', () => {
     filterFilesByEndpointRuntimeConfig.mockImplementation(filterByEndpointPolicy);
     const { agent, req, res, loadTools, db } = createMocks();
     agent.tools = tools;
-    loadTools.mockResolvedValue({ tools: [], toolContextMap: {}, toolDefinitions: [] });
+    loadTools.mockResolvedValue({
+      tools: [],
+      toolContextMap: {},
+      toolDefinitions: (loaded.toolNames ?? []).map((name) => ({ name })),
+      dynamicToolContextMap: loaded.dynamicToolContextMap,
+      primedSearchFiles: loaded.primedSearchFiles,
+    });
     (primeResources as jest.Mock).mockImplementationOnce(async ({ attachments }) => {
       const files = await attachments;
       return {
@@ -5924,9 +5944,11 @@ describe('initializeAgent automatic delivery policy', () => {
         requestAttachments: files,
         agentContextAttachments: contextFiles,
         tool_resources: {},
+        provisionState,
       };
     });
     req.config = {
+      filters,
       fileConfig: {
         fileContextCharLimit,
         endpoints: {
@@ -6120,6 +6142,167 @@ describe('initializeAgent automatic delivery policy', () => {
     expect(result.requestAttachments).toEqual([]);
     const context = getTurnReadingContext(result.deliveryRouting);
     expect(context?.dropped().map((file) => file.file_id)).toEqual([image.file_id]);
+  });
+
+  describe('file inventory', () => {
+    const INVENTORY_HEADER = 'Attached files and how you can read them on this turn';
+    const NO_FILES_NOTE = `- Note: Semantic search is available through the ${Tools.file_search} tool but no files are currently loaded. Request the user to upload documents to search through.`;
+    const handbook = { file_id: 'kb', filename: 'handbook.pdf', fromAgent: true };
+    const filters: FiltersConfig = {
+      files: {
+        pii: {
+          fields: ['content'],
+          starterPatterns: [],
+          customPatterns: [{ id: 'private', label: 'private value', regex: 'PRIVATE-[A-Z]+' }],
+        },
+      },
+    };
+    /** The queued copy priming hands the planner. */
+    const queued = (file: IMongoFile): TFile => ({
+      file_id: file.file_id,
+      filename: file.filename,
+      filepath: file.filepath,
+      type: file.type,
+      bytes: file.bytes,
+      user: 'user-1',
+      object: 'file',
+      embedded: false,
+      usage: 0,
+      source: FileSources.local,
+      context: FileContext.message_attachment,
+      metadata: { destinationChosen: false },
+    });
+    const provisionStateFor = ({
+      code = [],
+      search = [],
+    }: {
+      code?: IMongoFile[];
+      search?: IMongoFile[];
+    }): ProvisionState => ({
+      codeEnvFiles: code.map(queued),
+      vectorDBFiles: search.map(queued),
+      aliveFileIds: new Set(),
+      agentScopedFileIds: new Set(),
+    });
+    const inspectedContent = (): unknown[] =>
+      (assertModelBoundContent as jest.Mock).mock.calls.flatMap(
+        ([input]: [{ files?: Array<{ content?: unknown }> }]) =>
+          (input.files ?? []).map((file) => file.content),
+      );
+
+    it.each([
+      ['as the loader primed them', [handbook], ['kb']],
+      ['as none when the loader primed none', [], []],
+      ['as unknown when the loader did not report them', undefined, undefined],
+    ])('records the File Search files %s', async (_case, primedSearchFiles, expected) => {
+      const result = await initializeWith({
+        file: classicEraXlsx(),
+        policy: 'automatic',
+        loaded: { primedSearchFiles },
+      });
+
+      expect(result.primedSearchFileIds).toEqual(expected);
+    });
+
+    it('lists the queued spreadsheet at its planned path and checks both advertisements', async () => {
+      const xlsx = classicEraXlsx();
+
+      const result = await initializeWith({
+        file: xlsx,
+        policy: 'automatic',
+        tools: [Tools.execute_code],
+        provisionState: provisionStateFor({ code: [xlsx] }),
+        filters,
+      });
+
+      const destination = result.provisionState?.codeEnvDestinations?.get(xlsx.file_id);
+      const inventory = result.dynamicToolContextMap?.file_inventory;
+      const queuedFiles = result.dynamicToolContextMap?.queued_code_files;
+      expect(destination).toBe('quarterly.xlsx');
+      expect(inventory).toContain(INVENTORY_HEADER);
+      expect(inventory).toContain(
+        `"quarterly.xlsx" (spreadsheet, file_id xlsx-file): read it with Run Code at /mnt/data/${destination}. It is copied when code first runs.`,
+      );
+      expect(inventory).not.toContain('Q1,1200');
+      expect(queuedFiles).toContain(`/mnt/data/${destination}`);
+      expect(assertModelBoundContent).toHaveBeenCalledWith({
+        filters,
+        files: [{ content: queuedFiles }],
+      });
+      expect(assertModelBoundContent).toHaveBeenCalledWith({
+        filters,
+        files: [{ content: inventory }],
+      });
+    });
+
+    it('fails the turn when the content policy refuses the inventory', async () => {
+      const xlsx = () => ({ ...classicEraXlsx(), filename: 'PRIVATE-PLAN.xlsx' }) as IMongoFile;
+      const params = { tools: [Tools.execute_code], filters };
+
+      await expect(
+        initializeWith({ ...params, file: xlsx(), policy: 'automatic' }),
+      ).rejects.toBeInstanceOf(ContentFilterError);
+      await expect(initializeWith({ ...params, file: xlsx() })).resolves.toBeDefined();
+    });
+
+    it.each([undefined, 'classic' as const])(
+      'writes no inventory but still checks the queued advertisement under %p routing',
+      async (policy) => {
+        const xlsx = classicEraXlsx();
+
+        const result = await initializeWith({
+          file: xlsx,
+          policy,
+          tools: [Tools.execute_code],
+          provisionState: provisionStateFor({ code: [xlsx] }),
+          filters,
+          loaded: { primedSearchFiles: [handbook] },
+        });
+
+        const queuedFiles = result.dynamicToolContextMap?.queued_code_files;
+        expect(result.dynamicToolContextMap).not.toHaveProperty('file_inventory');
+        expect(queuedFiles).toContain('/mnt/data/quarterly.xlsx');
+        expect(result.primedSearchFileIds).toEqual(['kb']);
+        expect(assertModelBoundContent).toHaveBeenCalledWith({
+          filters,
+          files: [{ content: queuedFiles }],
+        });
+        expect(
+          inspectedContent().some(
+            (content) => typeof content === 'string' && content.includes(INVENTORY_HEADER),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.each([
+      ['replaces', [], undefined],
+      ['keeps', [handbook], NO_FILES_NOTE],
+    ])(
+      '%s the empty File Search note for a PDF awaiting indexing by what the loader primed',
+      async (_action, primedSearchFiles, note) => {
+        const pdf = oversizedPdf();
+
+        const result = await initializeWith({
+          file: pdf,
+          policy: 'automatic',
+          tools: [Tools.file_search],
+          endpointConfig: { fileSizeLimit: 1 },
+          provisionState: provisionStateFor({ search: [pdf] }),
+          loaded: {
+            toolNames: [Tools.file_search],
+            dynamicToolContextMap: { [Tools.file_search]: NO_FILES_NOTE },
+            primedSearchFiles,
+          },
+        });
+
+        expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: true });
+        expect(result.dynamicToolContextMap?.[Tools.file_search]).toBe(note);
+        expect(result.dynamicToolContextMap?.file_inventory).toContain(
+          `"annual.pdf" (PDF): too large to send directly. Search it with ${Tools.file_search}; it is indexed when you first search.`,
+        );
+      },
+    );
   });
 
   describe('with a host that derives text', () => {

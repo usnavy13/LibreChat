@@ -1,19 +1,25 @@
 import { logger } from '@librechat/data-schemas';
 import { FileContext, FileSources } from 'librechat-data-provider';
-import type { TFileConfig, TurnDeliveryRouting } from 'librechat-data-provider';
+import type { TFileConfig, TurnFileConsumers, TurnDeliveryRouting } from 'librechat-data-provider';
 import type {
   DerivedText,
   FileTextDeriver,
   TurnReadingFile,
+  EncodedDocuments,
+  NativeDeliveryAgent,
   TextDerivationPersister,
   BuildTurnReadingContextParams,
 } from './turn';
+import type { NativeValidationMode } from '~/types';
 import {
   needsDerivedText,
   getTurnTextOptions,
   deriveRequestedText,
   getTurnReadingContext,
+  encodeNativeDocuments,
+  recordNativeRejections,
   buildTurnReadingContext,
+  getNativeValidationPolicy,
 } from './turn';
 import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
 import { UninspectableFileError } from '~/protection/files';
@@ -164,6 +170,201 @@ describe('getTurnTextOptions', () => {
     routing.reading = contextFor({ routing, deriveText: jest.fn() });
 
     expect(getTurnTextOptions(routing)).toMatchObject({ markTruncation: false });
+  });
+});
+
+describe('native validation', () => {
+  const searchOnly: TurnFileConsumers = { executeCode: false, fileSearch: true };
+  const rejectedPdf = attachment({ file_id: 'rejected-pdf' });
+  const chosenPdf = attachment({
+    file_id: 'chosen-pdf',
+    metadata: { destinationChosen: true },
+  });
+  const unmarkedPdf = attachment({ file_id: 'unmarked-pdf', metadata: {} });
+
+  const automaticAgent = (overrides: Partial<NativeDeliveryAgent> = {}): NativeDeliveryAgent => {
+    const routing = routingFor('openAI');
+    routing.reading = contextFor({ routing });
+    return {
+      id: 'agent-1',
+      deliveryRouting: routing,
+      fileConsumers: searchOnly,
+      currentRequestAttachments: [rejectedPdf, chosenPdf, unmarkedPdf],
+      ...overrides,
+    };
+  };
+
+  describe('getNativeValidationPolicy', () => {
+    it('leaves out only a file the automatic policy reads', () => {
+      const modeOf = getNativeValidationPolicy(automaticAgent());
+
+      expect(modeOf(rejectedPdf)).toBe('skip');
+      expect(modeOf(chosenPdf)).toBe('throw');
+      expect(modeOf(unmarkedPdf)).toBe('throw');
+      expect(modeOf(attachment({ file_id: 'agent-file', context: FileContext.agents }))).toBe(
+        'throw',
+      );
+    });
+
+    it('keeps a type the operator routed to a fixed path failing as classic', () => {
+      const routing = routingFor('openAI', {
+        llmDeliveryPolicy: 'automatic',
+        defaultLLMDeliveryPath: { overrides: { [PDF]: 'provider' } },
+      });
+      routing.reading = contextFor({ routing });
+
+      expect(
+        getNativeValidationPolicy(automaticAgent({ deliveryRouting: routing }))(rejectedPdf),
+      ).toBe('throw');
+    });
+
+    it('fails every file outside an automatic reading or without known consumers', () => {
+      const derivingClassic = routingFor('openAI', {});
+      derivingClassic.reading = contextFor({
+        routing: derivingClassic,
+        deriveText: async () => ({ status: 'skipped', reason: 'no_extractor' }),
+      });
+      const agents = [
+        automaticAgent({ deliveryRouting: derivingClassic }),
+        automaticAgent({ deliveryRouting: routingFor('openAI') }),
+        automaticAgent({ fileConsumers: undefined }),
+        undefined,
+      ];
+
+      expect(agents.map((agent) => getNativeValidationPolicy(agent)(rejectedPdf))).toEqual([
+        'throw',
+        'throw',
+        'throw',
+        'throw',
+      ]);
+    });
+
+    it('leaves out only the request attachments when scoped to the request', () => {
+      const replayed = attachment({ file_id: 'replayed-pdf' });
+      const agent = automaticAgent();
+      const requestMode = getNativeValidationPolicy(agent, { requestOnly: true });
+
+      expect(requestMode(rejectedPdf)).toBe('skip');
+      expect(requestMode(replayed)).toBe('throw');
+      expect(getNativeValidationPolicy(agent)(replayed)).toBe('skip');
+    });
+  });
+
+  describe('encodeNativeDocuments', () => {
+    type Encoded = EncodedDocuments<string, string>;
+    const isInvalid = ({ file_id }: TurnReadingFile): boolean =>
+      file_id.startsWith('rejected') || file_id.startsWith('chosen');
+    /** Encodes every file but the rejected and chosen PDFs, which fail validation. */
+    const encoder = () =>
+      jest.fn(async (files: TurnReadingFile[], mode: NativeValidationMode): Promise<Encoded> => {
+        const invalid = files.filter(isInvalid);
+        if (mode === 'throw' && invalid.length > 0) {
+          throw new Error('PDF validation failed');
+        }
+        const valid = files.filter((file) => !isInvalid(file));
+        return {
+          documents: valid.map(({ file_id }) => `block:${file_id}`),
+          files: valid.map(({ file_id }) => file_id),
+          ...(mode === 'skip' && {
+            rejected: invalid.map(({ file_id }) => ({ file_id, reason: 'integrity' as const })),
+          }),
+        };
+      });
+    const callsOf = (encode: ReturnType<typeof encoder>) =>
+      encode.mock.calls.map(([files, mode]) => [files.map(({ file_id }) => file_id), mode]);
+
+    it('encodes a batch that shares one mode in a single call', async () => {
+      const encode = encoder();
+      const fits = attachment({ file_id: 'fits-pdf' });
+
+      const result = await encodeNativeDocuments([rejectedPdf, fits], automaticAgent(), encode);
+
+      expect(callsOf(encode)).toEqual([[['rejected-pdf', 'fits-pdf'], 'skip']]);
+      expect(result).toEqual({
+        documents: ['block:fits-pdf'],
+        files: ['fits-pdf'],
+        rejected: [{ file_id: 'rejected-pdf', reason: 'integrity' }],
+      });
+    });
+
+    it('still fails the turn on a classic record that fails beside an automatic one', async () => {
+      const encode = encoder();
+
+      await expect(
+        encodeNativeDocuments([rejectedPdf, chosenPdf], automaticAgent(), encode),
+      ).rejects.toThrow('PDF validation failed');
+      expect(callsOf(encode)).toEqual([
+        [['rejected-pdf'], 'skip'],
+        [['chosen-pdf'], 'throw'],
+      ]);
+    });
+
+    it('merges a split encode and lists only the files it left out', async () => {
+      const encode = encoder();
+
+      const result = await encodeNativeDocuments(
+        [rejectedPdf, unmarkedPdf],
+        automaticAgent(),
+        encode,
+      );
+
+      expect(result).toEqual({
+        documents: ['block:unmarked-pdf'],
+        files: ['unmarked-pdf'],
+        rejected: [{ file_id: 'rejected-pdf', reason: 'integrity' }],
+      });
+    });
+
+    it('encodes in throw mode under classic routing', async () => {
+      const encode = encoder();
+
+      await expect(
+        encodeNativeDocuments([rejectedPdf], { deliveryRouting: routingFor('openAI', {}) }, encode),
+      ).rejects.toThrow('PDF validation failed');
+      expect(callsOf(encode)).toEqual([[['rejected-pdf'], 'throw']]);
+    });
+  });
+
+  describe('recordNativeRejections', () => {
+    it('records the rejections on each agent carrying the payload, once per reading', () => {
+      const primary = automaticAgent();
+      const handoff = automaticAgent({ id: 'agent-2' });
+      const sharing = { ...primary, id: 'agent-3' };
+      const debugSpy = jest.spyOn(logger, 'debug').mockImplementation(() => logger);
+
+      recordNativeRejections(
+        [primary, handoff, sharing, undefined],
+        [{ file_id: rejectedPdf.file_id, reason: 'capacity' }],
+      );
+
+      expect(
+        [primary, handoff].map((agent) => {
+          const context = getTurnReadingContext(agent.deliveryRouting);
+          return [context?.judge(rejectedPdf).rejected, context?.stats().rejected];
+        }),
+      ).toEqual([
+        ['capacity', 1],
+        ['capacity', 1],
+      ]);
+      expect(debugSpy.mock.calls.map(([line]) => line)).toEqual([
+        '[nativeDelivery] agent=agent-1 file_id=rejected-pdf provider=openAI rejected=capacity mode=skip next=search',
+        '[nativeDelivery] agent=agent-2 file_id=rejected-pdf provider=openAI rejected=capacity mode=skip next=search',
+      ]);
+      debugSpy.mockRestore();
+    });
+
+    it('ignores rejections without a reading context or without rejections', () => {
+      const classic = automaticAgent({ deliveryRouting: routingFor('openAI') });
+      expect(() =>
+        recordNativeRejections([classic], [{ file_id: rejectedPdf.file_id, reason: 'integrity' }]),
+      ).not.toThrow();
+      const agent = automaticAgent();
+
+      recordNativeRejections([agent], undefined);
+      recordNativeRejections([agent], []);
+
+      expect(getTurnReadingContext(agent.deliveryRouting)?.stats().rejected).toBe(0);
+    });
   });
 });
 

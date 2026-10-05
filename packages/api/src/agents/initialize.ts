@@ -42,18 +42,19 @@ import type {
   TLoadCodeApiKey,
 } from './resources';
 import type {
+  FileTextDeriver,
+  PrimedSearchFile,
+  TurnReadingContext,
+  DirectContentAllocation,
+  TextDerivationPersister,
+} from '~/files/reading';
+import type {
   ResolvedManualSkill,
   ResolvedAlwaysApplySkill,
   ResolvedSkillCatalog,
   TListSkillsByAccess,
   TGetSkillByName,
 } from './skills';
-import type {
-  FileTextDeriver,
-  TurnReadingContext,
-  DirectContentAllocation,
-  TextDerivationPersister,
-} from '~/files/reading';
 import type {
   ServerRequest,
   RequestBody,
@@ -128,6 +129,12 @@ import {
   resolveAttachedWorkspaceCommandTimeoutDefault,
 } from '~/code/command';
 import {
+  logTurnReading,
+  settleTurnFiles,
+  buildTurnReadingContext,
+  prepareAgentFileContext,
+} from '~/files/reading';
+import {
   applyTurnDelivery,
   toClassicInspectionView,
   resolveTurnDeliveryRouting,
@@ -142,7 +149,6 @@ import {
 } from './errors';
 import { assertChatProjectInstructions, ChatProjectResourcesChangedError } from '../projects/turn';
 import { extractAgentContent, extractSkillContent } from '../protection/adapters/submissions';
-import { buildTurnReadingContext, logTurnReading, settleTurnFiles } from '~/files/reading';
 import { createConfiguredContentInspector, inspectContent } from '../protection/runtime';
 import { assertModelBoundContent } from '../middleware/modelBoundContent';
 import { resolveAttachedWorkspaceReadFileLines } from '~/code/workspace';
@@ -151,7 +157,6 @@ import { isImplicitStatefulCodeRouteAvailable } from '../code/config';
 import { PARTIAL_RESOLVED_CONVERSATION } from './conversationSymbols';
 import { registerMemoryTools, memoryToolUsageGuard } from './memory';
 import { applyIntentLabels, sanitizeIntentLabels } from './intent';
-import { prepareQueuedCodeFileContext } from '~/files/code/queued';
 import { ContentFilterError } from '../middleware/contentFilter';
 import { resolveToolRoleGrants } from '~/tools/rolePermissions';
 import { createRequestAgentExecutionContext } from './runtime';
@@ -979,6 +984,8 @@ export type InitializedAgent = Agent & {
    * call #1 the sandbox can't see the files at all.
    */
   primedCodeFiles?: import('@librechat/agents').CodeEnvFile[];
+  /** Files the File Search advert listed on this turn, as the loader primed them. */
+  primedSearchFileIds?: string[];
   /**
    * Resolved token/pricing config for this agent's endpoint (admin static
    * `tokenConfig` and/or fetched custom-endpoint config). Surfaced from the
@@ -1076,6 +1083,8 @@ export interface InitializeAgentParams {
      * artifacts don't reach the sandbox.
      */
     primedCodeFiles?: import('@librechat/agents').CodeEnvFile[];
+    /** Files the loader listed in the File Search advert (`tool_resources.file_search`). */
+    primedSearchFiles?: PrimedSearchFile[];
     /** Live workspace binding resolved by the execution-side loader. */
     codeExecutionContext?: CodeExecutionContext;
     repositoryInstructionSource?: RepositoryInstructionSource;
@@ -2319,6 +2328,7 @@ export async function initializeAgent(
     oauthActionToolNames,
     tools: structuredTools,
     primedCodeFiles,
+    primedSearchFiles,
     codeExecutionContext: loadedCodeExecutionContext,
     repositoryInstructionSource,
   } = loadToolsResult ?? {
@@ -2335,6 +2345,7 @@ export async function initializeAgent(
     actionsEnabled: undefined,
     oauthActionToolNames: undefined,
     primedCodeFiles: undefined,
+    primedSearchFiles: undefined,
     codeExecutionContext: undefined,
     repositoryInstructionSource: undefined,
   };
@@ -2939,10 +2950,13 @@ export async function initializeAgent(
         ? maxContextTokens
         : Math.max(1024, Math.round(baseContextTokens * (1 - DEFAULT_RESERVE_RATIO))),
     primedCodeFiles,
+    primedSearchFileIds: primedSearchFiles?.map((file) => file.file_id),
     endpointTokenConfig: options.endpointTokenConfig,
   };
 
-  prepareQueuedCodeFileContext(initializedAgent, [initializedAgent], user?.id);
+  prepareAgentFileContext(initializedAgent, [initializedAgent], user?.id, false, {
+    filters: appConfig?.filters,
+  });
   const queuedFileContext = initializedAgent.dynamicToolContextMap?.queued_code_files;
   if (typeof queuedFileContext === 'string') {
     assertModelBoundContent({

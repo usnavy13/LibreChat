@@ -897,6 +897,47 @@ describe('createProvisionFilesCallback', () => {
     });
   });
 
+  it('embeds a pending search attachment before the search batch proceeds', async () => {
+    const pending = makeFile({
+      file_id: 'manual-pdf',
+      filename: 'manual.pdf',
+      filepath: '/uploads/manual.pdf',
+      type: 'application/pdf',
+      bytes: 3_000_000,
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false },
+    });
+    let finishEmbedding: () => void = () => undefined;
+    const embedding = new Promise<void>((resolve) => {
+      finishEmbedding = resolve;
+    });
+    const vectorImpl = jest.fn(async ({ file }: { file: TFile }) => {
+      await embedding;
+      return { embedded: true, fileUpdate: { file_id: file.file_id, embedded: true } };
+    });
+    const { provisionFiles, agentToolContexts } = buildHarness({
+      contexts: [['agent-a', { provisionState: state([], [pending]) }]],
+      vectorImpl,
+    });
+    let settled = false;
+
+    const batch = provisionFiles(['file_search'], 'agent-a').then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(vectorImpl).toHaveBeenCalledWith(expect.objectContaining({ file: pending }));
+    expect(settled).toBe(false);
+    finishEmbedding();
+    await batch;
+
+    expect(pending.embedded).toBe(true);
+    expect(agentToolContexts.get('agent-a')?.provisionState?.vectorDBFiles).toEqual([]);
+    await provisionFiles(['file_search'], 'agent-a');
+    expect(vectorImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('retries a failed upload on a later tool call instead of replaying the rejection', async () => {
     let attempts = 0;
     const codeImpl = jest.fn(async ({ file }: { file: TFile }) => {

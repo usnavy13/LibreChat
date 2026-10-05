@@ -22,9 +22,9 @@ import type {
   TurnDeliveryRouting,
 } from 'librechat-data-provider';
 import type { FileTextDerivationUpdate } from '@librechat/data-schemas';
+import type { DocumentRejection, NativeValidationMode } from '~/types';
 import type { ContentFilterError } from '~/middleware/contentFilter';
 import type { UninspectableFileError } from '~/protection/files';
-import type { DocumentRejection } from '~/types';
 import { usesAnthropicDocumentCapabilities } from '~/files/encode/document';
 import { getNativeDocumentSizeLimit } from '~/files/validation';
 import { getSafeErrorMetadata } from '~/utils/errors';
@@ -87,6 +87,8 @@ export interface TurnReadingStats {
  */
 export interface TurnReadingContext extends TurnReadingInputs {
   readonly policy: TLLMDeliveryPolicy;
+  /** The provider the document encoder receives for this agent. */
+  readonly provider: string;
   /** The token count of the file's current text, when judging it required a count. */
   knownTokenCount(file: TurnDeliveryFile): number | undefined;
   addOverflow(fileIds: Iterable<string>): void;
@@ -173,6 +175,144 @@ export function getTurnTextOptions(
     knownTokenCount: context.knownTokenCount,
     markTruncation: context.policy === 'automatic',
   };
+}
+
+/** The agent fields that decide how the document encoder treats the files it cannot send. */
+export interface NativeDeliveryAgent {
+  id?: string;
+  deliveryRouting?: TurnDeliveryRouting | null;
+  fileConsumers?: TurnFileConsumers;
+  currentRequestAttachments?: readonly TurnDeliveryFile[];
+}
+
+export interface NativeValidationScope {
+  /**
+   * Leaves out only the request's own attachments. An encoder that runs for history replay or a
+   * steer has no later inventory to tell the model a file was left out, so it fails as classic.
+   */
+  requestOnly?: boolean;
+}
+
+/** What a document encoder returns, as a split encode merges it. */
+export interface EncodedDocuments<D, M> {
+  documents: D[];
+  files?: M[];
+  rejected?: readonly DocumentRejection[];
+}
+
+/**
+ * How the document encoder treats each file it cannot send. Only a file the automatic policy
+ * reads has another reader to move to, so only it is left out instead of failing the turn;
+ * explicit, configured, unmarked and legacy records keep failing exactly as classic.
+ */
+export function getNativeValidationPolicy(
+  agent: NativeDeliveryAgent | null | undefined,
+  { requestOnly = false }: NativeValidationScope = {},
+): (file: TurnDeliveryFile) => NativeValidationMode {
+  const routing = agent?.deliveryRouting ?? undefined;
+  if (getTurnReadingContext(routing)?.policy !== 'automatic' || agent?.fileConsumers == null) {
+    return () => 'throw';
+  }
+  const requestFileIds = requestOnly
+    ? new Set((agent.currentRequestAttachments ?? []).map(({ file_id }) => file_id))
+    : undefined;
+  return (file) =>
+    isAutomaticReadingRecord(routing, file) &&
+    (requestFileIds == null || (file.file_id != null && requestFileIds.has(file.file_id)))
+      ? 'skip'
+      : 'throw';
+}
+
+const mergeEncoded = <D, M>(
+  skipped: EncodedDocuments<D, M>,
+  thrown: EncodedDocuments<D, M>,
+): EncodedDocuments<D, M> => ({
+  documents: [...skipped.documents, ...thrown.documents],
+  files: [...(skipped.files ?? []), ...(thrown.files ?? [])],
+  rejected: [...(skipped.rejected ?? []), ...(thrown.rejected ?? [])],
+});
+
+/**
+ * Encodes documents with each file's own validation mode: files the automatic policy may leave
+ * out are encoded in skip mode, the rest in throw mode, so a classic record still fails the turn.
+ * A batch whose files share one mode is encoded in a single call.
+ */
+export async function encodeNativeDocuments<F extends TurnDeliveryFile, D, M>(
+  files: F[],
+  agent: NativeDeliveryAgent | null | undefined,
+  encode: (
+    files: F[],
+    onValidationFailure: NativeValidationMode,
+  ) => Promise<EncodedDocuments<D, M>>,
+  scope: NativeValidationScope = {},
+): Promise<EncodedDocuments<D, M>> {
+  const validationMode = getNativeValidationPolicy(agent, scope);
+  const skippable = files.filter((file) => validationMode(file) === 'skip');
+  if (skippable.length === 0) {
+    return encode(files, 'throw');
+  }
+  if (skippable.length === files.length) {
+    return encode(files, 'skip');
+  }
+  const skippableSet = new Set<F>(skippable);
+  const [skipped, thrown] = await Promise.all([
+    encode(skippable, 'skip'),
+    encode(
+      files.filter((file) => !skippableSet.has(file)),
+      'throw',
+    ),
+  ]);
+  return mergeEncoded(skipped, thrown);
+}
+
+/** The reader each rejected request file moves to, by file id, for the delivery log. */
+function describeNextReaders(
+  agent: NativeDeliveryAgent,
+  rejected: readonly DocumentRejection[],
+): Map<string, string> {
+  const rejectedIds = new Set(rejected.map(({ file_id }) => file_id));
+  const next = new Map<string, string>();
+  for (const file of agent.currentRequestAttachments ?? []) {
+    if (file.file_id == null || !rejectedIds.has(file.file_id) || next.has(file.file_id)) {
+      continue;
+    }
+    const reading = decideFileReading({
+      routing: agent.deliveryRouting ?? undefined,
+      file,
+      consumers: agent.fileConsumers,
+    });
+    next.set(file.file_id, reading.reader);
+  }
+  return next;
+}
+
+/**
+ * Records the documents the encoder left out on every agent whose messages carry the encoded
+ * payload, so each agent's later decisions and inventory move them on. Each reading context is
+ * recorded once, even when agents share it.
+ */
+export function recordNativeRejections(
+  agents: Iterable<NativeDeliveryAgent | null | undefined>,
+  rejected?: readonly DocumentRejection[],
+): void {
+  if (rejected == null || rejected.length === 0) {
+    return;
+  }
+  const recorded = new Set<TurnReadingContext>();
+  for (const agent of agents) {
+    const context = getTurnReadingContext(agent?.deliveryRouting);
+    if (agent == null || context == null || recorded.has(context)) {
+      continue;
+    }
+    recorded.add(context);
+    context.recordRejections(rejected);
+    const next = describeNextReaders(agent, rejected);
+    for (const { file_id, reason } of rejected) {
+      logger.debug(
+        `[nativeDelivery] agent=${agent.id ?? 'unknown'} file_id=${file_id} provider=${context.provider} rejected=${reason} mode=skip next=${next.get(file_id) ?? 'unknown'}`,
+      );
+    }
+  }
 }
 
 const hasText = (text: TurnDeliveryFile['text']): text is string =>
@@ -407,6 +547,7 @@ function createTurnReadingContext(
   return {
     [TURN_READING]: true,
     policy,
+    provider,
     canDerive: deriveText != null,
     judge,
     knownTokenCount,

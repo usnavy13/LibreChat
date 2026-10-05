@@ -6600,6 +6600,191 @@ describe('AgentClient - titleConvo', () => {
       expect(client.processAttachments).not.toHaveBeenCalled();
     });
 
+    describe('history allocation under the automatic policy', () => {
+      const historicalPdf = {
+        ...makeUploadedFile('history-1', 'one.pdf', 'application/pdf'),
+        bytes: 600_000,
+        context: 'message_attachment',
+        llmDeliveryPath: 'provider',
+        metadata: { destinationChosen: false },
+      };
+      const currentPdf = {
+        ...makeUploadedFile('current-1', 'two.pdf', 'application/pdf'),
+        bytes: 600_000,
+        context: 'message_attachment',
+        llmDeliveryPath: 'provider',
+        metadata: { destinationChosen: false },
+      };
+      const historyMessages = [
+        { messageId: 'msg-1', isCreatedByUser: true, files: [{ file_id: historicalPdf.file_id }] },
+      ];
+
+      const readAutomatically = (endpointConfig) => {
+        const { resolveTurnDeliveryRouting, buildTurnReadingContext } =
+          jest.requireActual('@librechat/api');
+        client.options.resendFiles = true;
+        mockReq.config.fileConfig = { endpoints: { openAI: endpointConfig } };
+        mockAgent.fileConsumers = { executeCode: false, fileSearch: true };
+        mockAgent.deliveryRouting = resolveTurnDeliveryRouting({
+          agent: mockAgent,
+          config: mockReq.config,
+        });
+        mockAgent.deliveryRouting.reading = buildTurnReadingContext({
+          routing: mockAgent.deliveryRouting,
+          provider: EModelEndpoint.openAI,
+          model: 'gpt-4',
+          fileTokenLimit: 1000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+        });
+        client.options.attachments = [currentPdf];
+        require('~/models').getFiles.mockResolvedValue([historicalPdf]);
+        client.addFileContextToMessage = jest.fn();
+        client.processAttachments = jest.fn();
+        return mockAgent.deliveryRouting.reading;
+      };
+
+      it('reroutes a current document that overflows the bytes history already spent', async () => {
+        const reading = readAutomatically({
+          fileLimit: 10,
+          totalSizeLimit: 1,
+          llmDeliveryPolicy: 'automatic',
+        });
+
+        await expect(client.addPreviousAttachments(historyMessages)).resolves.toEqual(
+          expect.any(Array),
+        );
+
+        const [rerouted] = client.options.attachments;
+        expect(rerouted).not.toBe(currentPdf);
+        expect(rerouted).toEqual(
+          expect.objectContaining({ file_id: currentPdf.file_id, llmDeliveryPath: 'none' }),
+        );
+        expect(currentPdf.llmDeliveryPath).toBe('provider');
+        expect(reading.stats().overflow).toBe(1);
+        expect(client.processAttachments).toHaveBeenCalledWith(expect.anything(), [historicalPdf]);
+      });
+
+      it('keeps the request attachments when they fit beside history', async () => {
+        const reading = readAutomatically({ fileLimit: 10, llmDeliveryPolicy: 'automatic' });
+        const requestAttachments = client.options.attachments;
+
+        await client.addPreviousAttachments(historyMessages);
+
+        expect(client.options.attachments).toEqual([currentPdf]);
+        expect(client.options.attachments[0].llmDeliveryPath).toBe('provider');
+        expect(requestAttachments).toEqual([currentPdf]);
+        expect(reading.stats().overflow).toBe(0);
+      });
+
+      it('does not charge replayed history to the current file count', async () => {
+        const reading = readAutomatically({ fileLimit: 1, llmDeliveryPolicy: 'automatic' });
+
+        await client.addPreviousAttachments(historyMessages);
+
+        expect(client.options.attachments).toEqual([currentPdf]);
+        expect(reading.stats().overflow).toBe(0);
+      });
+
+      it('still rejects the same overflow under the classic policy', async () => {
+        readAutomatically({ fileLimit: 10, totalSizeLimit: 1 });
+        const requestAttachments = client.options.attachments;
+
+        await expect(client.addPreviousAttachments(historyMessages)).rejects.toMatchObject({
+          code: 'AGENT_ATTACHMENT_LIMIT_EXCEEDED',
+          limitType: 'bytes',
+        });
+        expect(client.options.attachments).toBe(requestAttachments);
+        expect(client.addFileContextToMessage).not.toHaveBeenCalled();
+        expect(client.processAttachments).not.toHaveBeenCalled();
+      });
+
+      it('holds the shared set to a secondary agent endpoint with a tighter count', async () => {
+        const reading = readAutomatically({ fileLimit: 10, llmDeliveryPolicy: 'automatic' });
+        mockReq.config.fileConfig.endpoints.anthropic = { fileLimit: 1 };
+        const secondPdf = { ...currentPdf, file_id: 'current-2', filename: 'three.pdf' };
+        client.options.attachments = [currentPdf, secondPdf];
+        client.agentConfigs = new Map([
+          ['agent_2', { id: 'agent_2', endpoint: EModelEndpoint.anthropic }],
+        ]);
+
+        await client.addPreviousAttachments([]);
+
+        expect(client.options.attachments.map((file) => file.llmDeliveryPath)).toEqual([
+          'provider',
+          'none',
+        ]);
+        expect(reading.stats().overflow).toBe(1);
+        client.agentConfigs = undefined;
+      });
+
+      describe('without file replay', () => {
+        const retainedHistory = {
+          messageId: 'historical-context',
+          parentMessageId: null,
+          sender: 'User',
+          text: 'Earlier context.',
+          isCreatedByUser: true,
+          fileContext: 'r'.repeat(500),
+        };
+        const latestMessage = {
+          messageId: 'msg-1',
+          parentMessageId: 'historical-context',
+          sender: 'User',
+          text: 'Continue.',
+          isCreatedByUser: true,
+        };
+        const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        const notes = {
+          ...makeUploadedFile('notes', 'notes.docx', DOCX_TYPE),
+          context: 'message_attachment',
+          llmDeliveryPath: 'text',
+          text: 'n'.repeat(600),
+          metadata: { destinationChosen: false },
+        };
+        const buildWithRetainedContext = (endpointConfig) => {
+          const reading = readAutomatically(endpointConfig);
+          client.options.resendFiles = false;
+          mockReq.config.fileConfig.fileContextCharLimit = 1000;
+          client.options.attachments = [notes];
+          client.processAttachments = jest.fn(async (_message, attachments) => attachments);
+          const build = client.buildMessages([retainedHistory, latestMessage], 'msg-1', {});
+          return { reading, build };
+        };
+
+        it('reroutes a current file that overflows the retained text instead of a 413', async () => {
+          const { reading, build } = buildWithRetainedContext({ llmDeliveryPolicy: 'automatic' });
+
+          await expect(build).resolves.toEqual(
+            expect.objectContaining({ prompt: expect.any(Array) }),
+          );
+
+          expect(client.options.attachments).toEqual([
+            expect.objectContaining({ file_id: 'notes', llmDeliveryPath: 'none' }),
+          ]);
+          expect(notes.llmDeliveryPath).toBe('text');
+          expect(reading.stats().overflow).toBe(1);
+        });
+
+        it('still rejects the same overflow under the classic policy', async () => {
+          const { build } = buildWithRetainedContext({});
+
+          await expect(build).rejects.toMatchObject({
+            code: 'AGENT_ATTACHMENT_LIMIT_EXCEEDED',
+            limitType: 'extracted_text',
+          });
+        });
+      });
+    });
+
+    it('lists the primary and handoff agents as the conversation agents', () => {
+      const handoff = { id: 'handoff' };
+      client.agentConfigs = new Map([['handoff', handoff]]);
+
+      expect(client.getConversationAgents()).toEqual([client.options.agent, handoff]);
+      client.agentConfigs = undefined;
+    });
+
     it('rejects combined historical and scoped bytes before history is encoded', async () => {
       mockAgent.endpoint = 'Moonshot';
       client.options.endpointType = EModelEndpoint.custom;

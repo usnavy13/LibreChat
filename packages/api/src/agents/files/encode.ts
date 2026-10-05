@@ -13,7 +13,12 @@ import type {
   TurnFileConsumers,
 } from 'librechat-data-provider';
 import type { BaseMessage } from '@librechat/agents/langchain';
-import type { ServerRequest, StrategyFunctions } from '~/types';
+import type {
+  ServerRequest,
+  StrategyFunctions,
+  DocumentRejection,
+  NativeValidationMode,
+} from '~/types';
 import type { TurnTextOptions } from '~/files/reading';
 import type { TokenCountFn } from '~/utils/text';
 import {
@@ -22,8 +27,14 @@ import {
   assertAgentAttachmentLimits,
   AgentAttachmentPolicyError,
 } from '../attachments';
+import {
+  prepareTurnFiles,
+  renderLeftOutFiles,
+  getTurnTextOptions,
+  encodeNativeDocuments,
+  recordNativeRejections,
+} from '~/files/reading';
 import { assertModelBoundContent } from '~/middleware/modelBoundContent';
-import { getTurnTextOptions, prepareTurnFiles } from '~/files/reading';
 import { filterFilesByEndpointRuntimeConfig } from '~/files/filter';
 import { toClassicInspectionView } from './delivery';
 import { countTokens } from '~/utils/tokenizer';
@@ -50,10 +61,15 @@ export interface RunFileEncodingParams {
   imageDetail?: ImageDetail;
 }
 
-type MediaEncoder<T> = (
+/** The document encoder also learns whether to leave out a file it cannot send. */
+export interface RunFileDocumentEncodingParams extends RunFileEncodingParams {
+  onValidationFailure?: NativeValidationMode;
+}
+
+type MediaEncoder<T, P extends RunFileEncodingParams = RunFileEncodingParams> = (
   req: ServerRequest,
   files: TFile[],
-  params: RunFileEncodingParams,
+  params: P,
   getStrategyFunctions: (source: string) => StrategyFunctions,
 ) => Promise<T>;
 
@@ -62,7 +78,10 @@ export interface RunFileMessageEncoderDeps {
   req: ServerRequest;
   getAgent: (agentId: string) => RunFileEncodingAgent | undefined;
   encodeImages: MediaEncoder<{ image_urls: ContentBlock[] }>;
-  encodeDocuments: MediaEncoder<{ documents: ContentBlock[] }>;
+  encodeDocuments: MediaEncoder<
+    { documents: ContentBlock[]; rejected?: readonly DocumentRejection[] },
+    RunFileDocumentEncodingParams
+  >;
   encodeAudios: MediaEncoder<{ audios: ContentBlock[] }>;
   encodeVideos: MediaEncoder<{ videos: ContentBlock[] }>;
   getStrategyFunctions: (source: string) => StrategyFunctions;
@@ -201,15 +220,27 @@ export function createRunFileMessageEncoder(
       }
     }
 
-    const encodeMedia = <T>(encoder: MediaEncoder<T>, inputs: TFile[], empty: T): Promise<T> =>
+    const encodeMedia = <T, P extends RunFileEncodingParams>(
+      encoder: MediaEncoder<T, P>,
+      inputs: TFile[],
+      empty: T,
+      encoderParams: P,
+    ): Promise<T> =>
       inputs.length > 0
-        ? encoder(deps.req, inputs, params, deps.getStrategyFunctions)
+        ? encoder(deps.req, inputs, encoderParams, deps.getStrategyFunctions)
         : Promise.resolve(empty);
+    const encodeDocuments = (inputs: TFile[], onValidationFailure: NativeValidationMode) =>
+      encodeMedia(
+        deps.encodeDocuments,
+        inputs,
+        { documents: [] },
+        { ...params, onValidationFailure },
+      );
     const [imageResult, documentResult, audioResult, videoResult, text] = await Promise.all([
-      encodeMedia(deps.encodeImages, images, { image_urls: [] }),
-      encodeMedia(deps.encodeDocuments, documents, { documents: [] }),
-      encodeMedia(deps.encodeAudios, audios, { audios: [] }),
-      encodeMedia(deps.encodeVideos, videos, { videos: [] }),
+      encodeMedia(deps.encodeImages, images, { image_urls: [] }, params),
+      encodeNativeDocuments(documents, agent, encodeDocuments),
+      encodeMedia(deps.encodeAudios, audios, { audios: [] }, params),
+      encodeMedia(deps.encodeVideos, videos, { videos: [] }, params),
       textFiles.length > 0
         ? deps.extractText({
             attachments: textFiles,
@@ -219,8 +250,15 @@ export function createRunFileMessageEncoder(
           })
         : Promise.resolve(undefined),
     ]);
+    recordNativeRejections([agent], documentResult.rejected);
+    const rejectedIds = new Set((documentResult.rejected ?? []).map(({ file_id }) => file_id));
+    const leftOut = renderLeftOutFiles(
+      agent,
+      documents.filter((file) => rejectedIds.has(file.file_id)),
+    );
+    const body = [text, leftOut].filter(Boolean).join('\n\n');
     if (
-      !text &&
+      !body &&
       imageResult.image_urls.length === 0 &&
       documentResult.documents.length === 0 &&
       audioResult.audios.length === 0 &&
@@ -231,7 +269,7 @@ export function createRunFileMessageEncoder(
     const formatted = formatMessage({
       message: {
         role: 'user',
-        content: text ?? 'Read-only files shared for this task.',
+        content: body || 'Read-only files shared for this task.',
         image_urls: imageResult.image_urls,
         documents: documentResult.documents,
         audios: audioResult.audios,

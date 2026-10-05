@@ -3,7 +3,7 @@ import type { TurnFileConsumers, TFileConfig, TurnDeliveryRouting } from 'librec
 import type { FileTextDeriver, TurnReadingContext, TurnReadingFile, DerivedText } from './turn';
 import type { DirectContentAllocation } from './settle';
 import { applyTurnDelivery, resolveTurnDeliveryRouting } from '~/agents/files/delivery';
-import { measureModelBoundAttachment } from '~/agents/attachments';
+import { measureAttachment, measureModelBoundAttachment } from '~/agents/attachments';
 import { settleTurnFiles, prepareTurnFiles } from './settle';
 import { buildTurnReadingContext } from './turn';
 
@@ -324,6 +324,40 @@ describe('settleTurnFiles', () => {
       expect(await settle(['chosen', 'a', 'b', 'c'], [history])).toEqual(expected);
       expect(await settle(['a', 'b', 'chosen', 'c'], [history])).toEqual(expected);
       expect(await settle(['a', 'b', 'c', 'chosen'], [history])).toEqual(expected);
+    });
+
+    it('charges committed entries the caller measured beside the committed files', async () => {
+      const history = attachment({ file_id: 'history', bytes: MB });
+      const settle = async (
+        allocation: Pick<
+          DirectContentAllocation<TurnReadingFile>,
+          'committedExtra' | 'committedEntries'
+        >,
+      ) => {
+        const { routing } = setup();
+        const settled = await settleTurnFiles({
+          routing,
+          consumers: searchOnly,
+          files: pdfs,
+          allocation: {
+            requestFileIds: ['a', 'b', 'c'],
+            limits: { count: 3 },
+            measure: measureModelBoundAttachment,
+            ...allocation,
+          },
+        });
+        return pathsById(settled);
+      };
+      const historicalFileIds = new Set(['history']);
+
+      expect(await settle({ committedExtra: [history] })).toEqual({
+        a: 'provider',
+        b: 'provider',
+        c: 'none',
+      });
+      expect(
+        await settle({ committedEntries: [measureAttachment(history, { historicalFileIds })] }),
+      ).toEqual({ a: 'provider', b: 'provider', c: 'provider' });
     });
 
     it('does not charge files left to tools', async () => {
