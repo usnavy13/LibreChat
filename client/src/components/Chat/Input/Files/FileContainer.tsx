@@ -61,9 +61,18 @@ const FileContainer = ({
 }) => {
   const fileType = getFileType(overrideType ?? file.type);
   const subtitleText = typeof subtitle === 'string' ? subtitle : fileType.title;
+  /** A caller's caption may say why a file was not read, which rarely fits one line of a
+   *  fixed-width chip; it wraps as far as it needs rather than losing the reason, and a chip
+   *  that carries one reads left-aligned so the wrapped lines sit under the name instead of
+   *  the button's centered default. The default file-type title keeps its single truncated
+   *  line, so chips without a caption are unchanged. */
+  const hasCaption = typeof subtitle === 'string';
   const subtitleLine =
     subtitle == null || typeof subtitle === 'string' ? (
-      <div className="text-text-secondary truncate" title={subtitleText}>
+      <div
+        className={cn('text-text-secondary', hasCaption ? 'break-words' : 'truncate')}
+        title={subtitleText}
+      >
         {subtitleText}
       </div>
     ) : (
@@ -88,7 +97,7 @@ const FileContainer = ({
     <div className="w-56 p-1.5">
       <div className="flex flex-row items-center gap-2">
         <FilePreview file={file} fileType={fileType} className="relative" />
-        <div className="overflow-hidden">
+        <div className={cn('overflow-hidden', hasCaption && 'text-left')}>
           <div className="truncate font-medium" title={visibleName}>
             {visibleName}
           </div>

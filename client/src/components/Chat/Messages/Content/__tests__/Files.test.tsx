@@ -150,10 +150,11 @@ describe('reading notice', () => {
     expect(screen.queryByRole('button', { name: /photo\.png/ })).not.toBeInTheDocument();
   });
 
-  it('gives the caption the subtitle typography and its full text on hover', () => {
+  it('gives the caption the subtitle typography, room to wrap, and its full text on hover', () => {
     renderFiles([report({ reader: 'search', limitation: 'too_large_direct' })]);
     const caption = screen.getByText('Searchable with File Search (too large to send directly)');
-    expect(caption).toHaveClass('text-text-secondary', 'truncate');
+    expect(caption).toHaveClass('text-text-secondary', 'break-words');
+    expect(caption).not.toHaveClass('truncate');
     expect(caption).toHaveAttribute(
       'title',
       'Searchable with File Search (too large to send directly)',
