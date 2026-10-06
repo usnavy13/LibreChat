@@ -409,42 +409,46 @@ describe('initializeAgent reading under the automatic policy (MongoDB)', () => {
     expect(await injectedText(result.requestAttachments, req)).toBeFalsy();
   });
 
-  it.each([
-    { search: true, reader: 'search' },
-    { search: false, reader: 'unavailable' },
-  ])(
-    'sends the PDFs that fit the context allowance natively and the third to $reader',
-    async ({ search, reader }) => {
-      const fileIds = [
-        await seedPdf('pdf-a', 400 * 1024),
-        await seedPdf('pdf-b', 400 * 1024),
-        await seedPdf('pdf-c', 400 * 1024),
-      ];
+  const threePdfs = async () => [
+    await seedPdf('pdf-a', 400 * 1024),
+    await seedPdf('pdf-b', 400 * 1024),
+    await seedPdf('pdf-c', 400 * 1024),
+  ];
 
-      const { result } = await runTurn({
-        fileIds,
-        policy: 'automatic',
-        tools: search ? [Tools.file_search] : [],
-        loaded: search ? [Tools.file_search] : [],
-        fileConfig: { fileContextSizeLimit: 1 },
-      });
+  it('sends the PDFs that fit the context allowance natively and the third to File Search', async () => {
+    const fileIds = await threePdfs();
 
-      expect(pathsById(result.requestAttachments)).toEqual({
-        'pdf-a': 'provider',
-        'pdf-b': 'provider',
-        'pdf-c': 'none',
-      });
-      expect(readersById(result)).toEqual({
-        'pdf-a': 'provider',
-        'pdf-b': 'provider',
-        'pdf-c': reader,
-      });
-      const context = getTurnReadingContext(result.deliveryRouting);
-      expect(context?.stats().overflow).toBe(1);
-      const queued = result.provisionState?.vectorDBFiles.map((file) => file.file_id) ?? [];
-      expect(queued.includes('pdf-c')).toBe(search);
-    },
-  );
+    const { result } = await runTurn({
+      fileIds,
+      policy: 'automatic',
+      tools: [Tools.file_search],
+      loaded: [Tools.file_search],
+      fileConfig: { fileContextSizeLimit: 1 },
+    });
+
+    expect(pathsById(result.requestAttachments)).toEqual({
+      'pdf-a': 'provider',
+      'pdf-b': 'provider',
+      'pdf-c': 'none',
+    });
+    expect(readersById(result)).toEqual({
+      'pdf-a': 'provider',
+      'pdf-b': 'provider',
+      'pdf-c': 'search',
+    });
+    const context = getTurnReadingContext(result.deliveryRouting);
+    expect(context?.stats().overflow).toBe(1);
+    const queued = result.provisionState?.vectorDBFiles.map((file) => file.file_id) ?? [];
+    expect(queued).toContain('pdf-c');
+  });
+
+  it('fails the turn on the context allowance as classic routing does when no file tool is loaded', async () => {
+    const fileIds = await threePdfs();
+
+    await expect(
+      runTurn({ fileIds, policy: 'automatic', fileConfig: { fileContextSizeLimit: 1 } }),
+    ).rejects.toThrow(attachments.AgentAttachmentLimitError);
+  });
 });
 
 describe('initializeAgent text derivation from stored originals (MongoDB)', () => {

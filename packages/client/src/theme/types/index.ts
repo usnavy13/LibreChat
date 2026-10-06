@@ -33,6 +33,9 @@ export interface IThemeRGB {
   'rgb-ring-primary'?: string;
   'rgb-focus-outline'?: string;
   'rgb-focus-control'?: string;
+  /** The keyboard ring of a row or control inside content (tool rows, attachments, summaries,
+   *  message navigation); `rgb-border-heavy` when a theme omits it. */
+  'rgb-focus-subtle'?: string;
 
   // Header colors
   'rgb-header-primary'?: string;
@@ -72,6 +75,11 @@ export interface IThemeRGB {
   'rgb-surface-chat'?: string;
   'rgb-surface-code'?: string;
   'rgb-surface-code-body'?: string;
+  /** An inline code chip in rendered Markdown. */
+  'rgb-surface-code-inline'?: string;
+  /** The list marker and the blockquote bar in rendered Markdown. */
+  'rgb-prose-bullet'?: string;
+  'rgb-prose-quote-bar'?: string;
   /** The backdrop a QR code is scanned against; keep it light in every mode. */
   'rgb-surface-qr'?: string;
   'rgb-surface-inverted'?: string;
@@ -119,6 +127,18 @@ export interface IThemeRGB {
    *  `rgb-status-error-border` when a theme omits them. */
   'rgb-alert-error-fill'?: string;
   'rgb-alert-error-border'?: string;
+  'rgb-surface-canvas'?: string;
+  'rgb-surface-user-message'?: string;
+  'rgb-surface-card'?: string;
+  'rgb-surface-card-hover'?: string;
+  'rgb-surface-nav-hover'?: string;
+  'rgb-surface-nav-selected'?: string;
+  'rgb-surface-tab-selected'?: string;
+  'rgb-surface-menu'?: string;
+  'rgb-surface-popover'?: string;
+  'rgb-border-menu'?: string;
+  'rgb-surface-composer'?: string;
+  'rgb-surface-search'?: string;
   /** Disabled fill, ink and edge. Painted only under the `fill` disabled style. */
   'rgb-surface-disabled'?: string;
   'rgb-text-disabled'?: string;
@@ -253,6 +273,7 @@ export interface IThemeVariables {
   '--ring-primary': string;
   '--focus-outline': string;
   '--focus-control': string;
+  '--focus-subtle': string;
   '--header-primary': string;
   '--header-hover': string;
   '--header-button-hover': string;
@@ -283,6 +304,9 @@ export interface IThemeVariables {
   '--surface-chat': string;
   '--surface-code': string;
   '--surface-code-body': string;
+  '--surface-code-inline': string;
+  '--prose-bullet': string;
+  '--prose-quote-bar': string;
   '--surface-qr': string;
   '--surface-inverted': string;
   '--surface-inverted-hover': string;
@@ -312,6 +336,18 @@ export interface IThemeVariables {
   '--text-tooltip': string;
   '--alert-error-fill': string;
   '--alert-error-border': string;
+  '--surface-canvas': string;
+  '--surface-user-message': string;
+  '--surface-card': string;
+  '--surface-card-hover': string;
+  '--surface-nav-hover': string;
+  '--surface-nav-selected': string;
+  '--surface-tab-selected': string;
+  '--surface-menu': string;
+  '--surface-popover': string;
+  '--border-menu': string;
+  '--surface-composer': string;
+  '--surface-search': string;
   '--surface-disabled': string;
   '--text-disabled': string;
   '--border-disabled': string;
@@ -400,6 +436,7 @@ export interface IThemeColors {
   'ring-primary'?: string;
   'focus-outline'?: string;
   'focus-control'?: string;
+  'focus-subtle'?: string;
   'header-primary'?: string;
   'header-hover'?: string;
   'header-button-hover'?: string;
@@ -430,6 +467,9 @@ export interface IThemeColors {
   'surface-chat'?: string;
   'surface-code'?: string;
   'surface-code-body'?: string;
+  'surface-code-inline'?: string;
+  'prose-bullet'?: string;
+  'prose-quote-bar'?: string;
   'surface-qr'?: string;
   'surface-inverted'?: string;
   'surface-inverted-hover'?: string;
@@ -455,6 +495,18 @@ export interface IThemeColors {
   'text-tooltip'?: string;
   'alert-error-fill'?: string;
   'alert-error-border'?: string;
+  'surface-canvas'?: string;
+  'surface-user-message'?: string;
+  'surface-card'?: string;
+  'surface-card-hover'?: string;
+  'surface-nav-hover'?: string;
+  'surface-nav-selected'?: string;
+  'surface-tab-selected'?: string;
+  'surface-menu'?: string;
+  'surface-popover'?: string;
+  'border-menu'?: string;
+  'surface-composer'?: string;
+  'surface-search'?: string;
   'surface-disabled'?: string;
   'text-disabled'?: string;
   'border-disabled'?: string;
@@ -532,6 +584,15 @@ export interface IThemeAppearance {
   /** The corners of a menu panel (`.popover-ui`), a tooltip and a tab trigger, apart from the
    *  control and surface radii; their defaults are the literals those primitives drew. */
   menuRadius: string;
+  /** The corners of the composer's popovers (attach, palette, reasoning), the model selector's
+   *  panel, and the composer's send and mic buttons; their defaults are the literals those
+   *  surfaces drew, so a theme can bring them in line with `menuRadius` without touching the
+   *  control or surface radii. */
+  popoverRadius: string;
+  menuPanelRadius: string;
+  composerActionRadius: string;
+  /** The weight of an inline code chip in rendered Markdown. */
+  inlineCodeWeight: string;
   tooltipRadius: string;
   /** A tooltip's padding and the size of its text, apart from the control spacing and the type
    *  scale; their defaults are the literals the tooltip drew. */
@@ -654,6 +715,20 @@ export interface IThemeAppearance {
   tooltipShadow: string;
   motionFast: string;
   motionNormal: string;
+  /**
+   * The share of `border-light` that `border-chrome` (the outline of an icon button, pill, chip
+   * or avatar ring that sits on the shell) and `border-inset` (a hairline inside a surface that
+   * is already stroked) paint. 1 keeps them as `border-light`; 0 draws none, with the 1px box
+   * unchanged so layout and focus geometry stay put.
+   */
+  chromeBorderAlpha: string;
+  insetBorderAlpha: string;
+  /**
+   * How a `destructive` Button is painted. `fill` is the solid destructive surface with its
+   * on-status ink; `soft` is a tint of that surface under the destructive ink, with the hover
+   * and pressed tints a step stronger.
+   */
+  destructiveStyle: 'fill' | 'soft';
 }
 
 export interface ThemeModeDefinition {

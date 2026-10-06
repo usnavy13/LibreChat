@@ -59,8 +59,6 @@ const {
   applyForcedTemporaryRequest,
   persistForcedTemporaryMetadata,
   announceReply,
-  buildResumedUserMessageFiles,
-  persistResumedReadingNotices,
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const { decryptMetadata } = require('~/server/services/ActionService');
@@ -71,7 +69,6 @@ const {
 } = require('~/server/services/MCPRequestContext');
 const {
   saveMessage,
-  updateMessage,
   getConvo,
   getChatProject,
   addConvoToolApprovalAllows,
@@ -567,23 +564,6 @@ async function finalizeResumedTurn({
   }
   let terminalPublicationStarted = false;
   try {
-    req.body.files = await persistResumedReadingNotices(
-      {
-        userId,
-        messageId: parentMessageId,
-        requestFiles: req.body.files,
-        agent: client?.options?.agent,
-      },
-      { updateMessage },
-    );
-  } catch (noticeError) {
-    /* The notice only describes how the files were read; the completed response still counts. */
-    logger.warn(
-      `[ResumeAgentController] Could not update reading notices for ${parentMessageId}; finalizing without them`,
-      getSafeErrorMetadata(noticeError),
-    );
-  }
-  try {
     const savedResponseMessage = await saveMessage(
       {
         userId,
@@ -727,17 +707,10 @@ async function finalizeResumedTurn({
             conversationId,
             isCreatedByUser: true,
             // job.metadata.userMessage is persisted without files; carry the restored
-            // uploads (seeded onto req.body.files before reconstruction) with their reading
-            // notices so the final SSE doesn't blank the user bubble's attachments or
-            // captions — matching the normal path.
+            // uploads (seeded onto req.body.files before reconstruction) so the final SSE
+            // doesn't blank the user bubble's attachments — matching the normal path.
             ...(Array.isArray(req.body?.files) && req.body.files.length > 0
-              ? {
-                  files: buildResumedUserMessageFiles(
-                    req.body.files,
-                    client?.options?.attachments,
-                    client?.options?.agent,
-                  ),
-                }
+              ? { files: req.body.files }
               : {}),
           })
         : null,
@@ -2113,15 +2086,6 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
         );
         if (ownsPausePersistence) {
           try {
-            req.body.files = await persistResumedReadingNotices(
-              {
-                userId,
-                messageId: client.parentMessageId,
-                requestFiles: req.body.files,
-                agent: client.options?.agent,
-              },
-              { updateMessage },
-            );
             // Persist this segment's content + artifacts before the fresh client (next
             // resume) drops them, so an expiring re-pause doesn't lose them; finalize later
             // overwrites content and merges attachments onto the saved message. A failed
@@ -2272,19 +2236,8 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
         let errorFinalized = false;
         try {
           errorFinalized =
-            (await GenerationJobManager.completeJob(streamId, errorMessage, job.createdAt, {
-              beforeErrorPublication: async () => {
-                req.body.files = await persistResumedReadingNotices(
-                  {
-                    userId,
-                    messageId: client?.parentMessageId,
-                    requestFiles: req.body.files,
-                    agent: client?.options?.agent,
-                  },
-                  { updateMessage },
-                );
-              },
-            })) === true;
+            (await GenerationJobManager.completeJob(streamId, errorMessage, job.createdAt)) ===
+            true;
         } catch (completeErr) {
           logger.error(
             '[ResumeAgentController] Failed to finalize failed resume',

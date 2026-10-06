@@ -1,5 +1,10 @@
 import { EModelEndpoint } from 'librechat-data-provider';
-import type { TFile, DirectContentEntry, DirectContentLimits } from 'librechat-data-provider';
+import type {
+  TFile,
+  DirectContentEntry,
+  DirectContentLimits,
+  TurnFileConsumers,
+} from 'librechat-data-provider';
 import type { AgentAttachmentEndpointsByAgentId } from '~/agents/attachments';
 import type { TurnReadingAgent } from './diagnostics';
 import type { TurnReadingFile } from './turn';
@@ -24,6 +29,7 @@ interface AttachmentScope {
   req?: Pick<ServerRequest, 'config'>;
   endpoint: string;
   endpointType?: string | null;
+  consumers?: TurnFileConsumers | null;
 }
 
 export interface TurnAttachmentsWithHistoryParams<T extends HistoryAllocationFile> {
@@ -105,7 +111,7 @@ function resolveSharedLimits(
 /** The files the endpoint's runtime policy keeps, as AgentClient selects model-bound files. */
 const selectCompatible = <T extends HistoryAllocationFile>(
   files: T[],
-  { req, endpoint, endpointType }: AttachmentScope,
+  { req, endpoint, endpointType, consumers }: AttachmentScope,
 ): T[] =>
   filterFilesByEndpointRuntimeConfig(req?.config, {
     files,
@@ -113,6 +119,7 @@ const selectCompatible = <T extends HistoryAllocationFile>(
     endpointType,
     skipTotalSizeLimit: true,
     preserveTextSources: true,
+    consumers,
   });
 
 const uncharged = (file: HistoryAllocationFile): DirectContentEntry => ({
@@ -170,7 +177,12 @@ export async function allocateTurnAttachmentsWithHistory<T extends HistoryAlloca
   if (getTurnReadingContext(routing)?.policy !== 'automatic' || current.length === 0) {
     return current;
   }
-  const scope: AttachmentScope = { req, endpoint: endpoint ?? EModelEndpoint.agents, endpointType };
+  const scope: AttachmentScope = {
+    req,
+    endpoint: endpoint ?? EModelEndpoint.agents,
+    endpointType,
+    consumers: agent.fileConsumers,
+  };
   const committedHistory = selectCompatible(historical.filter(isModelBoundAttachmentFile), scope);
   const replayedIds = collectFileIds(committedHistory);
   const compatibleFileIds = collectFileIds(selectCompatible(current, scope));

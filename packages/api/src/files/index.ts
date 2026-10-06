@@ -23,6 +23,7 @@ export * from './rag/context';
 export * from './rag/search';
 export * from './regexEngine';
 export * from './retention';
+export * from './speech';
 export * from './sse';
 export * from './sweep';
 export * from './usage';

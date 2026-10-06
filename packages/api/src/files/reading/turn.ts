@@ -2,6 +2,7 @@ import { Providers } from '@librechat/agents';
 import { logger } from '@librechat/data-schemas';
 import {
   getRoutingMimeType,
+  hasFileToolConsumer,
   EToolResources,
   decideFileReading,
   isBedrockDocumentType,
@@ -254,7 +255,10 @@ export function getNativeValidationPolicy(
   agent: NativeDeliveryAgent | null | undefined,
 ): (file: TurnDeliveryFile) => NativeValidationMode {
   const routing = agent?.deliveryRouting ?? undefined;
-  if (getTurnReadingContext(routing)?.policy !== 'automatic' || agent?.fileConsumers == null) {
+  if (
+    getTurnReadingContext(routing)?.policy !== 'automatic' ||
+    !hasFileToolConsumer(agent?.fileConsumers)
+  ) {
     return () => 'throw';
   }
   return (file) => (isAutomaticReadingRecord(routing, file) ? 'skip' : 'throw');

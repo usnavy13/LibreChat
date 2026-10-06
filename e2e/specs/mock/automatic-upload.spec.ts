@@ -43,7 +43,6 @@ import {
   Q2_ROWS,
   UPLOAD_FIXTURES,
   WORKBOOK_TOTALS,
-  LARGE_CSV_MARKER,
   WORKBOOK_SENTINEL,
 } from '../../setup/uploads';
 import { cleanupAgent, uniqueAgentName } from './agents.helpers';
@@ -59,7 +58,7 @@ import { withMongo } from './db';
  * to three observers:
  *
  * - the file record: `/api/files` for the route and marker, MongoDB for the stored text the API
- *   leaves out, and the user message's files for the reading notice;
+ *   leaves out, and the user message's files for the delivery path the turn used;
  * - the fake model's request log (`e2e/.generated/last-request.json`): the system instructions
  *   with the file inventory, the message text, and the document parts the model was sent;
  * - the fake code and RAG servers: the bytes Run Code received (by sha256) and the files each exec
@@ -80,10 +79,8 @@ const MULTI_TURN_TIMEOUT = 180_000;
 const TURN_TIMEOUT = 60_000;
 const WORKBOOK_RESULT = JSON.stringify({ sheets: ['Q1', 'Q2', 'Notes'], totals: WORKBOOK_TOTALS });
 const CSV_RESULT = JSON.stringify({ rows: Q1_ROWS.length, total: WORKBOOK_TOTALS.Q1 });
-const CODE_UNAVAILABLE_CAPTION =
-  "Not read in this message (spreadsheet analysis isn't available here)";
-const PREPARATION_FAILED_CAPTION =
-  "Not read in this message (couldn't be prepared for this message)";
+/** The error a turn ends with when File Search could not index its attachments. */
+const PREPARATION_FAILED_ERROR = /File Search couldn't prepare the attached files/;
 /** The heading of the model's file inventory, which only the automatic policy writes. */
 const INVENTORY_HEADING = 'how you can read them on this turn';
 
@@ -91,7 +88,7 @@ type StoredText = { file_id: string; text?: string | null };
 type AgentRecord = { id: string };
 type ReadingRecord = Pick<TFile, 'llmDeliveryPath'> &
   Partial<Pick<TextDerivation, 'outcome' | 'extractor' | 'reason'>>;
-type MessageFileReading = Pick<TFile, 'llmDeliveryPath' | 'reading'>;
+type MessageFileReading = Pick<TFile, 'llmDeliveryPath'>;
 
 const sha256 = (content: Buffer): string => createHash('sha256').update(content).digest('hex');
 
@@ -166,7 +163,7 @@ function conversationIdFromPage(page: Page): string {
   return conversationId;
 }
 
-/** The files the latest user message persisted, with any reading notice the server projected. */
+/** The files the latest user message persisted, with the delivery path its turn gave each. */
 async function getLatestUserMessageFiles(page: Page): Promise<Partial<TFile>[]> {
   const token = await getAccessToken(page);
   const conversationId = encodeURIComponent(conversationIdFromPage(page));
@@ -177,7 +174,7 @@ async function getLatestUserMessageFiles(page: Page): Promise<Partial<TFile>[]> 
 function messageFileReading(files: Partial<TFile>[], fileId: string): MessageFileReading {
   const file = files.find((entry) => entry.file_id === fileId);
   expect(file, `the user message should carry ${fileId}`).toBeTruthy();
-  return { llmDeliveryPath: file?.llmDeliveryPath, reading: file?.reading };
+  return { llmDeliveryPath: file?.llmDeliveryPath };
 }
 
 /** Sends a turn, waits for the stored answer, and returns what the model was sent for it. */
@@ -343,12 +340,8 @@ async function attachExisting(page: Page, file: TFile) {
 }
 
 async function expectWorkbookTextPreview(page: Page, file: TFile) {
-  await messagesView(page)
-    .getByRole('button', {
-      name: `${file.filename}: Included as text (spreadsheet analysis isn't available here)`,
-      exact: true,
-    })
-    .click();
+  /* The latest message carrying the workbook; earlier turns in the conversation attached it too. */
+  await messagesView(page).getByRole('button', { name: file.filename, exact: true }).last().click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText(WORKBOOK_SENTINEL);
   await expect(dialog).not.toContainText('[Content_Types].xml');
@@ -533,7 +526,6 @@ test.describe('automatic upload reading', () => {
       );
       expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
         llmDeliveryPath: 'text',
-        reading: { reader: 'text', limitation: 'code_unavailable' },
       });
       await expectWorkbookTextPreview(page, uploaded);
       await reloadConversation(page);
@@ -616,9 +608,9 @@ test.describe('automatic upload reading', () => {
     const reusedRun = await sendTurn(page, `E2E_FILE_SEARCH:${uniqueName('a06-reuse')}`);
     expect(initialRequest(reusedRun).documentFiles).not.toContain(pdf.name);
     expect(inventoryLine(initialRequest(reusedRun), pdf.name)).toContain('file_search');
-    expect(
-      messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-    ).toMatchObject({ reader: 'search' });
+    expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+      llmDeliveryPath: 'none',
+    });
     expect(
       (await getRagEmbedded(page)).filter((entry) => entry.file_id === uploaded.file_id),
     ).toHaveLength(1);
@@ -628,9 +620,9 @@ test.describe('automatic upload reading', () => {
       ),
     ).toBe(true);
     await reloadConversation(page);
-    expect(
-      messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-    ).toMatchObject({ reader: 'search' });
+    expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+      llmDeliveryPath: 'none',
+    });
 
     /* Refused as before this policy existed, on every route: the size check throws inside the
      * upload handler, which answers with its generic error, and no tool receives the bytes. The
@@ -660,7 +652,7 @@ test.describe('automatic upload reading', () => {
     expect(files.map((file) => file.filename)).not.toContain(direct.name);
   });
 
-  test('failed indexing persists an honest notice, and retry reuses the original successfully', async ({
+  test('failed indexing fails the turn with a retryable error, and retry reuses the original', async ({
     page,
   }) => {
     test.setTimeout(MULTI_TURN_TIMEOUT);
@@ -674,14 +666,14 @@ test.describe('automatic upload reading', () => {
     try {
       const response = await sendMessage(page, `E2E_FILE_SEARCH:${uniqueName('search-failure')}`);
       expect(response.ok()).toBe(true);
-      await expect
-        .poll(
-          async () =>
-            messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-          { timeout: TURN_TIMEOUT },
-        )
-        .toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
-      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
+      /* The turn ends with the retryable preparation error rather than a search over an index
+       * that was never built, and the message keeps its attachment. */
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_ERROR)).toBeVisible({
+        timeout: TURN_TIMEOUT,
+      });
+      expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+        llmDeliveryPath: 'none',
+      });
       expect(
         (await getRagQueries(page)).filter((query) => query.file_id === uploaded.file_id),
       ).toHaveLength(0);
@@ -690,7 +682,7 @@ test.describe('automatic upload reading', () => {
       const debug = (await debugResponse.json()) as { failedEmbeds: { file_id: string }[] };
       expect(debug.failedEmbeds.some((entry) => entry.file_id === uploaded.file_id)).toBe(true);
       await reloadConversation(page);
-      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_ERROR)).toBeVisible();
 
       await setEmbeddingFailure(page, uploaded.file_id, false);
       await selectMockEndpoint(page, AUTO_ENDPOINT);
@@ -698,9 +690,9 @@ test.describe('automatic upload reading', () => {
       await selectMockEndpoint(page, AUTO_SMALL_ENDPOINT);
       const recovered = await sendTurn(page, `E2E_FILE_SEARCH:${uniqueName('search-recovery')}`);
       expect(inventoryLine(initialRequest(recovered), pdf.name)).toContain('file_search');
-      expect(
-        messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-      ).toMatchObject({ reader: 'search' });
+      expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+        llmDeliveryPath: 'none',
+      });
       const embeds = (await getRagEmbedded(page)).filter(
         (entry) => entry.file_id === uploaded.file_id,
       );
@@ -711,40 +703,43 @@ test.describe('automatic upload reading', () => {
       expect(queries.length).toBeGreaterThan(0);
       expect(embeds[0].seq).toBeLessThan(Math.min(...queries.map(({ seq }) => seq)));
       await reloadConversation(page);
-      await expect(messagesView(page).getByText(PREPARATION_FAILED_CAPTION)).toBeVisible();
-      expect(
-        messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-      ).toMatchObject({ reader: 'search' });
+      await expect(messagesView(page).getByText(PREPARATION_FAILED_ERROR)).toBeVisible();
+      expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+        llmDeliveryPath: 'none',
+      });
     } finally {
       await setEmbeddingFailure(page, uploaded.file_id, false);
     }
   });
 
-  test('A-10/A-28: a spreadsheet too long to include, with no reader, is reported as not read', async ({
+  test('A-10: with no file tool loaded, a spreadsheet reads as it does under classic routing', async ({
     page,
   }) => {
     await startChat(page, AUTO_ENDPOINT);
 
-    const csv = renamed(UPLOAD_FIXTURES.largeCsv, 'a10-large');
+    const csv = renamed(UPLOAD_FIXTURES.csv, 'a10-sheet');
     const uploaded = await confirmUpload(page, uploadViaUnifiedButton(page, csv));
+    await expectDeferredRecord(page, uploaded.file_id);
 
+    /* Neither Run Code nor File Search is loaded, so the automatic policy stands aside: the
+     * text is derived from the stored original and sent the way classic routing sends extracted
+     * text, under the same limits, and no inventory tells the model anything about the file. */
     const run = await sendTurn(page, replyPrompt(uniqueName('a10')));
     const request = initialRequest(run);
-    const line = inventoryLine(request, csv.name);
-    expect(line).toContain('cannot be read on this turn');
-    expect(line).toContain('do not claim to have read it');
-    expect(line).not.toContain('Run Code can');
-    expect(request.promptText).not.toContain(LARGE_CSV_MARKER);
+    expect(request.promptText).toContain(`${Q1_ROWS[0][0]},${Q1_ROWS[0][1]}`);
+    expect(request.systemText).not.toContain(INVENTORY_HEADING);
+    expect(inventoryLine(request, csv.name)).toBe('');
+    expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+      llmDeliveryPath: 'text',
+    });
+    await expect
+      .poll(async () => readingRecord(await getFileRecord(page, uploaded.file_id)).outcome, {
+        timeout: 15_000,
+        message: 'the derived text should be saved onto the deferred record',
+      })
+      .toBe('complete');
 
-    const caption = messagesView(page).getByText(CODE_UNAVAILABLE_CAPTION);
-    await expect(caption).toBeVisible({ timeout: 15_000 });
-    expect(
-      messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id).reading,
-    ).toEqual({ reader: 'unavailable', limitation: 'code_unavailable' });
-    await reloadConversation(page);
-    await expect(caption).toBeVisible({ timeout: 15_000 });
-
-    /* Not read is not lost: the record and its stored original are still there. */
+    /* The record and its stored original are untouched by the derivation. */
     const record = await getFileRecord(page, uploaded.file_id);
     expect(sha256(await downloadOriginal(page, record))).toBe(sha256(attachFileBuffer(csv)));
   });
@@ -767,14 +762,20 @@ test.describe('automatic upload reading', () => {
     expect(pickedRecord).toMatchObject({ llmDeliveryPath: 'none', outcome: 'deferred' });
     expect(readingRecord(await getFileRecord(page, dropped.file_id))).toEqual(pickedRecord);
 
-    await sendMessageAndWaitForCompletion(page, replyPrompt(uniqueName('a26-first')));
+    const firstRun = await sendTurn(page, replyPrompt(uniqueName('a26-first')));
+    for (const name of [picked.filename, dropped.filename]) {
+      expect(inventoryLine(initialRequest(firstRun), name)).toContain('read it with Run Code');
+    }
     const firstFiles = await getLatestUserMessageFiles(page);
     const pickedReading = messageFileReading(firstFiles, picked.file_id);
-    expect(pickedReading.reading).toEqual({ reader: 'code' });
+    expect(pickedReading).toEqual({ llmDeliveryPath: 'none' });
     expect(messageFileReading(firstFiles, dropped.file_id)).toEqual(pickedReading);
 
     await attachExisting(page, picked);
-    await sendMessageAndWaitForCompletion(page, replyPrompt(uniqueName('a26-existing')));
+    const existingRun = await sendTurn(page, replyPrompt(uniqueName('a26-existing')));
+    expect(inventoryLine(initialRequest(existingRun), picked.filename)).toContain(
+      'read it with Run Code',
+    );
     const existingFiles = await getLatestUserMessageFiles(page);
     expect(messageFileReading(existingFiles, picked.file_id)).toEqual(pickedReading);
     expect(readingRecord(await getFileRecord(page, picked.file_id))).toEqual(pickedRecord);
@@ -803,14 +804,17 @@ test.describe('automatic upload reading', () => {
     expect(pickedRecord).toMatchObject({ llmDeliveryPath: 'none', outcome: 'deferred' });
     expect(readingRecord(await getFileRecord(page, pasted.file_id))).toEqual(pickedRecord);
 
-    await sendMessageAndWaitForCompletion(page, replyPrompt(uniqueName('a26-paste-turn')));
+    const run = await sendTurn(page, replyPrompt(uniqueName('a26-paste-turn')));
+    for (const name of [picked.filename, pasted.filename]) {
+      expect(inventoryLine(initialRequest(run), name)).toContain('read it with Run Code');
+    }
     const files = await getLatestUserMessageFiles(page);
     const pickedReading = messageFileReading(files, picked.file_id);
-    expect(pickedReading.reading).toEqual({ reader: 'code' });
+    expect(pickedReading).toEqual({ llmDeliveryPath: 'none' });
     expect(messageFileReading(files, pasted.file_id)).toEqual(pickedReading);
   });
 
-  test('A-29: a classic endpoint still extracts at upload and stores no marker, notice or inventory', async ({
+  test('A-29: a classic endpoint still extracts at upload and stores no marker or inventory', async ({
     page,
   }) => {
     test.setTimeout(MULTI_TURN_TIMEOUT);
@@ -829,22 +833,29 @@ test.describe('automatic upload reading', () => {
     expect(request.promptText).toContain(WORKBOOK_SENTINEL);
     expect(request.systemText).not.toContain(INVENTORY_HEADING);
     expect(inventoryLine(request, workbook.name)).toBe('');
-    const files = await getLatestUserMessageFiles(page);
-    expect(messageFileReading(files, uploaded.file_id).reading).toBeUndefined();
+    expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
+      llmDeliveryPath: 'text',
+    });
     const after = await getFileRecord(page, uploaded.file_id);
     expect(readingRecord(after)).toEqual(readingRecord(record));
     expect(after.metadata?.textDerivation).toBeUndefined();
 
-    /* The positive control: the same workbook under automatic carries a notice, so the absence
-     * above is the policy's doing. */
+    /* The positive control: the same workbook under automatic with Run Code loaded is deferred
+     * and listed in the inventory, so the absence above is the policy's doing. */
     await startChat(page, AUTO_ENDPOINT);
+    /* The composer keeps the toggle from the classic chat above, so enable only when absent. */
+    if (!(await page.getByRole('button', { name: 'Remove Run Code', exact: true }).isVisible())) {
+      await enableCodeInterpreter(page);
+    }
     const control = await confirmUpload(
       page,
       uploadViaUnifiedButton(page, renamed(UPLOAD_FIXTURES.xlsx, 'a29-control')),
     );
-    await sendMessageAndWaitForCompletion(page, replyPrompt(uniqueName('a29-control')));
-    expect(
-      messageFileReading(await getLatestUserMessageFiles(page), control.file_id).reading,
-    ).toBeDefined();
+    await expectDeferredRecord(page, control.file_id);
+    const controlRun = await sendTurn(page, replyPrompt(uniqueName('a29-control')));
+    expect(initialRequest(controlRun).systemText).toContain(INVENTORY_HEADING);
+    expect(inventoryLine(initialRequest(controlRun), control.filename)).toContain(
+      'read it with Run Code',
+    );
   });
 });

@@ -690,43 +690,56 @@ This section records what the branch delivers against section 14, as the accepta
 branch head concluded. **PROVEN** means a test reaches the consumer the row names; **PARTIAL**
 means part of the row is covered, or only by unit tests; **UNCOVERED** means no test proves it.
 
-| ID   | Status    | Evidence and gaps                                                                                |
-| ---- | --------- | ------------------------------------------------------------------------------------------------ |
-| A-01 | PROVEN    | E2E payload, record and code receipt, against the fake code server only                          |
-| A-02 | PROVEN    | E2E for xls, ods, csv and tsv; MIME aliases such as `application/csv` are unit-only              |
-| A-03 | PARTIAL   | Only shows the parser is not called; no workbook that trips the expansion limit is read by code  |
-| A-04 | PARTIAL   | Raw cells proven absent from every model call; no test returns selected rows through tool output |
-| A-05 | PARTIAL   | Provider PDF and code access to the same PDF covered; returning a modified PDF is not exercised  |
-| A-06 | PARTIAL   | The size variant is proven end to end; the page-limit variant is unit-only (no fake Anthropic)   |
-| A-07 | PARTIAL   | Unit-only; no integration or E2E test with File Search off and Run Code on                       |
-| A-08 | PARTIAL   | Unit-only; nothing asserts the text-read original is also listed as code-accessible              |
-| A-09 | PROVEN    | Unit and API payload tests; the search-fallback variant is unit-only                             |
-| A-10 | PROVEN    | E2E payload, stored message file and caption after reload                                        |
-| A-11 | PARTIAL   | Safe preparation failure and resend of the retained original covered; no mid-run reroute         |
-| A-12 | PARTIAL   | Deterministic first-fit allocation proven; agent-scoped context attachments can still return 413 |
-| A-13 | PROVEN    | Pins the existing generic 500 for message, code and search uploads                               |
-| A-14 | PROVEN    | Validator parity and configured/provider limit resolution, unit                                  |
-| A-15 | PROVEN    | E2E payload and code receipts for both files                                                     |
-| A-16 | PROVEN    | E2E across reloads, record unchanged                                                             |
-| A-17 | PROVEN    | E2E payload, stored derivation, reattachment, text preview after reload and original download    |
-| A-18 | PROVEN    | E2E provider switch; the capability-change variant is unit-only                                  |
-| A-19 | PARTIAL   | Reload and later turns covered; an expired sandbox copy is not tested                            |
-| A-20 | PARTIAL   | Unit-only; no test sends two same-name uploads end to end                                        |
-| A-21 | PARTIAL   | Provisioning failure and abort covered; composer cancel and live retry states are not built      |
-| A-22 | PROVEN    | Failed indexing persists an unread notice; retry indexes the same original before querying it    |
-| A-23 | PROVEN    | Unit and API spec, no E2E                                                                        |
-| A-24 | PROVEN    | Contract tests, no E2E                                                                           |
-| A-25 | PROVEN    | Unit only                                                                                        |
-| A-26 | PROVEN    | E2E for palette, drop, attach-existing and paste; the remote picker at client request level only |
-| A-27 | PROVEN    | Unit only                                                                                        |
-| A-28 | PROVEN    | E2E inventory wording, caption live and after reload                                             |
-| A-29 | PARTIAL   | Classic and rollback covered; an older replica reading a deferred record is documented only      |
-| A-30 | PARTIAL   | Missing original and owner/tenant scope covered; revocation between preparation and use is not   |
-| A-31 | UNCOVERED | Only the inventory sentence "Results are excerpts, not the whole document."                      |
-| A-32 | PARTIAL   | Override routing unit-tested; independent code access for an override record is not asserted     |
+| ID   | Status    | Evidence and gaps                                                                                 |
+| ---- | --------- | ------------------------------------------------------------------------------------------------- |
+| A-01 | PROVEN    | E2E payload, record and code receipt, against the fake code server only                           |
+| A-02 | PROVEN    | E2E for xls, ods, csv and tsv; MIME aliases such as `application/csv` are unit-only               |
+| A-03 | PARTIAL   | Only shows the parser is not called; no workbook that trips the expansion limit is read by code   |
+| A-04 | PARTIAL   | Raw cells proven absent from every model call; no test returns selected rows through tool output  |
+| A-05 | PARTIAL   | Provider PDF and code access to the same PDF covered; returning a modified PDF is not exercised   |
+| A-06 | PARTIAL   | The size variant is proven end to end; the page-limit variant is unit-only (no fake Anthropic)    |
+| A-07 | PARTIAL   | Unit-only; no integration or E2E test with File Search off and Run Code on                        |
+| A-08 | PARTIAL   | Unit-only; nothing asserts the text-read original is also listed as code-accessible               |
+| A-09 | PROVEN    | Unit and API payload tests; the search-fallback variant is unit-only                              |
+| A-10 | PROVEN    | E2E: without a file tool the spreadsheet reads as classic text (derived once, truncated)          |
+| A-11 | PARTIAL   | Safe preparation failure and resend of the retained original covered; no mid-run reroute          |
+| A-12 | PARTIAL   | Deterministic first-fit allocation proven; agent-scoped context attachments can still return 413  |
+| A-13 | PROVEN    | Pins the existing generic 500 for message, code and search uploads                                |
+| A-14 | PROVEN    | Validator parity and configured/provider limit resolution, unit                                   |
+| A-15 | PROVEN    | E2E payload and code receipts for both files                                                      |
+| A-16 | PROVEN    | E2E across reloads, record unchanged                                                              |
+| A-17 | PROVEN    | E2E payload, stored derivation, reattachment, text preview after reload and original download     |
+| A-18 | PROVEN    | E2E provider switch; the capability-change variant is unit-only                                   |
+| A-19 | PARTIAL   | Reload and later turns covered; an expired sandbox copy is not tested                             |
+| A-20 | PARTIAL   | Unit-only; no test sends two same-name uploads end to end                                         |
+| A-21 | PARTIAL   | Provisioning failure and abort covered; composer cancel and live retry states are not built       |
+| A-22 | PROVEN    | Failed indexing fails the turn with a retryable error; retry indexes the original before querying |
+| A-23 | PROVEN    | Unit and API spec, no E2E                                                                         |
+| A-24 | PROVEN    | Contract tests, no E2E                                                                            |
+| A-25 | PROVEN    | Unit only                                                                                         |
+| A-26 | PROVEN    | E2E for palette, drop, attach-existing and paste; the remote picker at client request level only  |
+| A-27 | PROVEN    | Unit only                                                                                         |
+| A-28 | PARTIAL   | Inventory wording only; the user-facing limitation was removed by maintainer decision             |
+| A-29 | PARTIAL   | Classic and rollback covered; an older replica reading a deferred record is documented only       |
+| A-30 | PARTIAL   | Missing original and owner/tenant scope covered; revocation between preparation and use is not    |
+| A-31 | UNCOVERED | Only the inventory sentence "Results are excerpts, not the whole document."                       |
+| A-32 | PARTIAL   | Override routing unit-tested; independent code access for an override record is not asserted      |
 
 ### Deliberate interpretations
 
+- The automatic policy decides readers only on a turn that loads a file tool: Run Code or File
+  Search, from the agent's saved tools or the message bar. Without one, every attachment keeps
+  its classic route and limits exactly as under the classic policy (`no_file_tools` in the
+  decision), including truncated text for a long spreadsheet; the native validation mode stays
+  `throw`, no inventory is written, and the endpoint `fileSizeLimit` drops an oversized record
+  as it does today. A spreadsheet deferred at upload is read on such a turn by deriving its text
+  lazily, so the prompt matches classic routing without an upload-time extraction. Maintainer
+  decision, October 6, 2026: a deployment that enables the policy must see no change in
+  conversations that attach no tool.
+- No user-facing reading notices or chip captions (U-03, U-04): the maintainer asked for no
+  visual change, so the per-file reading notice, its persistence on messages and on resumed
+  turns, and the chip caption were removed on October 6, 2026. The model's per-turn inventory
+  remains. The only client change left is the preview fix below.
 - For a message attachment the automatic policy routes, the endpoint `fileSizeLimit` at turn time
   is treated as native delivery capacity, not admission: an oversized file moves to another reader
   instead of being dropped. Upload admission and `serverFileSizeLimit` are unchanged. The
@@ -736,7 +749,6 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   only `serverFileSizeLimit` bounds what those preparations receive.
 - A soft extraction failure becomes hard whenever an inspection policy relies on extracted text:
   text a blocking `extracted_text` policy cannot inspect is refused, never kept unchecked.
-- The `text_only` notice appears only when Run Code was wanted for a record that has no original.
 - A handoff receiver or subagent is told which request files were not sent to it, never that they
   were sent or included.
 
@@ -744,8 +756,8 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
 
 - Composer in-flight cancel (D-17) is not built: removing a file mid-upload still waits for the
   upload to finish.
-- The composer has no live preparing, ready or retry chip states; notices appear on the saved user
-  message only.
+- No user-facing reading or preparation states exist, by maintainer decision; the model's
+  inventory and the server log are the only records of how a file was read.
 - Inherited file-size precedence (X-10): the merged default `fileSizeLimit` of 512 MB takes
   precedence over provider limits, so the native-capacity rule stays inert on the uploading
   endpoint unless an administrator sets an explicit limit.
@@ -756,8 +768,8 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   provisioning work is also evicted so another tool attempt can retry within the same request.
 - A-31: answer quality over File Search excerpts is not evaluated.
 - A-12: agent-scoped context injections are still checked after allocation and can return 413.
-- Search preparation outcomes are scoped to the request and agent. A failed message keeps its
-  unread notice after a later retry succeeds; it does not rewrite the history of that failed turn.
+- Search preparation outcomes are scoped to the request and agent; a turn whose indexing failed
+  ends with a retryable error, and sending again retries from the retained original.
 - Downgrading the server binary after the automatic policy wrote deferred records: set the
   policy back to classic first so no new deferred records are written. That does not repair the
   records already deferred. On the older version those workbooks stay readable only by Run Code,
@@ -780,12 +792,11 @@ means part of the row is covered, or only by unit tests; **UNCOVERED** means no 
   an indexed original does not require embedding it again or sending its full text to the model.
 - Message hydration preserves the delivery path that belongs to that message. A workbook read
   as text previews the extracted worksheets after reload; downloading it still returns the original.
-- Search preparation failure is recorded before saving or publishing an error, including resumed
-  turns. Retry uses the retained original, and a later success preserves the earlier failure notice.
+- A failed search preparation fails the turn with the stable `file_search_preparation_failed`
+  error, including on resumed turns, instead of searching an index that was never built. Retry
+  uses the retained original.
 - Parallel added conversations receive the same text deriver and persister as the primary agent.
   A secondary agent can derive a permitted text fallback without another upload or duplicate work.
-- A resumed turn whose reading-notice update fails still saves and publishes its response; the
-  failed notice write is logged and the saved row keeps its earlier notice.
 - When search priming throws while tools load, the loader reports that it primed nothing, so no
   resource file is advertised or shown as searchable on evidence that never existed.
 - A natively readable type the deployment's text allowlist (`fileConfig.text.supportedMimeTypes`)
@@ -816,3 +827,10 @@ head: the four upload e2e lanes (25 cases), focused Jest in `api`, `packages/api
 `packages/data-schemas`, `packages/data-provider` and `client`, `tsc --noEmit` in the four changed
 workspaces, the static checks against `origin/dev`, and a five-scenario headless browser walkthrough
 whose screenshots accompany the pull request. Lighthouse was not rerun in that pass.
+
+On October 6, 2026 the branch was merged with `dev` at e1dfc1044, the file-tool gate and the
+removal of the reading notices were applied, and the verification was repeated at that head: the
+four upload e2e lanes (25 cases, with A-10 now proving the classic no-tool path), Jest across
+`packages/api` (`src/files` and `src/agents`), `api`, `packages/data-provider` and `client`,
+`tsc --noEmit` in the changed workspaces, the static checks, and a headless browser pass showing the
+file chips unchanged from `dev` and the preview dialog's unavailable state for a code-kept workbook.

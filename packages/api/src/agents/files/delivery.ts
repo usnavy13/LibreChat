@@ -289,6 +289,7 @@ function selectAcceptedFileIds<T extends TurnReadingFile>(
   candidates: PolicyFile[],
   routing: TurnDeliveryRouting,
   agentId: string,
+  consumers: TurnFileConsumers | undefined,
   { appConfig, endpointsByAgentId }: ScopedTurnCandidateParams<T>,
 ): ReadonlySet<string> {
   const accepted = filterFilesByEndpointRuntimeConfig(appConfig, {
@@ -297,6 +298,7 @@ function selectAcceptedFileIds<T extends TurnReadingFile>(
     endpointType: getAgentEntry(endpointsByAgentId, agentId)?.endpointType,
     skipTotalSizeLimit: true,
     preserveTextSources: true,
+    consumers,
   });
   return new Set(accepted.map((file) => file.file_id));
 }
@@ -320,7 +322,13 @@ function selectScopedReaders<T extends TurnReadingFile>(
         consumers: agent.fileConsumers,
         context,
         scopedFileIds: new Set(scoped.map((file) => file.file_id)),
-        acceptedFileIds: selectAcceptedFileIds(candidates, routing, agentId, params),
+        acceptedFileIds: selectAcceptedFileIds(
+          candidates,
+          routing,
+          agentId,
+          agent.fileConsumers,
+          params,
+        ),
       },
     ];
   });

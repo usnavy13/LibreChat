@@ -434,6 +434,15 @@ export interface TurnFileConsumers {
 }
 
 /**
+ * Whether a file tool is loaded for the turn. The automatic policy decides readers only then;
+ * without Run Code or File Search every attachment keeps its classic route, so a deployment
+ * that enables the policy sees no change in conversations that attach no tool.
+ */
+export function hasFileToolConsumer(consumers?: TurnFileConsumers | null): boolean {
+  return consumers?.executeCode === true || consumers?.fileSearch === true;
+}
+
+/**
  * Whether the record shows this file reached a tool's own store: vectors for file search, a
  * sandbox pointer for code execution. Nothing else writes either, so their presence is proof
  * the file was provisioned and their absence proof it was not. The same evidence deferred
@@ -914,6 +923,9 @@ function gateFileReading(
   }
   if (consumers == null) {
     return 'consumers_unknown';
+  }
+  if (!hasFileToolConsumer(consumers)) {
+    return 'no_file_tools';
   }
   if (category === 'media') {
     return 'media_category';

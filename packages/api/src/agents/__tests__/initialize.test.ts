@@ -3374,6 +3374,9 @@ describe('initializeAgent — execute_code capability expansion', () => {
     const primeCall = primeResources.mock.calls[primeResources.mock.calls.length - 1][0];
     expect(primeCall.enabledToolResources.has(EToolResources.execute_code)).toBe(false);
     expect(primeCall.tool_resources).not.toHaveProperty(EToolResources.execute_code);
+    expect(loadTools).toHaveBeenLastCalledWith(
+      expect.objectContaining({ attachedEnvironmentOptOut: true }),
+    );
   });
 
   it('does not disable managed code tools for the without-attached decision', async () => {
@@ -3420,6 +3423,9 @@ describe('initializeAgent — execute_code capability expansion', () => {
     expect(result.codeEnvAvailable).toBe(true);
     expect(result.toolDefinitions?.map(({ name }) => name)).toEqual(
       expect.arrayContaining(['bash_tool', 'read_file']),
+    );
+    expect(loadTools).toHaveBeenLastCalledWith(
+      expect.objectContaining({ attachedEnvironmentOptOut: false }),
     );
   });
 
@@ -6423,20 +6429,37 @@ describe('initializeAgent automatic delivery policy', () => {
   });
 
   it('leaves the text out rather than failing the turn when it no longer fits the allowance', async () => {
+    /* File Search is loaded but nothing was provisioned for it, so the overflow finds no
+     * reader; the policy still leaves the text out instead of failing the turn. */
     const xlsx = classicEraXlsx();
 
     const result = await initializeWith({
       file: xlsx,
       policy: 'automatic',
-      skillTools: [Tools.execute_code],
+      tools: [Tools.file_search],
+      loaded: { toolNames: [Tools.file_search] },
       fileContextCharLimit: 3,
     });
 
+    expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: true });
     expect(result.requestAttachments).toEqual([{ ...xlsx, llmDeliveryPath: 'none' }]);
     expect(getTurnReadingContext(result.deliveryRouting)?.stats()).toMatchObject({
       overflow: 1,
       dropped: 0,
     });
+  });
+
+  it('fails the turn on the text allowance as classic routing does once the loader drops the only file tool', async () => {
+    const xlsx = classicEraXlsx();
+
+    await expect(
+      initializeWith({
+        file: xlsx,
+        policy: 'automatic',
+        skillTools: [Tools.execute_code],
+        fileContextCharLimit: 3,
+      }),
+    ).rejects.toMatchObject({ name: 'AgentAttachmentLimitError' });
   });
 
   it.each([undefined, 'classic' as const])(
@@ -6457,12 +6480,27 @@ describe('initializeAgent automatic delivery policy', () => {
     const result = await initializeWith({
       file: pdf,
       policy: 'automatic',
+      tools: [Tools.file_search],
+      loaded: { toolNames: [Tools.file_search] },
       endpointConfig: { fileSizeLimit: 1 },
     });
 
+    expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: true });
     expect(result.requestAttachments.map((file) => file.file_id)).toEqual([pdf.file_id]);
     expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
     expect(getTurnReadingContext(result.deliveryRouting)?.stats().dropped).toBe(0);
+  });
+
+  it('drops the same oversized PDF as classic routing does when no file tool is loaded', async () => {
+    const result = await initializeWith({
+      file: oversizedPdf(),
+      policy: 'automatic',
+      endpointConfig: { fileSizeLimit: 1 },
+    });
+
+    expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: false });
+    expect(result.requestAttachments).toEqual([]);
+    expect(getTurnReadingContext(result.deliveryRouting)?.stats().dropped).toBe(1);
   });
 
   it('drops the same oversized PDF under classic routing', async () => {

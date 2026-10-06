@@ -153,22 +153,6 @@ describe('buildTree', () => {
     expect(tree?.[0].files?.[0]).toBe(file);
   });
 
-  it("keeps the message's reading notice on the stored record that stands in for its file", () => {
-    const file = { file_id: 'f1', filename: 'hydrated.csv', preview: 'fresh' } as TFile;
-    const reading = { reader: 'unavailable', limitation: 'code_unavailable' } as const;
-    const tree = buildTree({
-      messages: [
-        msg('u1', '00000000-0000-0000-0000-000000000000', {
-          files: [{ file_id: 'f1', filename: 'stub.csv', reading }],
-        }),
-      ],
-      fileMap: { f1: file },
-    });
-
-    expect(tree?.[0].files?.[0]).toEqual({ ...file, reading });
-    expect(file).not.toHaveProperty('reading');
-  });
-
   it('keeps separate code and text delivery paths when the same workbook is reused and restored', () => {
     const stored = {
       file_id: 'workbook',
@@ -176,29 +160,21 @@ describe('buildTree', () => {
       llmDeliveryPath: 'none',
       preview: 'stored-preview',
     } as TFile;
-    const codeFile = {
-      file_id: stored.file_id,
-      llmDeliveryPath: 'none' as const,
-      reading: { reader: 'code' as const },
-    };
-    const textFile = {
-      file_id: stored.file_id,
-      llmDeliveryPath: 'text' as const,
-      reading: { reader: 'text' as const, limitation: 'code_unavailable' as const },
-    };
+    const codeFile = { file_id: stored.file_id, llmDeliveryPath: 'none' as const };
+    const textFile = { file_id: stored.file_id, llmDeliveryPath: 'text' as const };
     const messages = [
       msg('code-turn', '', { files: [codeFile] }),
       msg('text-turn', 'code-turn', { files: [textFile] }),
     ];
     const tree = buildTree({ messages, fileMap: { workbook: stored } });
 
-    expect(tree?.[0].files?.[0]).toEqual({ ...stored, ...codeFile });
+    expect(tree?.[0].files?.[0]).toBe(stored);
     expect(asParent(tree?.[0]).children[0].files?.[0]).toEqual({ ...stored, ...textFile });
 
     const refreshed = { ...stored, llmDeliveryPath: 'text' as const, preview: 'fresh-preview' };
     const restored = buildTree({ messages, fileMap: { workbook: refreshed } });
     expect(restored?.[0].files?.[0]).toEqual({ ...refreshed, ...codeFile });
-    expect(asParent(restored?.[0]).children[0].files?.[0]).toEqual({ ...refreshed, ...textFile });
+    expect(asParent(restored?.[0]).children[0].files?.[0]).toBe(refreshed);
     expect(stored.llmDeliveryPath).toBe('none');
     expect(messages[1].files?.[0]).toBe(textFile);
   });
@@ -258,18 +234,32 @@ describe('buildTree', () => {
 describe('hydrateMessageFile', () => {
   const stored = { file_id: 'file', filename: 'report.pdf', llmDeliveryPath: 'provider' } as TFile;
 
-  it('keeps legacy hydration on the stored record when no reading notice is present', () => {
+  it('returns the stored record when the message copy names no path or the same path', () => {
+    expect(hydrateMessageFile({ file_id: stored.file_id }, { file: stored })).toBe(stored);
     expect(
-      hydrateMessageFile({ file_id: stored.file_id, llmDeliveryPath: 'text' }, { file: stored }),
+      hydrateMessageFile(
+        { file_id: stored.file_id, llmDeliveryPath: 'provider' },
+        { file: stored },
+      ),
     ).toBe(stored);
   });
 
-  it('uses the stored path when an older message has a notice without a delivery path', () => {
-    const reading = { reader: 'search' as const };
-    expect(hydrateMessageFile({ file_id: stored.file_id, reading }, { file: stored })).toEqual({
+  it("carries the message copy's differing delivery path onto the stored record", () => {
+    const copy = {
+      file_id: stored.file_id,
+      filename: 'stub.pdf',
+      llmDeliveryPath: 'text' as const,
+    };
+    expect(hydrateMessageFile(copy, { file: stored })).toEqual({
       ...stored,
-      reading,
+      llmDeliveryPath: 'text',
     });
+    expect(stored.llmDeliveryPath).toBe('provider');
+  });
+
+  it('returns the message copy itself when no stored record backs it', () => {
+    const copy = { file_id: 'missing', llmDeliveryPath: 'text' as const };
+    expect(hydrateMessageFile(copy, { file: stored })).toBe(copy);
   });
 });
 

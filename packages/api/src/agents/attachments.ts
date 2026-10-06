@@ -6,7 +6,11 @@ import {
   mergeFileConfig,
   getEndpointFileConfig,
 } from 'librechat-data-provider';
-import type { DirectContentEntry, DirectContentLimits } from 'librechat-data-provider';
+import type {
+  DirectContentEntry,
+  DirectContentLimits,
+  TurnFileConsumers,
+} from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { TokenCountFn } from '~/utils/text';
 import type { ServerRequest } from '~/types';
@@ -419,6 +423,7 @@ export function assertAgentAttachmentTopology({
   endpointType,
   endpointsByAgentId,
   historicalFileIds,
+  consumers,
 }: {
   sharedAttachments?: IMongoFile[];
   scopedAttachmentsByAgentId?: Map<string, IMongoFile[]>;
@@ -427,6 +432,8 @@ export function assertAgentAttachmentTopology({
   endpointType?: string | null;
   endpointsByAgentId?: AgentAttachmentEndpointsByAgentId;
   historicalFileIds?: ReadonlySet<string>;
+  /** The requesting agent's loaded file tools, which decide whether an oversized record stays. */
+  consumers?: TurnFileConsumers | null;
 }): void {
   const agentIds = new Set([
     ...scopedAttachmentsByAgentId.keys(),
@@ -441,6 +448,7 @@ export function assertAgentAttachmentTopology({
       skipTotalSizeLimit: true,
       preserveTextSources: true,
       bindProviderCopies: true,
+      consumers,
     });
     if (compatibleSharedAttachments.length !== sharedAttachments.length) {
       throw new AgentAttachmentPolicyError();
@@ -741,6 +749,7 @@ export function buildAgentScopedAttachmentMap({
   endpoint,
   endpointType,
   endpointsByAgentId,
+  consumers,
 }: {
   agentIds: string[];
   attachmentsByAgentId: AgentContextAttachmentsByAgentId<IMongoFile>;
@@ -749,6 +758,8 @@ export function buildAgentScopedAttachmentMap({
   endpoint?: string | null;
   endpointType?: string | null;
   endpointsByAgentId?: AgentAttachmentEndpointsByAgentId;
+  /** The requesting agent's loaded file tools, which decide whether an oversized record stays. */
+  consumers?: TurnFileConsumers | null;
 }): Map<string, IMongoFile[]> {
   const entries = Array.from(new Set(agentIds.filter(Boolean))).map((agentId) => {
     const agentEndpoint = getAgentEntry(endpointsByAgentId, agentId);
@@ -765,6 +776,7 @@ export function buildAgentScopedAttachmentMap({
         endpointType: agentEndpoint?.endpointType ?? endpointType,
         skipTotalSizeLimit: true,
         preserveTextSources: true,
+        consumers,
       }),
     ] as const;
   });
@@ -782,6 +794,7 @@ export async function buildAgentScopedContext({
   endpoint,
   endpointType,
   endpointsByAgentId,
+  consumers,
 }: {
   agentIds: string[];
   attachmentsByAgentId: AgentContextAttachmentsByAgentId<IMongoFile>;
@@ -793,6 +806,7 @@ export async function buildAgentScopedContext({
   endpoint?: string | null;
   endpointType?: string | null;
   endpointsByAgentId?: AgentAttachmentEndpointsByAgentId;
+  consumers?: TurnFileConsumers | null;
 }): Promise<Map<string, string>> {
   const attachmentEntries = [
     ...buildAgentScopedAttachmentMap({
@@ -803,6 +817,7 @@ export async function buildAgentScopedContext({
       endpoint,
       endpointType,
       endpointsByAgentId,
+      consumers,
     }),
   ];
   assertAgentAttachmentTopology({
@@ -813,6 +828,7 @@ export async function buildAgentScopedContext({
     endpoint,
     endpointType,
     endpointsByAgentId,
+    consumers,
   });
   const entries = await Promise.all(
     attachmentEntries.map(async ([agentId, attachments]) => {

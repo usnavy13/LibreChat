@@ -721,7 +721,8 @@ describe('agent attachment helpers', () => {
       },
     };
     const req = { body: { fileTokenLimit: 1000 }, config: { fileConfig } } as ServerRequest;
-    const shareWith = (sharedAttachments: IMongoFile[]) =>
+    const searches = { executeCode: false, fileSearch: true };
+    const shareWith = (sharedAttachments: IMongoFile[], consumers = searches) =>
       buildAgentScopedContext({
         agentIds: ['primary', 'secondary'],
         attachmentsByAgentId: new Map(),
@@ -731,10 +732,16 @@ describe('agent attachment helpers', () => {
           ['secondary', { endpoint: 'Moonshot' }],
         ]),
         req,
+        consumers,
       });
 
     await expect(shareWith([shared])).rejects.toBeInstanceOf(AgentAttachmentPolicyError);
     await expect(shareWith([textCopy])).resolves.toBeInstanceOf(Map);
+    /* Without a file tool the automatic policy reads nothing, so the size limit is admission
+     * for the text copy as well, as classic routing applies it. */
+    await expect(
+      shareWith([textCopy], { executeCode: false, fileSearch: false }),
+    ).rejects.toBeInstanceOf(AgentAttachmentPolicyError);
   });
 
   it('does not apply the primary file count limit across disjoint private scopes', async () => {

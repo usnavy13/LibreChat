@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { Providers } from '@librechat/agents';
 import { EModelEndpoint, FileContext, FileSources } from 'librechat-data-provider';
-import type { TFileConfig, TurnDeliveryFile } from 'librechat-data-provider';
+import type { TFileConfig, TurnDeliveryFile, TurnFileConsumers } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { AppConfig } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types';
@@ -1476,15 +1476,43 @@ describe('filterFilesByEndpointRuntimeConfig under the automatic reading policy'
     },
   });
 
-  const filter = (fileConfig: TFileConfig, files: ReadingRecord[]): ReadingRecord[] =>
+  const runsCode: TurnFileConsumers = { executeCode: true, fileSearch: false };
+  const searches: TurnFileConsumers = { executeCode: false, fileSearch: true };
+  const noReader: TurnFileConsumers = { executeCode: false, fileSearch: false };
+
+  /** A file tool is loaded unless a test says otherwise: only then does the policy read at all. */
+  const filter = (
+    fileConfig: TFileConfig,
+    files: ReadingRecord[],
+    consumers: TurnFileConsumers | null | undefined = runsCode,
+  ): ReadingRecord[] =>
     filterFilesByEndpointRuntimeConfig({ config: {}, fileConfig } as AppConfig, {
       files,
       endpoint: EModelEndpoint.openAI,
+      consumers,
     });
 
   it('keeps an oversized eligible record, since its reading judges that size as capacity', () => {
     const eligible = record();
     expect(filter(automatic(), [eligible])).toEqual([eligible]);
+    expect(filter(automatic(), [eligible], searches)).toEqual([eligible]);
+  });
+
+  it.each<[string, TurnFileConsumers | null]>([
+    ['no file tool is loaded', noReader],
+    ['the consumers are null', null],
+  ])('drops the oversized eligible record as classic routing does when %s', (_case, consumers) => {
+    const withinLimit = record({ bytes: MB / 2 });
+    expect(filter(automatic(), [record()], consumers)).toEqual([]);
+    expect(filter(automatic(), [withinLimit], consumers)).toEqual([withinLimit]);
+  });
+
+  it('drops the oversized eligible record when the caller names no consumers', () => {
+    const kept = filterFilesByEndpointRuntimeConfig(
+      { config: {}, fileConfig: automatic() } as AppConfig,
+      { files: [record()], endpoint: EModelEndpoint.openAI },
+    );
+    expect(kept).toEqual([]);
   });
 
   it('keeps an eligible record whatever route it stored', () => {
@@ -1551,6 +1579,7 @@ describe('filterFilesByEndpointRuntimeConfig under the automatic reading policy'
         files: [provider, text],
         endpoint: EModelEndpoint.openAI,
         bindProviderCopies: true,
+        consumers: runsCode,
       },
     );
     expect(bound).toEqual([text]);
