@@ -49,7 +49,7 @@ import { cleanupAgent, uniqueAgentName } from './agents.helpers';
 import { withMongo } from './db';
 
 /**
- * The automatic reading policy end to end (docs/uploads.md §14).
+ * The automatic reading policy end to end.
  *
  * Mock Auto Provider and Mock Auto Small Provider (e2e/config/librechat.e2e.yaml) select
  * `llmDeliveryPolicy: automatic` with no route overrides; Auto Small adds a 1 MB per-file limit.
