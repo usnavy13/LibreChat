@@ -1498,21 +1498,20 @@ describe('filterFilesByEndpointRuntimeConfig under the automatic reading policy'
     expect(filter(automatic(), [eligible], searches)).toEqual([eligible]);
   });
 
-  it.each<[string, TurnFileConsumers | null]>([
-    ['no file tool is loaded', noReader],
-    ['the consumers are null', null],
+  it.each<[string, { consumers?: TurnFileConsumers | null }]>([
+    ['no file tool is loaded', { consumers: noReader }],
+    ['the consumers are null', { consumers: null }],
+    ['the caller names no consumers', {}],
   ])('drops the oversized eligible record as classic routing does when %s', (_case, consumers) => {
+    const classic = (files: ReadingRecord[]) =>
+      filterFilesByEndpointRuntimeConfig({ config: {}, fileConfig: automatic() } as AppConfig, {
+        files,
+        endpoint: EModelEndpoint.openAI,
+        ...consumers,
+      });
     const withinLimit = record({ bytes: MB / 2 });
-    expect(filter(automatic(), [record()], consumers)).toEqual([]);
-    expect(filter(automatic(), [withinLimit], consumers)).toEqual([withinLimit]);
-  });
-
-  it('drops the oversized eligible record when the caller names no consumers', () => {
-    const kept = filterFilesByEndpointRuntimeConfig(
-      { config: {}, fileConfig: automatic() } as AppConfig,
-      { files: [record()], endpoint: EModelEndpoint.openAI },
-    );
-    expect(kept).toEqual([]);
+    expect(classic([record()])).toEqual([]);
+    expect(classic([withinLimit])).toEqual([withinLimit]);
   });
 
   it('keeps an eligible record whatever route it stored', () => {
@@ -1530,38 +1529,38 @@ describe('filterFilesByEndpointRuntimeConfig under the automatic reading policy'
     expect(filter(fileConfig, [eligible])).toEqual([eligible]);
   });
 
-  it('drops the oversized record on a classic endpoint as before', () => {
-    const classic: TFileConfig = { endpoints: { [EModelEndpoint.openAI]: { fileSizeLimit: 1 } } };
-    expect(filter(classic, [record()])).toEqual([]);
-    expect(filter(automatic({ llmDeliveryPolicy: 'classic' }), [record()])).toEqual([]);
-    expect(filter(automatic({ legacyFileUploadUX: true }), [record()])).toEqual([]);
-  });
-
-  it.each<[string, Partial<ReadingRecord>]>([
-    ['an image', { type: 'image/png', filename: 'photo.png' }],
-    ['a persistent agent file', { context: FileContext.agents }],
-    ['an explicit destination', { metadata: { destinationChosen: true } }],
-    ['an unmarked record', { metadata: {} }],
-    ['a legacy record', { llmDeliveryPath: undefined }],
-    ['a text-only record', { source: FileSources.text, text: 'pasted' }],
-  ])('still drops %s over the size limit', (_label, overrides) => {
-    const withinLimit = record({ ...overrides, bytes: MB / 2 });
-    expect(filter(automatic(), [record(overrides)])).toEqual([]);
-    expect(filter(automatic(), [withinLimit])).toEqual([withinLimit]);
-  });
-
-  it('still drops an oversized record whose type has a configured route', () => {
-    const endpointRoute = automatic({
-      defaultLLMDeliveryPath: { overrides: { 'application/pdf': 'provider' } },
-    });
-    const globalRoute: TFileConfig = {
-      ...automatic(),
-      defaultLLMDeliveryPath: { fallback: 'text' },
-    };
-    const withinLimit = record({ bytes: MB / 2 });
-    expect(filter(endpointRoute, [record()])).toEqual([]);
-    expect(filter(globalRoute, [record()])).toEqual([]);
-    expect(filter(globalRoute, [withinLimit])).toEqual([withinLimit]);
+  it.each<[string, { fileConfig?: TFileConfig; file?: Partial<ReadingRecord> }]>([
+    ['an image', { file: { type: 'image/png', filename: 'photo.png' } }],
+    ['a persistent agent file', { file: { context: FileContext.agents } }],
+    ['an explicit destination', { file: { metadata: { destinationChosen: true } } }],
+    ['an unmarked record', { file: { metadata: {} } }],
+    ['a legacy record', { file: { llmDeliveryPath: undefined } }],
+    ['a text-only record', { file: { source: FileSources.text, text: 'pasted' } }],
+    [
+      'a record on a classic endpoint',
+      { fileConfig: { endpoints: { [EModelEndpoint.openAI]: { fileSizeLimit: 1 } } } },
+    ],
+    [
+      'a record on an endpoint set to classic',
+      { fileConfig: automatic({ llmDeliveryPolicy: 'classic' }) },
+    ],
+    ['a record behind the legacy chooser', { fileConfig: automatic({ legacyFileUploadUX: true }) }],
+    [
+      'a type an endpoint route names',
+      {
+        fileConfig: automatic({
+          defaultLLMDeliveryPath: { overrides: { 'application/pdf': 'provider' } },
+        }),
+      },
+    ],
+    [
+      'a type a global route names',
+      { fileConfig: { ...automatic(), defaultLLMDeliveryPath: { fallback: 'text' } } },
+    ],
+  ])('still drops %s over the size limit', (_label, { fileConfig = automatic(), file = {} }) => {
+    const withinLimit = record({ ...file, bytes: MB / 2 });
+    expect(filter(fileConfig, [record(file)])).toEqual([]);
+    expect(filter(fileConfig, [withinLimit])).toEqual([withinLimit]);
   });
 
   it('keeps the MIME allowlist, the disabled switch and the total size limit binding', () => {

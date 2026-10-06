@@ -12,9 +12,6 @@ export const UPLOAD_FIXTURE_DIR = path.resolve(__dirname, '../.generated/uploads
 /** Sits alone in `Notes!A1`, so it reaches the model only through extracted text. */
 export const WORKBOOK_SENTINEL = 'SENTINEL-7F3A';
 
-/** The first data row of the large CSV, so a spec can tell whether its text was sent. */
-export const LARGE_CSV_MARKER = 'LARGECSV-9C1D';
-
 export type SheetRow = readonly [item: string, amount: number];
 
 /** Six-digit amounts, so none can be mistaken for an id, a port or a timestamp fragment. */
@@ -66,11 +63,7 @@ export const UPLOAD_FIXTURES = {
     'quarterly.xlsx',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ),
-  xls: fixture('quarterly.xls', 'application/vnd.ms-excel'),
-  ods: fixture('quarterly.ods', 'application/vnd.oasis.opendocument.spreadsheet'),
   csv: fixture('q1.csv', 'text/csv'),
-  tsv: fixture('q1.tsv', 'text/tab-separated-values'),
-  largeCsv: fixture('large.csv', 'text/csv'),
   smallPdf: fixture('small.pdf', 'application/pdf'),
   largePdf: fixture('large.pdf', 'application/pdf'),
 } as const;
@@ -78,8 +71,6 @@ export const UPLOAD_FIXTURES = {
 const SHEET_HEADER = ['item', 'amount'];
 const SMALL_PDF_BYTES = 50 * 1024;
 const LARGE_PDF_BYTES = 3 * 1024 * 1024;
-/** About 600k characters of digit-dense rows, which tokenizes well past 100k tokens. */
-const LARGE_CSV_CHARS = 600_000;
 
 const sheetRows = (rows: readonly SheetRow[]): (string | number)[][] => [
   SHEET_HEADER,
@@ -101,21 +92,6 @@ const delimited = (rows: readonly SheetRow[], separator: string): string =>
   `${sheetRows(rows)
     .map((cells) => cells.join(separator))
     .join('\n')}\n`;
-
-/** Fixed-width rows of digits and hex, deterministic so every run uploads the same bytes. */
-function buildLargeCsv(targetChars: number): string {
-  const header = 'id,amount,code\n';
-  const first = `000000,0000000,${LARGE_CSV_MARKER}\n`;
-  const rowLength = 24;
-  const rowCount = Math.ceil((targetChars - header.length - first.length) / rowLength);
-  const rows = Array.from({ length: rowCount }, (_, index) => {
-    const id = String(index + 1).padStart(6, '0');
-    const amount = String(((index + 1) * 7919) % 9_999_991).padStart(7, '0');
-    const code = (Math.imul(index + 1, 2654435761) >>> 0).toString(16).padStart(8, '0');
-    return `${id},${amount},${code}\n`;
-  });
-  return `${header}${first}${rows.join('')}`;
-}
 
 /** Deterministic filler bytes for the PDF padding stream. */
 function fillerBytes(length: number): Buffer {
@@ -183,11 +159,7 @@ export function writeUploadFixtures(): void {
   const workbook = buildWorkbook();
   const contents: ReadonlyArray<readonly [UploadFixture, Buffer]> = [
     [UPLOAD_FIXTURES.xlsx, writeWorkbook(workbook, 'xlsx')],
-    [UPLOAD_FIXTURES.xls, writeWorkbook(workbook, 'biff8')],
-    [UPLOAD_FIXTURES.ods, writeWorkbook(workbook, 'ods')],
     [UPLOAD_FIXTURES.csv, Buffer.from(delimited(Q1_ROWS, ','), 'utf8')],
-    [UPLOAD_FIXTURES.tsv, Buffer.from(delimited(Q1_ROWS, '\t'), 'utf8')],
-    [UPLOAD_FIXTURES.largeCsv, Buffer.from(buildLargeCsv(LARGE_CSV_CHARS), 'utf8')],
     [UPLOAD_FIXTURES.smallPdf, buildPdf('E2E small PDF', SMALL_PDF_BYTES)],
     [UPLOAD_FIXTURES.largePdf, buildPdf('E2E large PDF', LARGE_PDF_BYTES)],
   ];

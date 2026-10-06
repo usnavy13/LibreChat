@@ -153,30 +153,26 @@ describe('buildTree', () => {
     expect(tree?.[0].files?.[0]).toBe(file);
   });
 
-  it('keeps separate code and text delivery paths when the same workbook is reused and restored', () => {
-    const stored = {
+  it('restores separate code and text delivery paths when the same workbook is reused', () => {
+    const refreshed = {
       file_id: 'workbook',
       filename: 'sales.xlsx',
-      llmDeliveryPath: 'none',
-      preview: 'stored-preview',
+      llmDeliveryPath: 'text',
+      preview: 'fresh-preview',
     } as TFile;
-    const codeFile = { file_id: stored.file_id, llmDeliveryPath: 'none' as const };
-    const textFile = { file_id: stored.file_id, llmDeliveryPath: 'text' as const };
+    const codeFile = { file_id: refreshed.file_id, llmDeliveryPath: 'none' as const };
+    const textFile = { file_id: refreshed.file_id, llmDeliveryPath: 'text' as const };
     const messages = [
       msg('code-turn', '', { files: [codeFile] }),
       msg('text-turn', 'code-turn', { files: [textFile] }),
     ];
-    const tree = buildTree({ messages, fileMap: { workbook: stored } });
 
-    expect(tree?.[0].files?.[0]).toBe(stored);
-    expect(asParent(tree?.[0]).children[0].files?.[0]).toEqual({ ...stored, ...textFile });
-
-    const refreshed = { ...stored, llmDeliveryPath: 'text' as const, preview: 'fresh-preview' };
     const restored = buildTree({ messages, fileMap: { workbook: refreshed } });
+
     expect(restored?.[0].files?.[0]).toEqual({ ...refreshed, ...codeFile });
     expect(asParent(restored?.[0]).children[0].files?.[0]).toBe(refreshed);
-    expect(stored.llmDeliveryPath).toBe('none');
-    expect(messages[1].files?.[0]).toBe(textFile);
+    expect(refreshed.llmDeliveryPath).toBe('text');
+    expect(messages[0].files?.[0]).toBe(codeFile);
   });
 
   describe('memoization', () => {

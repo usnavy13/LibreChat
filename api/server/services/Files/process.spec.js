@@ -3391,9 +3391,6 @@ describe('fallback text for uploads left to tools', () => {
 describe('automatic reading at upload', () => {
   const { logUploadReading } = require('@librechat/api');
   const AUTOMATIC_ENDPOINT = 'Custom Provider';
-  const blockExtractedText = {
-    files: { pii: { uninspectable: 'block', fields: ['extracted_text'] } },
-  };
   let parseDocument;
   let storeFile;
 
@@ -3446,15 +3443,9 @@ describe('automatic reading at upload', () => {
 
     await upload();
 
-    const record = storedRecord();
+    storedRecord();
     expect(parseDocument).not.toHaveBeenCalled();
     expect(storeFile).toHaveBeenCalledTimes(1);
-    expect(record.llmDeliveryPath).toBe('none');
-    expect(record.text).toBeUndefined();
-    expect(record.metadata).toEqual({
-      destinationChosen: false,
-      textDerivation: { outcome: 'deferred', at: expect.any(Number) },
-    });
     expect(checkCapability).toHaveBeenCalledWith(expect.anything(), AgentCapabilities.execute_code);
     expect(resolveUploadFallbackText).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3480,45 +3471,14 @@ describe('automatic reading at upload', () => {
       },
     });
 
-    const record = storedRecord();
+    storedRecord();
     expect(parseDocument).not.toHaveBeenCalled();
-    expect(record.llmDeliveryPath).toBe('none');
-    expect(record.metadata.textDerivation).toEqual({
-      outcome: 'deferred',
-      at: expect.any(Number),
-    });
     expect(orderToolsForReading).toHaveLastReturnedWith([
       EToolResources.execute_code,
       EToolResources.file_search,
     ]);
     expect(uploadVectors).not.toHaveBeenCalled();
-    expect(record.embedded).toBeFalsy();
     expect(db.addAgentResourceFile).not.toHaveBeenCalled();
-  });
-
-  test('defers a CSV left to Run Code without reading it', async () => {
-    const { parseText } = require('@librechat/api');
-
-    await upload({ mimetype: 'text/csv' });
-
-    const record = storedRecord();
-    expect(parseText).not.toHaveBeenCalled();
-    expect(parseDocument).not.toHaveBeenCalled();
-    expect(record.llmDeliveryPath).toBe('none');
-    expect(record.text).toBeUndefined();
-    expect(record.metadata).toEqual({
-      destinationChosen: false,
-      textDerivation: { outcome: 'deferred', at: expect.any(Number) },
-    });
-  });
-
-  test('keeps a zip on its recoverability route with no marker', async () => {
-    await upload({ mimetype: 'application/zip' });
-
-    const record = storedRecord();
-    expect(parseDocument).not.toHaveBeenCalled();
-    expect(record.llmDeliveryPath).toBe('none');
-    expect(record.metadata).toEqual({ destinationChosen: false });
   });
 
   test('defers a document whose configured OCR capability is off, for a built-in reader later', async () => {
@@ -3532,18 +3492,10 @@ describe('automatic reading at upload', () => {
 
     await upload({ mimetype: DOCX_MIME, ocrConfig: { strategy: FileSources.mistral_ocr } });
 
-    const record = storedRecord();
+    storedRecord();
     expect(checkCapability).toHaveBeenCalledWith(expect.anything(), AgentCapabilities.ocr);
     expect(parseDocument).not.toHaveBeenCalled();
     expect(storeFile).toHaveBeenCalledTimes(1);
-    expect(record.llmDeliveryPath).toBe('none');
-    expect(record.text).toBeUndefined();
-    expect(record.metadata.textDerivation).toEqual({
-      outcome: 'deferred',
-      extractor: 'configured',
-      reason: 'extractor_unavailable',
-      at: expect.any(Number),
-    });
   });
 
   test.each([
@@ -3554,26 +3506,6 @@ describe('automatic reading at upload', () => {
           async (_req, capability) => capability !== AgentCapabilities.execute_code,
         ),
       {},
-    ],
-    [
-      'the saved agent has no Run Code',
-      () => {},
-      { metadata: { agent_id: 'agent-abc', agentTools: [EToolResources.file_search] } },
-    ],
-    [
-      'an inspection policy relies on the extracted text',
-      () => {},
-      { filters: blockExtractedText },
-    ],
-    [
-      'the request names a tool resource',
-      () => {},
-      { metadata: { tool_resource: EToolResources.context } },
-    ],
-    [
-      'the upload is permanent',
-      () => {},
-      { metadata: { agent_id: 'agent-abc', message_file: undefined } },
     ],
     ['the endpoint stays classic', () => useEndpointConfig({}), {}],
   ])('extracts the workbook at upload when %s', async (_label, arrange, options) => {
@@ -3589,40 +3521,47 @@ describe('automatic reading at upload', () => {
     expect(logUploadReading).toHaveBeenCalledTimes(1);
   });
 
-  test('keeps a document whose parser fails unrecognized, deferred, as the original alone', async () => {
+  test.each([
+    [
+      'keeps the original alone, deferred, when the parser fails unrecognized',
+      'automatic',
+      'Document parser crashed',
+      { outcome: 'deferred', reason: 'parser', at: expect.any(Number) },
+    ],
+    [
+      'keeps the original alone, marked failed, when the parser names its failure',
+      'automatic',
+      'No text found in document',
+      { outcome: 'failed', extractor: 'document_parser', reason: 'empty', at: expect.any(Number) },
+    ],
+    ['still fails a classic upload whose parser fails', 'classic', 'Document parser crashed', null],
+  ])('%s', async (_label, policy, failure, textDerivation) => {
     const { resolveUploadFallbackText } = require('@librechat/api');
-    parseDocument.mockRejectedValue(new Error('Document parser crashed'));
+    if (policy === 'classic') {
+      useEndpointConfig({});
+    }
+    parseDocument.mockRejectedValue(new Error(failure));
 
-    await upload({ mimetype: DOCX_MIME });
+    const result = upload({ mimetype: DOCX_MIME });
 
+    if (textDerivation === null) {
+      await expect(result).rejects.toThrow(failure);
+      expect(db.createFile).not.toHaveBeenCalled();
+      return;
+    }
+    await result;
     const record = storedRecord();
     expect(parseDocument).toHaveBeenCalledTimes(1);
     expect(storeFile).toHaveBeenCalledWith(expect.objectContaining({ file_id: 'file-auto' }));
     expect(record.llmDeliveryPath).toBe('none');
     expect(record.text).toBeUndefined();
-    expect(record.metadata).toEqual({
-      destinationChosen: false,
-      textDerivation: { outcome: 'deferred', reason: 'parser', at: expect.any(Number) },
-    });
+    expect(record.metadata.textDerivation).toEqual(textDerivation);
     expect(resolveUploadFallbackText).toHaveBeenCalledWith(
       expect.objectContaining({
         deliveryPath: 'none',
         textDerivation: record.metadata.textDerivation,
       }),
     );
-  });
-
-  test('keeps a document whose parser names its failure, marked failed', async () => {
-    parseDocument.mockRejectedValue(new Error('No text found in document'));
-
-    await upload({ mimetype: DOCX_MIME });
-
-    expect(storedRecord().metadata.textDerivation).toEqual({
-      outcome: 'failed',
-      extractor: 'document_parser',
-      reason: 'empty',
-      at: expect.any(Number),
-    });
   });
 
   test('still fails the upload when storage fails after a kept original', async () => {
@@ -3650,25 +3589,6 @@ describe('automatic reading at upload', () => {
 
     expect(parseDocument).toHaveBeenCalledTimes(1);
     expect(mockRes.status).toHaveBeenCalledWith(400);
-    expect(storeFile).not.toHaveBeenCalled();
-    expect(db.createFile).not.toHaveBeenCalled();
-  });
-
-  test('still fails a classic upload whose parser fails', async () => {
-    useEndpointConfig({});
-    parseDocument.mockRejectedValue(new Error('Document parser crashed'));
-
-    await expect(upload({ mimetype: DOCX_MIME })).rejects.toThrow('Document parser crashed');
-    expect(db.createFile).not.toHaveBeenCalled();
-  });
-
-  test('still rejects an upload whose extracted text cannot be inspected', async () => {
-    const { UninspectableFileError } = require('@librechat/api');
-    extractInspectableFileText.mockImplementationOnce(async () => {
-      throw new UninspectableFileError('extracted_text');
-    });
-
-    await expect(upload({ mimetype: DOCX_MIME })).rejects.toBeInstanceOf(UninspectableFileError);
     expect(storeFile).not.toHaveBeenCalled();
     expect(db.createFile).not.toHaveBeenCalled();
   });

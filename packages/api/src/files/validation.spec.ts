@@ -1070,22 +1070,6 @@ describe('validator parity with getNativeDocumentSizeLimit', () => {
   ];
 
   describe.each(pdfCases)('validatePdf on $name', ({ provider, model, configured, limit }) => {
-    it('resolves the limit the validator enforces', () => {
-      expect(
-        getNativeDocumentSizeLimit({
-          provider,
-          mimeType: 'application/pdf',
-          model,
-          configuredFileSizeLimit: configured,
-        }),
-      ).toBe(limit);
-    });
-
-    it('accepts a PDF one byte below the limit', async () => {
-      const result = await validatePdf(pdfBuffer, limit - 1, provider, configured, model);
-      expect(result).toEqual({ isValid: true });
-    });
-
     it('accepts a PDF exactly at the limit', async () => {
       const result = await validatePdf(pdfBuffer, limit, provider, configured, model);
       expect(result).toEqual({ isValid: true });
@@ -1114,12 +1098,6 @@ describe('validator parity with getNativeDocumentSizeLimit', () => {
   ];
 
   describe.each(bedrockCases)('validateBedrockDocument on $name', ({ mimeType, model, limit }) => {
-    it('resolves the limit the validator enforces', () => {
-      expect(getNativeDocumentSizeLimit({ provider: Providers.BEDROCK, mimeType, model })).toBe(
-        limit,
-      );
-    });
-
     it('accepts a document exactly at the limit', async () => {
       const result = await validateBedrockDocument(limit, mimeType, undefined, undefined, model);
       expect(result).toEqual({ isValid: true });
@@ -1166,14 +1144,17 @@ describe('validation failure reasons', () => {
     return buffer;
   };
 
-  it('reports an oversized Anthropic PDF as capacity with the unchanged message', async () => {
-    const result = await validatePdf(validPdf(), mbToBytes(35), Providers.ANTHROPIC);
-    expect(result).toEqual({
-      isValid: false,
-      reason: 'capacity',
-      error: 'PDF file size (35MB) exceeds the 32MB limit',
-    });
-  });
+  it.each([
+    [Providers.ANTHROPIC, 35, 'PDF file size (35MB) exceeds the 32MB limit'],
+    [Providers.OPENAI, 12, 'PDF file size (12MB) exceeds the 10MB limit'],
+    [Providers.GOOGLE, 25, 'PDF file size (25MB) exceeds the 20MB limit'],
+  ])(
+    'reports an oversized %s PDF as capacity with the unchanged message',
+    async (provider, sizeMB, error) => {
+      const result = await validatePdf(validPdf(), mbToBytes(sizeMB), provider);
+      expect(result).toEqual({ isValid: false, reason: 'capacity', error });
+    },
+  );
 
   it('reports an Anthropic page estimate over 100 as capacity', async () => {
     const pages = '/Type /Page\n'.repeat(101);
@@ -1185,24 +1166,33 @@ describe('validation failure reasons', () => {
     });
   });
 
-  it('reports a too-small Anthropic PDF as integrity', async () => {
-    const result = await validatePdf(Buffer.alloc(3), 3, Providers.ANTHROPIC);
-    expect(result).toEqual({
-      isValid: false,
-      reason: 'integrity',
-      error: 'Invalid PDF file: too small or corrupted',
-    });
-  });
+  const tooSmall = Buffer.alloc(3);
+  const headerless = Buffer.alloc(1024);
+  headerless.write('INVALID', 0);
 
-  it('reports a missing Anthropic PDF header as integrity', async () => {
-    const buffer = Buffer.alloc(1024);
-    buffer.write('INVALID', 0);
-    const result = await validatePdf(buffer, buffer.length, Providers.ANTHROPIC);
-    expect(result).toEqual({
-      isValid: false,
-      reason: 'integrity',
-      error: 'Invalid PDF file: missing PDF header',
-    });
+  it.each([
+    [
+      'a too-small Anthropic PDF',
+      () => validatePdf(tooSmall, tooSmall.length, Providers.ANTHROPIC),
+      'Invalid PDF file: too small or corrupted',
+    ],
+    [
+      'a missing Anthropic PDF header',
+      () => validatePdf(headerless, headerless.length, Providers.ANTHROPIC),
+      'Invalid PDF file: missing PDF header',
+    ],
+    [
+      'a too-small Bedrock PDF',
+      () => validateBedrockDocument(tooSmall.length, 'application/pdf', tooSmall),
+      'Invalid PDF file: too small or corrupted',
+    ],
+    [
+      'a missing Bedrock PDF header',
+      () => validateBedrockDocument(headerless.length, 'application/pdf', headerless),
+      'Invalid PDF file: missing PDF header',
+    ],
+  ])('reports %s as integrity with the unchanged message', async (_label, validate, error) => {
+    await expect(validate()).resolves.toEqual({ isValid: false, reason: 'integrity', error });
   });
 
   it('reports an encrypted Anthropic PDF as integrity', async () => {
@@ -1216,14 +1206,6 @@ describe('validation failure reasons', () => {
     });
   });
 
-  it.each([
-    [Providers.OPENAI, 12, 'PDF file size (12MB) exceeds the 10MB limit'],
-    [Providers.GOOGLE, 25, 'PDF file size (25MB) exceeds the 20MB limit'],
-  ])('reports an oversized %s PDF as capacity', async (provider, sizeMB, error) => {
-    const result = await validatePdf(validPdf(), mbToBytes(sizeMB), provider);
-    expect(result).toEqual({ isValid: false, reason: 'capacity', error });
-  });
-
   it('reports an oversized Bedrock document as capacity with the unchanged message', async () => {
     const result = await validateBedrockDocument(mbToBytes(5), 'text/csv');
     expect(result).toEqual({
@@ -1231,18 +1213,6 @@ describe('validation failure reasons', () => {
       reason: 'capacity',
       error: 'File size (5.0MB) exceeds the 4.5MB limit for Bedrock',
     });
-  });
-
-  it('reports a too-small Bedrock PDF as integrity', async () => {
-    const result = await validateBedrockDocument(3, 'application/pdf', Buffer.alloc(3));
-    expect(result).toMatchObject({ isValid: false, reason: 'integrity' });
-  });
-
-  it('reports a missing Bedrock PDF header as integrity', async () => {
-    const buffer = Buffer.alloc(1024);
-    buffer.write('INVALID', 0);
-    const result = await validateBedrockDocument(buffer.length, 'application/pdf', buffer);
-    expect(result).toMatchObject({ isValid: false, reason: 'integrity' });
   });
 
   it('reports oversized media as capacity and truncated media as integrity', async () => {

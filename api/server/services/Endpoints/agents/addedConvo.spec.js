@@ -120,25 +120,20 @@ describe('processAddedConvo', () => {
     );
   });
 
-  it('shares the request text deriver and persister with the parallel agent', async () => {
-    const deriveText = jest.fn();
-    const persistDerivation = jest.fn();
-    await processAddedConvo(baseParams({ deriveText, persistDerivation }));
+  it.each([
+    ['present', { deriveText: jest.fn(), persistDerivation: jest.fn() }],
+    ['absent', { deriveText: undefined, persistDerivation: undefined }],
+  ])(
+    'shares the request text deriver and persister with the parallel agent as supplied (%s)',
+    async (_label, derivation) => {
+      await processAddedConvo(baseParams(derivation));
 
-    expect(mockInitializeAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ deriveText, persistDerivation }),
-      expect.anything(),
-    );
-  });
-
-  it('leaves derivation dependencies absent for callers that do not supply them', async () => {
-    await processAddedConvo(baseParams());
-
-    expect(mockInitializeAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ deriveText: undefined, persistDerivation: undefined }),
-      expect.anything(),
-    );
-  });
+      expect(mockInitializeAgent).toHaveBeenCalledWith(
+        expect.objectContaining(derivation),
+        expect.anything(),
+      );
+    },
+  );
 
   /** The added convo re-hydrates the same conversation's prior-turn files, so a
    *  denied `FILE_SEARCH` grant has to travel with it — otherwise the parallel

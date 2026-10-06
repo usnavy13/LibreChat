@@ -3750,7 +3750,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       expect(mockGenerationJobManager.publishTerminalClaim).not.toHaveBeenCalled();
     });
 
-    it('finalizes the resumed turn with the restored refs, without file text, once search preparation succeeds', async () => {
+    it('finalizes the resumed turn with the restored refs as they are, without file text, once search preparation succeeds', async () => {
       const { file, refs } = prepareResumedSearchTurn('success');
 
       const response = await post(approveBody());
@@ -3763,44 +3763,6 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       expect(finalEvent.requestMessage.files).toEqual(refs);
       expect(finalEvent.requestMessage.files[0]).not.toHaveProperty('reading');
       expect(JSON.stringify(finalEvent)).not.toContain(file.text);
-    });
-
-    it('carries the job-metadata refs as they are onto the final requestMessage', async () => {
-      const brief = {
-        user: USER_ID,
-        file_id: 'brief',
-        filename: 'brief.pdf',
-        filepath: '/uploads/brief.pdf',
-        type: 'application/pdf',
-        bytes: 2048,
-        source: 'local',
-        text: 'extracted text',
-      };
-      const agent = { id: AGENT_ID, provider: 'openAI', endpoint: 'openAI' };
-      mockInitializeClient.mockResolvedValue({
-        client: makeClient({ options: { attachments: [brief], agent } }),
-        userMCPAuthMap: {},
-      });
-      const refs = [{ file_id: 'brief', filename: 'brief.pdf', type: 'application/pdf' }];
-      mockGenerationJobManager.getJob.mockResolvedValue(
-        makeToolApprovalJob({
-          metadata: {
-            userMessage: {
-              messageId: USER_MSG_ID,
-              parentMessageId: THREAD_PARENT_ID,
-              text: 'x',
-              files: refs,
-            },
-          },
-        }),
-      );
-
-      await post(approveBody());
-      await settled;
-      await flush();
-
-      const [, finalEvent] = mockGenerationJobManager.publishTerminalClaim.mock.calls[0];
-      expect(finalEvent.requestMessage.files).toEqual(refs);
     });
 
     it('persists the response, claims terminal ownership, emits done, finishes, and prunes', async () => {

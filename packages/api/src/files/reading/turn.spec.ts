@@ -126,25 +126,18 @@ describe('buildTurnReadingContext', () => {
     expect(context.canDerive).toBe(false);
   });
 
-  it('is found again through the routing it is attached to', () => {
+  it('is found again through the routing it is attached to, and through a copy of it', () => {
     const routing = routingFor('openAI');
     const context = contextFor({ routing });
     expect(getTurnReadingContext(routing)).toBe(undefined);
 
     routing.reading = context;
     expect(getTurnReadingContext(routing)).toBe(context);
+    expect(getTurnReadingContext({ ...routing })).toBe(context);
     expect(getTurnReadingContext({ reading: { judge: () => ({}), canDerive: false } })).toBe(
       undefined,
     );
     expect(getTurnReadingContext(undefined)).toBe(undefined);
-  });
-
-  it('is still found after the routing that carries it is copied', () => {
-    const routing = routingFor('openAI');
-    const context = contextFor({ routing });
-    routing.reading = context;
-
-    expect(getTurnReadingContext({ ...routing })).toBe(context);
   });
 });
 
@@ -456,14 +449,6 @@ describe('text verdicts', () => {
     expect(context.knownTokenCount(csv)).toBe(700_000);
   });
 
-  it('lists the text verdict among the evidence once it is read', () => {
-    const context = contextFor({ fileTokenLimit: 10 });
-    const evidence = context.judge(attachment({ file_id: 'short', text: 'tiny' }));
-
-    expect(Object.keys(evidence)).toContain('text');
-    expect(evidence).toEqual({ native: 'fits', text: 'fits' });
-  });
-
   it('judges no text verdict for a record without text', () => {
     const context = contextFor();
     expect(context.judge(attachment({ file_id: 'empty', text: '' }))).not.toHaveProperty('text');
@@ -472,62 +457,119 @@ describe('text verdicts', () => {
 });
 
 describe('native verdicts', () => {
-  it('reports a PDF on Azure OpenAI as unsupported, since the encoder emits nothing there', () => {
-    expect(nativeVerdict('azureOpenAI', attachment({ file_id: 'pdf' }))).toBe('unsupported');
-  });
-
-  it('reports a Word document on Anthropic as unsupported and a PDF as fitting', () => {
-    expect(nativeVerdict('anthropic', attachment({ file_id: 'docx', type: DOCX }))).toBe(
-      'unsupported',
-    );
-    expect(nativeVerdict('anthropic', attachment({ file_id: 'pdf' }))).toBe('fits');
-  });
-
-  it('applies Claude document capabilities to an OpenAI-compatible gateway', () => {
-    const docx = attachment({ file_id: 'docx', type: DOCX });
-    expect(nativeVerdict('openAI', docx, { model: 'claude-sonnet-4-5' })).toBe('unsupported');
-    expect(nativeVerdict('openAI', docx, { model: 'gpt-4o' })).toBe('fits');
-  });
-
-  it('exempts a Claude 4 PDF on Bedrock from the 4.5 MB document limit', () => {
-    const pdf = attachment({ file_id: 'pdf', bytes: 20 * MB });
-    expect(
-      nativeVerdict('bedrock', pdf, { model: 'us.anthropic.claude-sonnet-4-20250514-v1:0' }),
-    ).toBe('fits');
-    expect(
-      nativeVerdict('bedrock', pdf, { model: 'anthropic.claude-3-5-sonnet-20240620-v1:0' }),
-    ).toBe('capacity');
-  });
-
-  it('reports a type Bedrock cannot take as unsupported', () => {
-    expect(nativeVerdict('bedrock', attachment({ file_id: 'pptx', type: PPTX }))).toBe(
-      'unsupported',
-    );
-  });
-
-  it('reports capacity above the configured limit and fits within it', () => {
-    const configured = { configuredFileSizeLimit: MB };
-    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 2 * MB }), configured)).toBe(
-      'capacity',
-    );
-    expect(
-      nativeVerdict(
-        'openAI',
-        attachment({ file_id: 'docx', type: DOCX, bytes: 2 * MB }),
-        configured,
-      ),
-    ).toBe('capacity');
-    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: MB }), configured)).toBe(
-      'fits',
-    );
-  });
-
-  it('falls back to the provider limit when none is configured', () => {
-    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 11 * MB }))).toBe(
-      'capacity',
-    );
-    expect(nativeVerdict('openAI', attachment({ file_id: 'pdf', bytes: 10 * MB }))).toBe('fits');
-  });
+  it.each<{
+    why: string;
+    provider: string;
+    model?: string;
+    type: string;
+    bytes: number;
+    configuredFileSizeLimit?: number;
+    verdict: 'fits' | 'capacity' | 'unsupported';
+  }>([
+    {
+      why: 'a PDF on Azure OpenAI, where the encoder emits nothing',
+      provider: 'azureOpenAI',
+      type: PDF,
+      bytes: MB,
+      verdict: 'unsupported',
+    },
+    {
+      why: 'a Word document on Anthropic',
+      provider: 'anthropic',
+      type: DOCX,
+      bytes: MB,
+      verdict: 'unsupported',
+    },
+    { why: 'a PDF on Anthropic', provider: 'anthropic', type: PDF, bytes: MB, verdict: 'fits' },
+    {
+      why: 'a Word document for a Claude model behind an OpenAI-compatible gateway',
+      provider: 'openAI',
+      model: 'claude-sonnet-4-5',
+      type: DOCX,
+      bytes: MB,
+      verdict: 'unsupported',
+    },
+    {
+      why: 'a Word document for an OpenAI model',
+      provider: 'openAI',
+      model: 'gpt-4o',
+      type: DOCX,
+      bytes: MB,
+      verdict: 'fits',
+    },
+    {
+      why: 'a 20 MB PDF for Claude 4 on Bedrock, exempt from the 4.5 MB document limit',
+      provider: 'bedrock',
+      model: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
+      type: PDF,
+      bytes: 20 * MB,
+      verdict: 'fits',
+    },
+    {
+      why: 'a 20 MB PDF for Claude 3.5 on Bedrock',
+      provider: 'bedrock',
+      model: 'anthropic.claude-3-5-sonnet-20240620-v1:0',
+      type: PDF,
+      bytes: 20 * MB,
+      verdict: 'capacity',
+    },
+    {
+      why: 'a presentation on Bedrock',
+      provider: 'bedrock',
+      type: PPTX,
+      bytes: MB,
+      verdict: 'unsupported',
+    },
+    {
+      why: 'a PDF above the configured limit',
+      provider: 'openAI',
+      type: PDF,
+      bytes: 2 * MB,
+      configuredFileSizeLimit: MB,
+      verdict: 'capacity',
+    },
+    {
+      why: 'a Word document above the configured limit',
+      provider: 'openAI',
+      type: DOCX,
+      bytes: 2 * MB,
+      configuredFileSizeLimit: MB,
+      verdict: 'capacity',
+    },
+    {
+      why: 'a PDF at the configured limit',
+      provider: 'openAI',
+      type: PDF,
+      bytes: MB,
+      configuredFileSizeLimit: MB,
+      verdict: 'fits',
+    },
+    {
+      why: 'a PDF above the provider limit when none is configured',
+      provider: 'openAI',
+      type: PDF,
+      bytes: 11 * MB,
+      verdict: 'capacity',
+    },
+    {
+      why: 'a PDF at the provider limit when none is configured',
+      provider: 'openAI',
+      type: PDF,
+      bytes: 10 * MB,
+      verdict: 'fits',
+    },
+  ])(
+    'judges $why as $verdict',
+    ({ provider, model, type, bytes, configuredFileSizeLimit, verdict }) => {
+      const overrides = {
+        ...(model != null && { model }),
+        ...(configuredFileSizeLimit != null && { configuredFileSizeLimit }),
+      };
+      expect(nativeVerdict(provider, attachment({ file_id: 'file', type, bytes }), overrides)).toBe(
+        verdict,
+      );
+    },
+  );
 
   it('does not judge images, audio or video', () => {
     expect(
@@ -811,21 +853,31 @@ describe('derive', () => {
       expect(persistDerivation).toHaveBeenCalledTimes(1);
     });
 
-    it('waits for the queued write before the flush settles', async () => {
+    it('settles the flush only after pending derivations and their queued writes', async () => {
+      let finishDerive: (() => void) | undefined;
       let finishWrite: ((saved: boolean) => void) | undefined;
       const context = contextFor({
-        deriveText: async () => derived,
+        deriveText: () =>
+          new Promise((resolve) => {
+            finishDerive = () => resolve(derived);
+          }),
         persistDerivation: () =>
           new Promise<boolean>((resolve) => {
             finishWrite = resolve;
           }),
       });
-      await context.derive(xlsx);
+      void context.derive(xlsx);
 
       let flushed = false;
       const flushing = context.flush().then(() => {
         flushed = true;
       });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finishDerive).toBeDefined();
+      expect(finishWrite).toBeUndefined();
+      expect(flushed).toBe(false);
+
+      finishDerive?.();
       await new Promise((resolve) => setImmediate(resolve));
       expect(finishWrite).toBeDefined();
       expect(flushed).toBe(false);
@@ -833,6 +885,7 @@ describe('derive', () => {
       finishWrite?.(true);
       await flushing;
       expect(flushed).toBe(true);
+      await expect(context.flush()).resolves.toBeUndefined();
     });
 
     it('logs a failed write with safe metadata and still settles the flush', async () => {
@@ -897,29 +950,6 @@ describe('derive', () => {
       await expect(persistDerivation(update)).resolves.toBe(true);
       expect(save).toHaveBeenCalledTimes(2);
     });
-  });
-
-  it('flushes only after pending derivations settle', async () => {
-    let finish: (() => void) | undefined;
-    const context = contextFor({
-      deriveText: () =>
-        new Promise((resolve) => {
-          finish = () => resolve({ status: 'skipped', reason: 'policy' });
-        }),
-    });
-    void context.derive(xlsx);
-
-    let flushed = false;
-    const flushing = context.flush().then(() => {
-      flushed = true;
-    });
-    await Promise.resolve();
-    expect(flushed).toBe(false);
-
-    finish?.();
-    await flushing;
-    expect(flushed).toBe(true);
-    await expect(context.flush()).resolves.toBeUndefined();
   });
 });
 

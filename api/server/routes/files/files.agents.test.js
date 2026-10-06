@@ -974,48 +974,30 @@ describe('File Routes - Agent Files Endpoint', () => {
     });
 
     describe('upload preflight under each delivery policy', () => {
-      const uploads = [
-        [
-          'xlsx',
-          'quarterly.xlsx',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 255, 0, 1, 2, 3]),
-        ],
-        ['csv', 'quarterly.csv', 'text/csv', Buffer.from('region,total\nnorth,1200\n')],
-      ];
-      /** [label, filters, whether it rejects opaque bytes before processing] */
-      const filterShapes = [
-        ['no filters', undefined, false],
-        ['a PII redact policy', { files: { pii: { action: 'redact' } } }, false],
+      const xlsx = {
+        originalname: 'quarterly.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        bytes: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 255, 0, 1, 2, 3]),
+      };
+      /** [label, filters, status the opaque workbook bytes draw before processing] */
+      const cases = [
+        ['no filters', undefined, 200],
         [
           'uninspectable block on content',
           { files: { pii: { fields: ['content'], uninspectable: 'block' } } },
-          true,
+          400,
         ],
         [
           'uninspectable block on extracted text only',
           { files: { pii: { fields: ['extracted_text'], uninspectable: 'block' } } },
-          false,
-        ],
-        [
-          'uninspectable block on content and extracted text',
-          { files: { pii: { fields: ['content', 'extracted_text'], uninspectable: 'block' } } },
-          true,
+          200,
         ],
       ];
-      const cases = uploads.flatMap((upload) =>
-        filterShapes.map(([label, filters, blocksOpaque]) => [
-          upload[0],
-          label,
-          upload,
-          filters,
-          blocksOpaque && upload[0] === 'xlsx' ? 400 : 200,
-        ]),
-      );
 
       it.each(cases)(
-        'answers a %s message attachment under %s identically',
-        async (_mime, _label, [, originalname, mimetype, bytes], filters, expectedStatus) => {
+        'answers an xlsx message attachment under %s identically',
+        async (_label, filters, expectedStatus) => {
+          const { originalname, mimetype, bytes } = xlsx;
           await createAgent({
             id: agentCustomId,
             name: 'Test Agent',

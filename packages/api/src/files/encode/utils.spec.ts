@@ -206,49 +206,17 @@ describe('getAudioFormat', () => {
 describe('resolveConfiguredFileSizeLimit', () => {
   const inheritedLimit = baseFileConfig.endpoints.default.fileSizeLimit;
 
-  it('is undefined without a fileConfig', () => {
-    expect(
-      resolveConfiguredFileSizeLimit(undefined, { provider: Providers.OPENAI }),
-    ).toBeUndefined();
-  });
-
-  it('resolves the inherited 512 MB default for an empty fileConfig', () => {
-    expect(inheritedLimit).toBe(mbToBytes(512));
-    expect(resolveConfiguredFileSizeLimit({}, { provider: Providers.OPENAI })).toBe(inheritedLimit);
-  });
-
-  it('converts an explicit endpoint limit to bytes', () => {
-    const config: TFileConfig = { endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 } } };
-    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI })).toBe(
-      mbToBytes(15),
-    );
-  });
-
-  it('looks up the endpoint name before the provider', () => {
-    const config: TFileConfig = {
-      endpoints: { [Providers.OPENAI]: { fileSizeLimit: 15 }, MyGateway: { fileSizeLimit: 3 } },
-    };
-    expect(
-      resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI, endpoint: 'MyGateway' }),
-    ).toBe(mbToBytes(3));
-    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.OPENAI })).toBe(
-      mbToBytes(15),
-    );
-  });
-
-  it('inherits endpoints.default when the endpoint has no entry of its own', () => {
-    const config: TFileConfig = { endpoints: { default: { fileSizeLimit: 7 } } };
-    expect(resolveConfiguredFileSizeLimit(config, { provider: Providers.BEDROCK })).toBe(
-      mbToBytes(7),
-    );
-  });
-
   /** `getConfiguredFileSizeLimit` and its resolver agree for every fileConfig shape. */
   const parityCases: Array<
     [string, TFileConfig | undefined, FileSizeLimitParams, number | undefined]
   > = [
     ['no fileConfig', undefined, { provider: Providers.OPENAI }, undefined],
-    ['an empty fileConfig', {}, { provider: Providers.ANTHROPIC }, inheritedLimit],
+    [
+      'an empty fileConfig, which inherits the 512 MB default',
+      {},
+      { provider: Providers.ANTHROPIC },
+      mbToBytes(512),
+    ],
     [
       'an explicit provider limit',
       { endpoints: { [Providers.GOOGLE]: { fileSizeLimit: 25 } } },

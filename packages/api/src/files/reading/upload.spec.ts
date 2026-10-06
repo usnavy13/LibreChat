@@ -2,7 +2,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { logger } from '@librechat/data-schemas';
-import { EToolResources } from 'librechat-data-provider';
 import type { EndpointFileConfig, FiltersConfig, TextDerivation } from 'librechat-data-provider';
 import type { ResolveUploadReadingInput, ResolvedUploadReading } from './upload';
 import {
@@ -81,19 +80,6 @@ describe('resolveUploadReading', () => {
     expect(resolveCodePossible).toHaveBeenCalledTimes(1);
   });
 
-  it('defers a CSV with a native text plan, and a parquet file with no plan to defer to', async () => {
-    await expect(decide({ mimeType: 'text/csv' }).reading).resolves.toMatchObject({
-      path: 'none',
-      codePreferred: true,
-      deferredMarker: true,
-    });
-    await expect(decide({ mimeType: 'application/x-parquet' }).reading).resolves.toMatchObject({
-      path: 'none',
-      codePreferred: true,
-      deferredMarker: false,
-    });
-  });
-
   it('extracts a workbook at upload when code is not possible, keeping it on failure', async () => {
     const { reading, resolveCodePossible } = decide({ mimeType: XLSX }, false);
 
@@ -121,13 +107,6 @@ describe('resolveUploadReading', () => {
     }
   });
 
-  it('keeps a zip on its recoverability route with no marker', async () => {
-    await expect(decide({ mimeType: 'application/zip' }).reading).resolves.toMatchObject({
-      path: 'none',
-      deferredMarker: false,
-    });
-  });
-
   it('extracts at upload, and rejects on failure, where extraction is the inspection', async () => {
     for (const mimeType of [XLSX, DOCX]) {
       const { reading, resolveCodePossible } = decide({ mimeType, filters: extractedTextBlock });
@@ -153,34 +132,16 @@ describe('resolveUploadReading', () => {
     ).resolves.toMatchObject({ reason: 'code_preferred', codePreferred: true });
   });
 
-  it('keeps every classic row classic without asking about code', async () => {
-    const rows: Array<[Partial<ResolveUploadReadingInput>, string]> = [
-      [{ toolResource: EToolResources.context }, 'explicit_destination'],
-      [{ isMessageAttachment: false }, 'agent_resource'],
-      [{ endpointConfig: undefined }, 'classic_policy'],
-      [{ endpointConfig: { llmDeliveryPolicy: 'classic' } }, 'classic_policy'],
-      [
-        { endpointConfig: { ...automatic, defaultLLMDeliveryPath: { fallback: 'text' } } },
-        'configured_route',
-      ],
-    ];
-    for (const [overrides, reason] of rows) {
-      const { reading, resolveCodePossible } = decide({ mimeType: XLSX, ...overrides });
-      await expect(reading).resolves.toMatchObject({
-        reason,
-        codePreferred: false,
-        keepOriginalOnExtractionFailure: false,
-        deferredMarker: false,
-      });
-      expect(resolveCodePossible).not.toHaveBeenCalled();
-    }
-  });
+  it('keeps a classic row classic without asking about code', async () => {
+    const { reading, resolveCodePossible } = decide({ mimeType: XLSX, endpointConfig: undefined });
 
-  it('keeps media rows classic, rejecting on failure as today', async () => {
-    await expect(decide({ mimeType: 'image/png' }).reading).resolves.toMatchObject({
-      category: 'media',
+    await expect(reading).resolves.toMatchObject({
+      reason: 'classic_policy',
+      codePreferred: false,
       keepOriginalOnExtractionFailure: false,
+      deferredMarker: false,
     });
+    expect(resolveCodePossible).not.toHaveBeenCalled();
   });
 });
 

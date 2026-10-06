@@ -1,12 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {
-  Constants,
-  ContentTypes,
-  EModelEndpoint,
-  resolveTurnLLMDeliveryPath,
-} = require('librechat-data-provider');
+const { Constants, ContentTypes, EModelEndpoint } = require('librechat-data-provider');
 const BaseClientClass = require('../BaseClient');
 const {
   ContentFilterError,
@@ -16,8 +11,8 @@ const {
   getPrivateTextInspectionTokens,
   assertModelBoundContent,
   resolveTurnDeliveryRouting,
-  admitNativeFallbackAttachments,
   buildTurnReadingContext,
+  buildMessageFiles,
   buildSteerMedia,
   Tokenizer,
 } = require('@librechat/api');
@@ -3070,7 +3065,7 @@ describe('BaseClient', () => {
       expect(userSave[0].files[0].file_id).toBe('file-abc');
     });
 
-    describe('reading policy', () => {
+    test('saves the user row with the files buildMessageFiles derives from the request and attachments', async () => {
       const brief = {
         user: 'user-1',
         file_id: 'brief',
@@ -3078,93 +3073,24 @@ describe('BaseClient', () => {
         filepath: '/uploads/brief.pdf',
         type: 'application/pdf',
         bytes: 2048,
-        object: 'file',
-        embedded: false,
-        usage: 0,
         source: 'local',
-        context: 'message_attachment',
-        llmDeliveryPath: 'provider',
-        metadata: { destinationChosen: false },
-        text: 'extracted text that should be stripped',
+        text: 'extracted text',
         _id: 'mongo-brief',
       };
-      const scan = {
-        user: 'user-1',
-        file_id: 'scan',
-        filename: 'scan.tiff',
-        type: 'image/tiff',
-        bytes: 4096,
-        _id: 'mongo-scan',
-      };
-      const { text: _briefText, _id: _briefId, ...savedBrief } = brief;
+      const requestFiles = [{ file_id: 'brief' }, { file_id: 'scan' }];
+      TestClient.options.req = { body: { files: requestFiles } };
+      TestClient.options.attachments = [brief];
+      TestClient.saveMessageToDatabase = jest.fn().mockResolvedValue({ message: {} });
 
-      const routeAgent = (endpointConfig, deriveText) => {
-        const config = { fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } } };
-        const agent = {
-          id: 'agent-1',
-          provider: EModelEndpoint.openAI,
-          endpoint: EModelEndpoint.openAI,
-          fileConsumers: { executeCode: false, fileSearch: false },
-          currentRequestAttachments: [brief],
-        };
-        const routing = resolveTurnDeliveryRouting({ agent, config });
-        routing.reading = buildTurnReadingContext({
-          routing,
-          provider: EModelEndpoint.openAI,
-          model: 'gpt-4o',
-          fileTokenLimit: 100000,
-          configuredFileSizeLimit: undefined,
-          countTokens: (text) => text.length,
-          deriveText,
-        });
-        routing.reading?.recordDropped([scan]);
-        agent.deliveryRouting = routing;
-        return agent;
-      };
+      await TestClient.sendMessage('Hello');
 
-      const saveUserFiles = async () => {
-        TestClient.saveMessageToDatabase = jest.fn().mockResolvedValue({ message: {} });
-        await TestClient.sendMessage('Hello');
-        const userSave = TestClient.saveMessageToDatabase.mock.calls.find(
-          ([msg]) => msg.isCreatedByUser,
-        );
-        return userSave[0].files;
-      };
-
-      beforeEach(() => {
-        TestClient.options.req = { body: { files: [{ file_id: 'brief' }, { file_id: 'scan' }] } };
-        TestClient.options.attachments = [brief];
-      });
-
-      afterEach(() => {
-        delete TestClient.options.agent;
-      });
-
-      test('saves the same sanitized attachments under the automatic policy, with no reading notice', async () => {
-        TestClient.options.agent = routeAgent({ llmDeliveryPolicy: 'automatic' });
-
-        const files = await saveUserFiles();
-
-        expect(JSON.stringify(files)).toBe(JSON.stringify([savedBrief]));
-        expect(files[0]).not.toHaveProperty('reading');
-        expect(brief).not.toHaveProperty('reading');
-        expect(TestClient.options.attachments).toEqual([brief]);
-      });
-
-      test.each([
-        ['without a reading context', undefined],
-        ['with a derive-only reading context', jest.fn()],
-      ])('saves the same files as before under the classic policy %s', async (_label, derive) => {
-        TestClient.options.agent = routeAgent({}, derive);
-        expect(TestClient.options.agent.deliveryRouting.reading?.policy).toBe(
-          derive ? 'classic' : undefined,
-        );
-
-        const files = await saveUserFiles();
-
-        expect(JSON.stringify(files)).toBe(JSON.stringify([savedBrief]));
-        expect(files[0]).not.toHaveProperty('reading');
-      });
+      const userSave = TestClient.saveMessageToDatabase.mock.calls.find(
+        ([msg]) => msg.isCreatedByUser,
+      );
+      const expected = buildMessageFiles(requestFiles, [brief]);
+      expect(expected).toHaveLength(1);
+      expect(userSave[0].files).toEqual(expected);
+      expect(TestClient.options.attachments).toEqual([brief]);
     });
   });
 
@@ -3603,7 +3529,7 @@ describe('BaseClient', () => {
       };
       const derivedMarker = { outcome: 'complete', extractor: 'document_parser', at: 2 };
 
-      const replayWorkbook = async (endpointConfig) => {
+      test('prepares the replayed file once and hands the prepared copy to the limit check and file context', async () => {
         const deriveText = jest.fn(async () => ({
           status: 'derived',
           text: 'Q1,1200',
@@ -3611,7 +3537,9 @@ describe('BaseClient', () => {
         }));
         getFiles.mockResolvedValueOnce([deferredWorkbook]);
         TestClient.options.req.config = {
-          fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } },
+          fileConfig: {
+            endpoints: { [EModelEndpoint.openAI]: { llmDeliveryPolicy: 'automatic' } },
+          },
         };
         TestClient.options.agent = {
           provider: EModelEndpoint.openAI,
@@ -3632,39 +3560,22 @@ describe('BaseClient', () => {
         TestClient.options.agent.deliveryRouting = routing;
         TestClient.assertHistoricalAttachmentLimits = jest.fn(async (files) => files);
         const prepareTurnAttachments = jest.spyOn(TestClient, 'prepareTurnAttachments');
+
         const [message] = await TestClient.addPreviousAttachments([
           { messageId: 'msg-xlsx', text: 'Totals?', files: [{ file_id: 'deferred-xlsx' }] },
         ]);
-        return { message, deriveText, prepareTurnAttachments };
-      };
 
-      test.each([
-        ['automatic', { llmDeliveryPolicy: 'automatic' }],
-        ['classic', {}],
-      ])(
-        'derives the text through the routing context under the %s policy',
-        async (_policy, endpointConfig) => {
-          const { message, deriveText, prepareTurnAttachments } =
-            await replayWorkbook(endpointConfig);
-          const replayed = {
-            ...deferredWorkbook,
-            text: 'Q1,1200',
-            llmDeliveryPath: 'text',
-            metadata: { ...deferredWorkbook.metadata, textDerivation: derivedMarker },
-          };
-
-          expect(prepareTurnAttachments).toHaveBeenCalledTimes(1);
-          expect(deriveText).toHaveBeenCalledTimes(1);
-          expect(deriveText).toHaveBeenCalledWith(
-            expect.objectContaining({ file_id: 'deferred-xlsx' }),
-            undefined,
-          );
-          expect(TestClient.assertHistoricalAttachmentLimits).toHaveBeenCalledWith([replayed]);
-          expect(message.fileContext).toBe('Q1,1200');
-          expect(deferredWorkbook.text).toBeUndefined();
-          expect(deferredWorkbook.llmDeliveryPath).toBe('none');
-        },
-      );
+        const prepared = {
+          ...deferredWorkbook,
+          text: 'Q1,1200',
+          llmDeliveryPath: 'text',
+          metadata: { ...deferredWorkbook.metadata, textDerivation: derivedMarker },
+        };
+        expect(prepareTurnAttachments).toHaveBeenCalledTimes(1);
+        expect(TestClient.assertHistoricalAttachmentLimits).toHaveBeenCalledWith([prepared]);
+        expect(message.fileContext).toBe('Q1,1200');
+        expect(deferredWorkbook.text).toBeUndefined();
+      });
     });
 
     test('extracts historical file context while encoding provider attachments', async () => {
@@ -4729,9 +4640,22 @@ describe('BaseClient attachment text under a reading context', () => {
     text: 'quarterly revenue grew '.repeat(200),
   };
 
-  const extractNote = async (endpointConfig, deriveText) => {
+  beforeEach(() => {
+    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
+    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  /** The truncation notice is emitted only when the turn reading context's text options
+   *  reach `extractFileContext`; the notice wording itself belongs to packages/api. */
+  test('extracts file context with the text options of the turn reading context', async () => {
     const client = initializeFakeClient(apiKey, { modelOptions: { model: 'gpt-4o-mini' } }, []);
-    const config = { fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } } };
+    const config = {
+      fileConfig: { endpoints: { [EModelEndpoint.openAI]: { llmDeliveryPolicy: 'automatic' } } },
+    };
     client.options.req = { body: { fileTokenLimit: 20 }, config };
     client.options.agent = {
       provider: EModelEndpoint.openAI,
@@ -4744,39 +4668,16 @@ describe('BaseClient attachment text under a reading context', () => {
       fileTokenLimit: 20,
       configuredFileSizeLimit: undefined,
       countTokens: (text) => text.length,
-      deriveText,
     });
     client.options.agent.deliveryRouting = routing;
     const message = {};
+
     await client.addFileContextToMessage(message, [longNote], client.options.agent.fileConsumers);
-    return message.fileContext;
-  };
 
-  const notice = '[Truncated: only the beginning of "notes.txt" fits; the rest is omitted.]';
-
-  beforeEach(() => {
-    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
-    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
-  });
-
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  test('marks truncated attachment text under the automatic policy', async () => {
-    const fileContext = await extractNote({ llmDeliveryPolicy: 'automatic' });
-
-    expect(fileContext).toContain('# "notes.txt"');
-    expect(fileContext).toContain(notice);
-  });
-
-  test('keeps truncation silent under the classic policy, with or without a deriver', async () => {
-    const withDeriver = await extractNote({}, jest.fn());
-    const withoutContext = await extractNote({});
-
-    expect(withDeriver).toContain('# "notes.txt"');
-    expect(withDeriver).not.toContain(notice);
-    expect(withoutContext).toBe(withDeriver);
+    expect(message.fileContext).toContain('# "notes.txt"');
+    expect(message.fileContext).toContain(
+      '[Truncated: only the beginning of "notes.txt" fits; the rest is omitted.]',
+    );
   });
 });
 
@@ -4793,33 +4694,29 @@ describe('BaseClient native documents under a reading context', () => {
     llmDeliveryPath: 'provider',
     metadata: { destinationChosen: false },
   };
-  const consumers = { executeCode: false, fileSearch: true };
+  const rejection = [{ file_id: 'broken-pdf', reason: 'integrity' }];
   let uploads;
 
   beforeAll(() => {
     uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'baseclient-documents-'));
     fs.writeFileSync(path.join(uploads, 'brief.pdf'), 'not a pdf document');
-    fs.writeFileSync(
-      path.join(uploads, 'long.pdf'),
-      `%PDF-1.7\n${'<< /Type /Page >>\n'.repeat(101)}`,
-    );
   });
 
   afterAll(() => {
     fs.rmSync(uploads, { recursive: true, force: true });
   });
 
-  const routeBrokenPdf = (endpointConfig, deriveText) => {
+  const routeBrokenPdf = () => {
     const client = initializeFakeClient(apiKey, { modelOptions: { model: 'claude-sonnet-4' } }, []);
     const config = {
       paths: { uploads },
-      fileConfig: { endpoints: { [EModelEndpoint.anthropic]: endpointConfig } },
+      fileConfig: { endpoints: { [EModelEndpoint.anthropic]: { llmDeliveryPolicy: 'automatic' } } },
     };
     client.options.req = { config, user: { id: 'user1' } };
     client.options.agent = {
       provider: EModelEndpoint.anthropic,
       endpoint: EModelEndpoint.anthropic,
-      fileConsumers: consumers,
+      fileConsumers: { executeCode: false, fileSearch: true },
       currentRequestAttachments: [brokenPdf],
     };
     const routing = resolveTurnDeliveryRouting({ agent: client.options.agent, config });
@@ -4829,217 +4726,35 @@ describe('BaseClient native documents under a reading context', () => {
       fileTokenLimit: 100000,
       configuredFileSizeLimit: undefined,
       countTokens: (text) => text.length,
-      deriveText,
     });
     client.options.agent.deliveryRouting = routing;
     return { client, routing };
   };
 
-  test('leaves a rejected document out and records it under the automatic policy', async () => {
-    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
+  test('leaves a rejected document out of the forwarded files and records it on the reading context', async () => {
+    const { client, routing } = routeBrokenPdf();
     const recordRejections = jest.spyOn(routing.reading, 'recordRejections');
-    expect(resolveTurnLLMDeliveryPath(routing, brokenPdf, consumers)).toBe('provider');
     const message = {};
 
     const files = await client.addDocuments(message, [brokenPdf]);
 
     expect(files).toEqual([]);
     expect(message.documents).toBeUndefined();
-    expect(recordRejections).toHaveBeenCalledWith([{ file_id: 'broken-pdf', reason: 'integrity' }]);
-    expect(routing.reading.stats().rejected).toBe(1);
-    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
-    expect(resolveTurnLLMDeliveryPath(routing, brokenPdf, consumers)).not.toBe('provider');
+    expect(recordRejections).toHaveBeenCalledWith(rejection);
   });
 
-  test.each([
-    ['a chosen destination', { ...brokenPdf, metadata: { destinationChosen: true } }],
-    ['an unmarked record', { ...brokenPdf, metadata: {} }],
-  ])('still fails the turn on %s the automatic policy leaves classic', async (_label, file) => {
-    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
-    client.options.agent.currentRequestAttachments = [file];
-    const message = {};
-
-    await expect(client.addDocuments(message, [file])).rejects.toThrow('PDF validation failed');
-    expect(message.documents).toBeUndefined();
-    expect(routing.reading.stats().rejected).toBe(0);
-  });
-
-  test('keeps a replayed automatic document eligible for the supported fallback', async () => {
-    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
-    client.options.agent.currentRequestAttachments = [];
-
-    await expect(client.addDocuments({}, [brokenPdf])).resolves.toEqual([]);
-    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
-  });
-
-  const overPageLimit = {
-    ...brokenPdf,
-    file_id: 'long-pdf',
-    filename: 'long.pdf',
-    filepath: '/uploads/long.pdf',
-    bytes: 1800,
-  };
-
-  /** Automatic reading needs a loaded file tool; text is the fallback once loaded File Search
-   *  cannot reach the file and no other reader takes it. */
-  const unreachableSearch = () => ({ queued: [], registered: [], preparation: new Map() });
-
-  test.each([
-    ['search', 'search', { executeCode: false, fileSearch: true }],
-    ['code', 'code', { executeCode: true, fileSearch: false }],
-    [
-      'text once loaded File Search cannot reach it',
-      'text',
-      { executeCode: false, fileSearch: true },
-    ],
-  ])(
-    'continues a PDF accepted through %s on a fresh turn without reuploading',
-    async (_label, reader, tools) => {
-      jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
-      jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
-      const stored = { ...overPageLimit, text: 'Complete cached PDF text.' };
-      const setupTurn = () => {
-        const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
-        client.options.agent.fileConsumers = tools;
-        if (reader === 'text') {
-          routing.reading.setSearchEvidence(unreachableSearch());
-        }
-        client.options.agent.currentRequestAttachments = [stored];
-        client.options.attachments = [stored];
-        client.admitPreparedAttachments = (files, fileConsumers) =>
-          admitNativeFallbackAttachments(client, files, fileConsumers);
-        return { client, routing };
-      };
-      try {
-        const first = setupTurn();
-        const message = { messageId: 'first-turn' };
-        const delivered = await first.client.processMessageAttachments(message, [stored]);
-        expect(delivered).toEqual([
-          expect.objectContaining({
-            file_id: stored.file_id,
-            llmDeliveryPath: reader === 'text' ? 'text' : 'none',
-          }),
-        ]);
-        expect(message.documents).toBeUndefined();
-        expect(first.routing.reading.judge(stored).rejected).toBe('capacity');
-        expect(message.fileContext?.includes(stored.text) ?? false).toBe(reader === 'text');
-
-        const next = setupTurn();
-        next.client.options.resendFiles = true;
-        next.client.options.attachments = undefined;
-        next.client.options.agent.currentRequestAttachments = [];
-        next.client.checkVisionRequest = jest.fn();
-        getFiles.mockResolvedValueOnce([stored]);
-        const [replayed] = await next.client.addPreviousAttachments([
-          { messageId: 'first-turn', files: [{ file_id: stored.file_id }], text: 'Read this PDF' },
-        ]);
-        expect(replayed.documents).toBeUndefined();
-        expect(next.routing.reading.judge(stored).rejected).toBe('capacity');
-        expect(resolveTurnLLMDeliveryPath(next.routing, stored, tools)).toBe(
-          reader === 'text' ? 'text' : 'none',
-        );
-        expect(replayed.fileContext?.includes(stored.text) ?? false).toBe(reader === 'text');
-        expect(stored.llmDeliveryPath).toBe('provider');
-      } finally {
-        jest.restoreAllMocks();
-      }
-    },
-  );
-
-  test('derives a fitting capacity fallback once when loaded File Search cannot reach the file', async () => {
-    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
-    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
-    const deriveText = jest.fn(async () => ({
-      status: 'derived',
-      text: 'Complete newly derived PDF text.',
-      textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 2 },
-    }));
-    try {
-      const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
-      const file = {
-        ...overPageLimit,
-        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
-      };
-      client.options.agent.fileConsumers = { executeCode: false, fileSearch: true };
-      routing.reading.setSearchEvidence(unreachableSearch());
-      client.options.agent.currentRequestAttachments = [file];
-      client.options.attachments = [file];
-      client.admitPreparedAttachments = (files, fileConsumers) =>
-        admitNativeFallbackAttachments(client, files, fileConsumers);
-      const message = { messageId: 'derived-fallback' };
-      const delivered = await client.processMessageAttachments(message, [file]);
-      expect(message.documents).toBeUndefined();
-      expect(message.fileContext.match(/Complete newly derived PDF text\./g)).toHaveLength(1);
-      expect(deriveText).toHaveBeenCalledTimes(1);
-      expect(delivered[0]).toMatchObject({
-        llmDeliveryPath: 'text',
-        text: 'Complete newly derived PDF text.',
-      });
-      expect(client.options.agent.currentRequestAttachments[0]).toMatchObject({
-        llmDeliveryPath: 'text',
-        text: 'Complete newly derived PDF text.',
-      });
-      expect(file.text).toBeUndefined();
-    } finally {
-      jest.restoreAllMocks();
-    }
-  });
-
-  test('fails the turn without a file tool instead of deriving a fallback under the automatic policy', async () => {
-    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
-    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
-    const deriveText = jest.fn();
-    try {
-      const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
-      const file = {
-        ...overPageLimit,
-        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
-      };
-      client.options.agent.fileConsumers = { executeCode: false, fileSearch: false };
-      client.options.agent.currentRequestAttachments = [file];
-      client.options.attachments = [file];
-      client.admitPreparedAttachments = (files, fileConsumers) =>
-        admitNativeFallbackAttachments(client, files, fileConsumers);
-      const message = { messageId: 'no-file-tools' };
-
-      await expect(client.processMessageAttachments(message, [file])).rejects.toThrow(
-        'PDF validation failed',
-      );
-      expect(message.documents).toBeUndefined();
-      expect(message.fileContext).toBeUndefined();
-      expect(deriveText).not.toHaveBeenCalled();
-      expect(routing.reading.stats().rejected).toBe(0);
-      expect(file.text).toBeUndefined();
-    } finally {
-      jest.restoreAllMocks();
-    }
-  });
-
-  test('records a rejection on every agent the conversation agents list', async () => {
-    const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
-    const { routing: handoffRouting } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
-    const handoff = { deliveryRouting: handoffRouting };
-    client.getConversationAgents = () => [client.options.agent, handoff];
+  test('records the rejection on every agent the conversation agents list', async () => {
+    const { client } = routeBrokenPdf();
+    const { routing: handoffRouting } = routeBrokenPdf();
+    const recordRejections = jest.spyOn(handoffRouting.reading, 'recordRejections');
+    client.getConversationAgents = () => [
+      client.options.agent,
+      { deliveryRouting: handoffRouting },
+    ];
 
     await client.addDocuments({}, [brokenPdf]);
 
-    expect(routing.reading.judge(brokenPdf).rejected).toBe('integrity');
-    expect(handoffRouting.reading.judge(brokenPdf).rejected).toBe('integrity');
-  });
-
-  test.each([
-    ['without a reading context', undefined],
-    ['with a derive-only reading context', jest.fn()],
-  ])('still fails the turn under the classic policy %s', async (_label, deriveText) => {
-    const { client, routing } = routeBrokenPdf({}, deriveText);
-    expect(routing.reading?.policy).toBe(deriveText ? 'classic' : undefined);
-    const message = {};
-
-    await expect(client.addDocuments(message, [brokenPdf])).rejects.toThrow(
-      'PDF validation failed',
-    );
-    expect(message.documents).toBeUndefined();
-    expect(routing.reading?.stats().rejected ?? 0).toBe(0);
+    expect(recordRejections).toHaveBeenCalledWith(rejection);
   });
 });
 

@@ -70,10 +70,38 @@ describe('resolveFileTokenLimit', () => {
 describe('extractFileContext options', () => {
   const tokenLimit = 10;
 
-  it('reuses a known token count instead of counting the text again', async () => {
-    const tokenCountFn = jest.fn((text: string): number => text.length);
-    const attachment = textFile('short', 'fits');
-    const knownTokenCount = jest.fn((_file: TextAttachment): number | undefined => 4);
+  it.each<{
+    name: string;
+    text: string;
+    known: number | undefined;
+    counted: 'never' | 'only for the truncation' | 'in full';
+    rendered: string;
+  }>([
+    {
+      name: 'reuses a known token count instead of counting the text again',
+      text: 'fits',
+      known: 4,
+      counted: 'never',
+      rendered: '# "note.txt"\nfits\n',
+    },
+    {
+      name: 'never counts the full text of a truncated file whose count is known',
+      text: 'x'.repeat(50),
+      known: 50,
+      counted: 'only for the truncation',
+      rendered: '# "note.txt"\nx',
+    },
+    {
+      name: 'counts the text when the known count is unavailable',
+      text: 'fits',
+      known: undefined,
+      counted: 'in full',
+      rendered: '# "note.txt"\nfits\n',
+    },
+  ])('$name', async ({ text, known, counted, rendered }) => {
+    const tokenCountFn = jest.fn((value: string): number => value.length);
+    const attachment = textFile('note', text);
+    const knownTokenCount = jest.fn((_file: TextAttachment): number | undefined => known);
 
     const result = await extractFileContext({
       attachments: [attachment],
@@ -82,37 +110,16 @@ describe('extractFileContext options', () => {
       knownTokenCount,
     });
 
-    expect(result).toContain('# "short.txt"\nfits\n');
+    expect(result).toContain(rendered);
     expect(knownTokenCount).toHaveBeenCalledWith(attachment);
-    expect(tokenCountFn).not.toHaveBeenCalled();
-  });
-
-  it('never counts the full text of a truncated file whose count is known', async () => {
-    const tokenCountFn = jest.fn((text: string): number => text.length);
-    const longText = 'x'.repeat(50);
-
-    await extractFileContext({
-      attachments: [textFile('long', longText)],
-      req: requestWithLimit(tokenLimit),
-      tokenCountFn,
-      knownTokenCount: () => longText.length,
-    });
-
-    expect(tokenCountFn).toHaveBeenCalled();
-    expect(tokenCountFn).not.toHaveBeenCalledWith(longText);
-  });
-
-  it('counts the text when the known count is unavailable', async () => {
-    const tokenCountFn = jest.fn((text: string): number => text.length);
-
-    await extractFileContext({
-      attachments: [textFile('short', 'fits')],
-      req: requestWithLimit(tokenLimit),
-      tokenCountFn,
-      knownTokenCount: () => undefined,
-    });
-
-    expect(tokenCountFn).toHaveBeenCalledWith('fits');
+    if (counted === 'never') {
+      expect(tokenCountFn).not.toHaveBeenCalled();
+    } else if (counted === 'only for the truncation') {
+      expect(tokenCountFn).toHaveBeenCalled();
+      expect(tokenCountFn).not.toHaveBeenCalledWith(text);
+    } else {
+      expect(tokenCountFn).toHaveBeenCalledWith(text);
+    }
   });
 
   it('follows truncated text with a notice only when asked to', async () => {
@@ -137,17 +144,6 @@ describe('extractFileContext options', () => {
     expect(marked?.split('[Truncated:')).toHaveLength(2);
     expect(unmarked).not.toContain('[Truncated:');
     expect(marked?.replace(`\n${notice}`, '')).toBe(unmarked);
-  });
-
-  it('adds no notice to a file that fits', async () => {
-    const result = await extractFileContext({
-      attachments: [textFile('short', 'fits')],
-      req: requestWithLimit(tokenLimit),
-      tokenCountFn: (text: string): number => text.length,
-      markTruncation: true,
-    });
-
-    expect(result).not.toContain('[Truncated:');
   });
 
   it('keeps the classic output byte-for-byte without options', async () => {

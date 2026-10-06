@@ -6,7 +6,6 @@ import type { FileTextDeriver, TurnReadingContext } from './turn';
 import {
   isModelBoundAttachmentFile,
   assertAgentAttachmentLimits,
-  resolveAgentAttachmentLimits,
   collectHistoricalAttachmentIds,
 } from '~/agents/attachments';
 import {
@@ -134,52 +133,69 @@ const assertAgentLimits = (
 
 describe('allocateTurnAttachmentsWithHistory', () => {
   describe('outside the automatic policy', () => {
-    it('returns the current files themselves when the routing carries no reading context', async () => {
-      const routing = resolveTurnDeliveryRouting({
-        agent: { provider: ENDPOINT, endpoint: ENDPOINT },
-        config: {
-          fileConfig: {
-            fileContextSizeLimit: 1,
-            endpoints: { [ENDPOINT]: { llmDeliveryPolicy: 'automatic' } },
-          },
+    interface ClassicTurn {
+      agent: AllocationParams['agent'];
+      req?: AllocationParams['req'];
+      context?: TurnReadingContext;
+    }
+
+    it.each<[string, () => ClassicTurn]>([
+      [
+        'the routing carries no reading context',
+        () => {
+          const routing = resolveTurnDeliveryRouting({
+            agent: { provider: ENDPOINT, endpoint: ENDPOINT },
+            config: {
+              fileConfig: {
+                fileContextSizeLimit: 1,
+                endpoints: { [ENDPOINT]: { llmDeliveryPolicy: 'automatic' } },
+              },
+            },
+          });
+          return { agent: { deliveryRouting: routing, fileConsumers: searchOnly } };
         },
-      });
-      const current = [attachment({ file_id: 'a' }), attachment({ file_id: 'b' })];
+      ],
+      [
+        'the policy is classic',
+        () => {
+          const turn = setup({
+            endpointConfig: {},
+            fileConfig: { fileContextSizeLimit: 1 },
+            deriveText: async () => ({ status: 'skipped', reason: 'no_extractor' }),
+          });
+          expect(turn.context.policy).toBe('classic');
+          return turn;
+        },
+      ],
+    ])(
+      'returns the current files themselves when %s, asking its context nothing',
+      async (_case, arrange) => {
+        const { agent, req, context } = arrange();
+        const methods = [
+          'judge',
+          'derive',
+          'addOverflow',
+          'markTextFailed',
+          'flush',
+          'knownTokenCount',
+        ] as const;
+        const spies = context == null ? [] : methods.map((method) => jest.spyOn(context, method));
+        const current = [attachment({ file_id: 'a' }), attachment({ file_id: 'b' })];
 
-      const allocated = await allocateTurnAttachmentsWithHistory({
-        agent: { deliveryRouting: routing, fileConsumers: searchOnly },
-        historical: [attachment({ file_id: 'history', bytes: 6 * MB })],
-        current,
-        endpoint: ENDPOINT,
-      });
+        const allocated = await allocateTurnAttachmentsWithHistory({
+          agent,
+          req,
+          historical: [attachment({ file_id: 'history', bytes: 6 * MB })],
+          current,
+          endpoint: ENDPOINT,
+        });
 
-      expect(allocated).toBe(current);
-    });
-
-    it('returns the current files themselves under the classic policy, asking its context nothing', async () => {
-      const turn = setup({
-        endpointConfig: {},
-        fileConfig: { fileContextSizeLimit: 1 },
-        deriveText: async () => ({ status: 'skipped', reason: 'no_extractor' }),
-      });
-      const { context } = turn;
-      expect(context.policy).toBe('classic');
-      const spies = (
-        ['judge', 'derive', 'addOverflow', 'markTextFailed', 'flush', 'knownTokenCount'] as const
-      ).map((method) => jest.spyOn(context, method));
-      const current = [attachment({ file_id: 'a' }), attachment({ file_id: 'b' })];
-
-      const allocated = await allocate(
-        turn,
-        [attachment({ file_id: 'history', bytes: 6 * MB })],
-        current,
-      );
-
-      expect(allocated).toBe(current);
-      for (const spy of spies) {
-        expect(spy).not.toHaveBeenCalled();
-      }
-    });
+        expect(allocated).toBe(current);
+        for (const spy of spies) {
+          expect(spy).not.toHaveBeenCalled();
+        }
+      },
+    );
   });
 
   describe('under the automatic policy', () => {
@@ -483,7 +499,6 @@ describe('allocateTurnAttachmentsWithHistory', () => {
       expect(await run(historical, [a, b])).toEqual(expected);
       expect(await run([...historical].reverse(), [a, b])).toEqual(expected);
       expect(await run([historical[1], historical[2], historical[0]], [a, b])).toEqual(expected);
-      expect(await run(historical, [a, b])).toEqual(expected);
       expect(await run(historical, [b, a])).toEqual({ a: 'none', b: 'provider' });
     });
 
@@ -493,12 +508,7 @@ describe('allocateTurnAttachmentsWithHistory', () => {
           endpointConfig: { llmDeliveryPolicy: 'automatic', fileLimit: 4 },
           fileConfig: { fileContextSizeLimit: 10, fileContextCharLimit: 500 },
         });
-        const limits = resolveAgentAttachmentLimits({
-          req: turn.req,
-          endpoint: ENDPOINT,
-          useGlobalContextSizeLimit: true,
-        });
-        const exact = (limits.bytes ?? 0) - 7 * MB;
+        const exact = 10 * MB - 7 * MB;
         const historical = [attachment({ file_id: 'history', bytes: 7 * MB })];
         const files = [
           attachment({ file_id: 'exact', bytes: exact }),
@@ -507,11 +517,10 @@ describe('allocateTurnAttachmentsWithHistory', () => {
 
         const allocated = await allocate(turn, historical, files);
 
-        expect(limits).toEqual({ count: 4, bytes: 10 * MB, textChars: 500 });
         expect(pathsById(allocated)).toEqual({ exact: 'provider', byte: 'none' });
-        expect(assertTurnLimits(turn, historical, allocated).totalKnownBytes).toBe(limits.bytes);
+        expect(assertTurnLimits(turn, historical, allocated).totalKnownBytes).toBe(10 * MB);
         expect(() => assertTurnLimits(turn, historical, files)).toThrow(
-          expect.objectContaining({ limitType: 'bytes', limit: limits.bytes }),
+          expect.objectContaining({ limitType: 'bytes', limit: 10 * MB }),
         );
       });
 
@@ -520,23 +529,15 @@ describe('allocateTurnAttachmentsWithHistory', () => {
           endpointConfig: { llmDeliveryPolicy: 'automatic', totalSizeLimit: 8 },
           fileConfig: { fileContextSizeLimit: 10 },
         });
-        const endpointLimits = resolveAgentAttachmentLimits({ req: turn.req, endpoint: ENDPOINT });
-        const turnLimits = resolveAgentAttachmentLimits({
-          req: turn.req,
-          endpoint: ENDPOINT,
-          useGlobalContextSizeLimit: true,
-        });
         const historical = [attachment({ file_id: 'history', bytes: 4 * MB })];
         const files = [attachment({ file_id: 'a' }), attachment({ file_id: 'b', bytes: 2 * MB })];
 
         const allocated = await allocate(turn, historical, files);
 
-        expect(endpointLimits.bytes).toBe(8 * MB);
-        expect(turnLimits.bytes).toBe(10 * MB);
         expect(pathsById(allocated)).toEqual({ a: 'provider', b: 'none' });
         expect(() => assertAgentLimits(turn, historical, allocated)).not.toThrow();
         expect(() => assertAgentLimits(turn, historical, files)).toThrow(
-          expect.objectContaining({ limitType: 'bytes', limit: endpointLimits.bytes }),
+          expect.objectContaining({ limitType: 'bytes', limit: 8 * MB }),
         );
       });
     });

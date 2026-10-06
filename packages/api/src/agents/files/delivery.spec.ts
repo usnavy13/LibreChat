@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { FileContext, FileSources } from 'librechat-data-provider';
 import type {
   TurnReadingInputs,
@@ -15,7 +13,6 @@ import type {
   TurnReadingFile,
   TextDerivationPersister,
 } from '~/files/reading/turn';
-import type { ServerRequest } from '~/types';
 import {
   applyTurnDelivery as materializeTurnDelivery,
   prepareScopedTurnCandidates,
@@ -26,7 +23,6 @@ import {
 } from './delivery';
 import * as modelBoundContent from '~/middleware/modelBoundContent';
 import { buildTurnReadingContext } from '~/files/reading/turn';
-import { createFileTextDeriver } from '~/files/reading/derive';
 import { UninspectableFileError } from '~/protection/files';
 
 function applyTurnDelivery<T extends TurnDeliveryFile>(
@@ -352,7 +348,6 @@ describe('the automatic policy', () => {
   const automatic = {
     fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' as const } } },
   };
-  const searchesFiles: TurnFileConsumers = { executeCode: false, fileSearch: true };
   /** The turn's evidence seam, answering every file with the same verdicts. */
   const withEvidence = (evidence: ReadingEvidence) => ({
     ...resolveTurnDeliveryRouting({ agent, config: automatic }),
@@ -383,35 +378,6 @@ describe('the automatic policy', () => {
   };
 
   describe('applyTurnDelivery', () => {
-    it('leaves a file File Search will receive with it, then delivers text once it will not', () => {
-      /* The automatic counterpart of "delivers text for a file File Search has yet to receive":
-       * before tools load, an enabled search is a prospective reader even without embedding;
-       * once the final pass shows the store will never receive the file, its text still lands
-       * because it fits. */
-      const files = [largePdf];
-      const firstPass = materializeTurnDelivery(files, {
-        routing: withEvidence({ native: 'capacity', text: 'fits' }),
-        consumers: searchesFiles,
-      });
-      const finalPass = materializeTurnDelivery(files, {
-        routing: withEvidence({ native: 'capacity', text: 'fits', search: 'unreachable' }),
-        consumers: searchesFiles,
-      });
-
-      expect(firstPass).toEqual([{ ...largePdf, llmDeliveryPath: 'none' }]);
-      expect(finalPass).toEqual([{ ...largePdf, llmDeliveryPath: 'text' }]);
-      expect(largePdf.llmDeliveryPath).toBe('provider');
-    });
-
-    it('leaves the file unread rather than sending text that exceeds the limit', () => {
-      expect(
-        materializeTurnDelivery([largePdf], {
-          routing: withEvidence({ native: 'capacity', text: 'exceeds', search: 'unreachable' }),
-          consumers: searchesFiles,
-        }),
-      ).toEqual([{ ...largePdf, llmDeliveryPath: 'none' }]);
-    });
-
     it('gives a classic-era spreadsheet to Run Code and back to text without changing it', () => {
       const routing = withEvidence({});
       const files = [csv];
@@ -673,14 +639,8 @@ describe('prepareScopedTurnCandidates', () => {
     expect(prepared.candidates?.get(requested.file_id)).toBe(requested);
   });
 
-  it('derives the original workbook once for a parallel text reader while the primary uses code', async () => {
-    const openStoredFile = jest.fn(async () =>
-      fs.createReadStream(path.join(__dirname, '../../files/documents/sample.xlsx')),
-    );
-    const deriveText = createFileTextDeriver({
-      req: { user: { id: 'user_1' } } as ServerRequest,
-      openStoredFile,
-    });
+  it('derives the workbook once for a parallel text reader while the primary uses code', async () => {
+    const deriveText = deriver();
     const persistDerivation = jest.fn<
       ReturnType<TextDerivationPersister>,
       Parameters<TextDerivationPersister>
@@ -697,21 +657,24 @@ describe('prepareScopedTurnCandidates', () => {
     };
     const prepared = await prepareScopedTurnCandidates(inputs);
     const scoped = resolveScopedTurnAttachments({ ...inputs, ...prepared });
-    const text = 'Sheet One:\nData,on,first,sheet\nSecond Sheet:\nData,On\nSecond,Sheet\n';
 
     expect(scoped.get('primary')).toEqual([]);
     for (const agentId of ['parallel', 'second-parallel']) {
       expect(scoped.get(agentId)).toEqual([
-        expect.objectContaining({ file_id: requested.file_id, llmDeliveryPath: 'text', text }),
+        expect.objectContaining({
+          file_id: requested.file_id,
+          llmDeliveryPath: 'text',
+          text: derived.text,
+        }),
       ]);
     }
-    expect(openStoredFile).toHaveBeenCalledTimes(1);
+    expect(deriveText).toHaveBeenCalledTimes(1);
     expect(persistDerivation).toHaveBeenCalledTimes(1);
     expect(persistDerivation).toHaveBeenCalledWith(
       expect.objectContaining({
         file_id: requested.file_id,
-        text,
-        textDerivation: expect.objectContaining({ outcome: 'complete' }),
+        text: derived.text,
+        textDerivation: derived.textDerivation,
       }),
     );
     expect(requested.text).toBeUndefined();

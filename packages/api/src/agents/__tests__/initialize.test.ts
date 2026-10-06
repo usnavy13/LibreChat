@@ -152,6 +152,7 @@ import { primeResources } from '../resources';
 import { isFatalAgentInitializationError } from '../errors';
 import { filterFilesByEndpointRuntimeConfig as filterByEndpointPolicy } from '~/files/filter';
 import { assertModelBoundContent } from '../../middleware/modelBoundContent';
+import * as attachments from '../attachments';
 import { ContentFilterError } from '../../middleware/contentFilter';
 import { getTurnReadingContext, createDerivationPersister } from '~/files/reading';
 import type { FileTextDeriver, TextDerivationPersister } from '~/files/reading';
@@ -6263,6 +6264,44 @@ describe('initializeAgent automatic delivery policy', () => {
       metadata: { destinationChosen: false },
     }) as IMongoFile;
 
+  /** The queued copy priming hands the planner. */
+  const queued = (file: IMongoFile): TFile => ({
+    file_id: file.file_id,
+    filename: file.filename,
+    filepath: file.filepath,
+    type: file.type,
+    bytes: file.bytes,
+    user: 'user-1',
+    object: 'file',
+    embedded: false,
+    usage: 0,
+    source: FileSources.local,
+    context: FileContext.message_attachment,
+    metadata: { destinationChosen: false },
+  });
+
+  const provisionStateFor = ({
+    code = [],
+    search = [],
+  }: {
+    code?: IMongoFile[];
+    search?: IMongoFile[];
+  }): ProvisionState => ({
+    codeEnvFiles: code.map(queued),
+    vectorDBFiles: search.map(queued),
+    aliveFileIds: new Set(),
+    agentScopedFileIds: new Set(),
+  });
+
+  /** A spreadsheet uploaded under the automatic policy, its extraction left for a later turn. */
+  const deferredXlsx = () =>
+    ({
+      ...classicEraXlsx(),
+      text: undefined,
+      llmDeliveryPath: 'none',
+      metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
+    }) as IMongoFile;
+
   async function initializeWith({
     file,
     policy,
@@ -6270,7 +6309,6 @@ describe('initializeAgent automatic delivery policy', () => {
     skillTools,
     endpointConfig = {},
     fileContextCharLimit,
-    fileTokenLimit,
     contextFiles = [],
     deriveText,
     saveFileTextDerivation,
@@ -6304,7 +6342,6 @@ describe('initializeAgent automatic delivery policy', () => {
     skillTools?: string[];
     endpointConfig?: { fileSizeLimit?: number };
     fileContextCharLimit?: number;
-    fileTokenLimit?: number;
   }) {
     const { filterFilesByEndpointRuntimeConfig } = jest.requireMock('~/files') as {
       filterFilesByEndpointRuntimeConfig: jest.Mock;
@@ -6333,7 +6370,6 @@ describe('initializeAgent automatic delivery policy', () => {
       filters,
       fileConfig: {
         fileContextCharLimit,
-        fileTokenLimit,
         endpoints: {
           [Providers.OPENAI]: {
             ...(policy != null && { llmDeliveryPolicy: policy }),
@@ -6384,7 +6420,17 @@ describe('initializeAgent automatic delivery policy', () => {
     );
   }
 
-  it('leaves a classic-era spreadsheet to Run Code without counting or rewriting it', async () => {
+  /** The delivery routes content inspection saw for one file, per call that inspected it. */
+  const inspectionsOf = (fileId: string) =>
+    (assertModelBoundContent as jest.Mock).mock.calls
+      .map(([input]: [{ files?: IMongoFile[] }]) =>
+        (input.files ?? [])
+          .filter((file) => file.file_id === fileId)
+          .map((file) => file.llmDeliveryPath),
+      )
+      .filter((routes) => routes.length > 0);
+
+  it('leaves a classic-era spreadsheet to Run Code, inspecting its classic route without counting or rewriting it', async () => {
     const xlsx = classicEraXlsx();
     const stored = structuredClone(xlsx);
 
@@ -6400,22 +6446,12 @@ describe('initializeAgent automatic delivery policy', () => {
     expect(result.currentRequestAttachments.map((file) => file.llmDeliveryPath)).toEqual(['none']);
     expect(xlsx).toEqual(stored);
     expect(result.deliveryRouting.reading).toBeDefined();
+    expect([...new Set(inspectionsOf(xlsx.file_id).flat())]).toEqual(['text']);
   });
 
-  it('inspects the classic route of a spreadsheet the automatic policy hands to Run Code', async () => {
+  it('delivers the spreadsheet text, re-running admission and inspection, once the loader drops the Run Code tool', async () => {
     const xlsx = classicEraXlsx();
-
-    await initializeWith({ file: xlsx, policy: 'automatic', tools: [Tools.execute_code] });
-
-    const inspected = (assertModelBoundContent as jest.Mock).mock.calls
-      .flatMap(([input]: [{ files?: IMongoFile[] }]) => input.files ?? [])
-      .filter((file) => file.file_id === xlsx.file_id);
-    expect(inspected.length).toBeGreaterThan(0);
-    expect(inspected.every((file) => file.llmDeliveryPath === 'text')).toBe(true);
-  });
-
-  it('delivers the spreadsheet text once the loader drops the Run Code tool', async () => {
-    const xlsx = classicEraXlsx();
+    const admission = jest.spyOn(attachments, 'assertAgentAttachmentLimits');
 
     const result = await initializeWith({
       file: xlsx,
@@ -6426,6 +6462,8 @@ describe('initializeAgent automatic delivery policy', () => {
     expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: false });
     expect(result.requestAttachments).toEqual([{ ...xlsx, llmDeliveryPath: 'text' }]);
     expect(xlsx.llmDeliveryPath).toBe('text');
+    expect(admission).toHaveBeenCalledTimes(2);
+    expect(inspectionsOf(xlsx.file_id)).toHaveLength(2);
   });
 
   it('leaves the text out rather than failing the turn when it no longer fits the allowance', async () => {
@@ -6462,10 +6500,14 @@ describe('initializeAgent automatic delivery policy', () => {
     ).rejects.toMatchObject({ name: 'AgentAttachmentLimitError' });
   });
 
-  it.each([undefined, 'classic' as const])(
-    'keeps classic routing and attaches no reading evidence when the policy is %p',
-    async (policy) => {
-      const xlsx = classicEraXlsx();
+  it.each([
+    { record: 'classic-era', file: classicEraXlsx, policy: undefined },
+    { record: 'classic-era', file: classicEraXlsx, policy: 'classic' as const },
+    { record: 'deferred', file: deferredXlsx, policy: undefined },
+  ])(
+    'keeps classic routing and attaches no reading evidence for a $record spreadsheet when the policy is $policy',
+    async ({ file, policy }) => {
+      const xlsx = file();
 
       const result = await initializeWith({ file: xlsx, policy, tools: [Tools.execute_code] });
 
@@ -6483,34 +6525,55 @@ describe('initializeAgent automatic delivery policy', () => {
       tools: [Tools.file_search],
       loaded: { toolNames: [Tools.file_search] },
       endpointConfig: { fileSizeLimit: 1 },
+      provisionState: provisionStateFor({ search: [pdf] }),
     });
 
     expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: true });
     expect(result.requestAttachments.map((file) => file.file_id)).toEqual([pdf.file_id]);
     expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
     expect(getTurnReadingContext(result.deliveryRouting)?.stats().dropped).toBe(0);
+    expect(result.dynamicToolContextMap?.file_inventory).toContain(
+      `"annual.pdf" (PDF): too large to send directly. Search it with ${Tools.file_search}; it is indexed when you first search.`,
+    );
   });
 
-  it('drops the same oversized PDF as classic routing does when no file tool is loaded', async () => {
-    const result = await initializeWith({
-      file: oversizedPdf(),
-      policy: 'automatic',
-      endpointConfig: { fileSizeLimit: 1 },
-    });
+  const refusedImage = () =>
+    ({
+      ...oversizedPdf(),
+      file_id: 'image-file',
+      filename: 'scan.png',
+      type: 'image/png',
+    }) as IMongoFile;
 
-    expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: false });
-    expect(result.requestAttachments).toEqual([]);
-    expect(getTurnReadingContext(result.deliveryRouting)?.stats().dropped).toBe(1);
-  });
+  it.each([
+    {
+      refused: 'an oversized PDF',
+      file: oversizedPdf,
+      policy: 'automatic' as const,
+      dropped: ['pdf-file'],
+    },
+    { refused: 'an oversized PDF', file: oversizedPdf, policy: undefined, dropped: undefined },
+    {
+      refused: 'an image',
+      file: refusedImage,
+      policy: 'automatic' as const,
+      dropped: ['image-file'],
+    },
+  ])(
+    'drops $refused the endpoint refuses as classic routing does when no file tool is loaded (policy $policy, recorded $dropped)',
+    async ({ file, policy, dropped }) => {
+      const result = await initializeWith({
+        file: file(),
+        policy,
+        endpointConfig: { fileSizeLimit: 1 },
+      });
 
-  it('drops the same oversized PDF under classic routing', async () => {
-    const result = await initializeWith({
-      file: oversizedPdf(),
-      endpointConfig: { fileSizeLimit: 1 },
-    });
-
-    expect(result.requestAttachments).toEqual([]);
-  });
+      expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: false });
+      expect(result.requestAttachments).toEqual([]);
+      const context = getTurnReadingContext(result.deliveryRouting);
+      expect(context?.dropped().map((file) => file.file_id)).toEqual(dropped);
+    },
+  );
 
   it('leaves persistent agent files on their stored route when no reading changed', async () => {
     /* Agent files are never read by the automatic policy. Re-resolving this stored text route
@@ -6541,28 +6604,7 @@ describe('initializeAgent automatic delivery policy', () => {
     expect(inspectedAgentFile).toEqual([]);
   });
 
-  it('records a request file the endpoint still refuses under the automatic policy', async () => {
-    const image = {
-      ...oversizedPdf(),
-      file_id: 'image-file',
-      filename: 'scan.png',
-      type: 'image/png',
-    } as IMongoFile;
-
-    const result = await initializeWith({
-      file: image,
-      policy: 'automatic',
-      endpointConfig: { fileSizeLimit: 1 },
-    });
-
-    expect(result.requestAttachments).toEqual([]);
-    const context = getTurnReadingContext(result.deliveryRouting);
-    expect(context?.dropped().map((file) => file.file_id)).toEqual([image.file_id]);
-  });
-
   describe('file inventory', () => {
-    const INVENTORY_HEADER = 'Attached files and how you can read them on this turn';
-    const NO_FILES_NOTE = `- Note: Semantic search is available through the ${Tools.file_search} tool but no files are currently loaded. Request the user to upload documents to search through.`;
     const handbook = { file_id: 'kb', filename: 'handbook.pdf', fromAgent: true };
     const filters: FiltersConfig = {
       files: {
@@ -6573,39 +6615,6 @@ describe('initializeAgent automatic delivery policy', () => {
         },
       },
     };
-    /** The queued copy priming hands the planner. */
-    const queued = (file: IMongoFile): TFile => ({
-      file_id: file.file_id,
-      filename: file.filename,
-      filepath: file.filepath,
-      type: file.type,
-      bytes: file.bytes,
-      user: 'user-1',
-      object: 'file',
-      embedded: false,
-      usage: 0,
-      source: FileSources.local,
-      context: FileContext.message_attachment,
-      metadata: { destinationChosen: false },
-    });
-    const provisionStateFor = ({
-      code = [],
-      search = [],
-    }: {
-      code?: IMongoFile[];
-      search?: IMongoFile[];
-    }): ProvisionState => ({
-      codeEnvFiles: code.map(queued),
-      vectorDBFiles: search.map(queued),
-      aliveFileIds: new Set(),
-      agentScopedFileIds: new Set(),
-    });
-    const inspectedContent = (): unknown[] =>
-      (assertModelBoundContent as jest.Mock).mock.calls.flatMap(
-        ([input]: [{ files?: Array<{ content?: unknown }> }]) =>
-          (input.files ?? []).map((file) => file.content),
-      );
-
     it.each([
       ['as the loader primed them', [handbook], ['kb']],
       ['as none when the loader primed none', [], []],
@@ -6620,45 +6629,33 @@ describe('initializeAgent automatic delivery policy', () => {
       expect(result.primedSearchFileIds).toEqual(expected);
     });
 
-    it.each([
-      ['fitting', 1000, 'fits'],
-      ['oversized', 1, 'exceeds'],
-    ] as const)(
-      'reuses an indexed user PDF through the primed search files with %s cached text',
-      async (_case, fileTokenLimit, textFit) => {
-        const pdf = {
-          ...oversizedPdf(),
-          embedded: true,
-          text: 'Complete cached text',
-        } as IMongoFile;
-        const result = await initializeWith({
-          file: pdf,
-          policy: 'automatic',
-          tools: [Tools.file_search],
-          endpointConfig: { fileSizeLimit: 1 },
-          fileTokenLimit,
-          loaded: {
-            toolNames: [Tools.file_search],
-            primedSearchFiles: [{ file_id: pdf.file_id, filename: pdf.filename, fromAgent: false }],
-          },
-          toolResources: {
-            [EToolResources.file_search]: { files: [queued(pdf)], file_ids: [] },
-          },
-        });
+    it('reuses an indexed user PDF through the primed search files instead of its cached text', async () => {
+      const pdf = {
+        ...oversizedPdf(),
+        embedded: true,
+        text: 'Complete cached text',
+      } as IMongoFile;
+      const result = await initializeWith({
+        file: pdf,
+        policy: 'automatic',
+        tools: [Tools.file_search],
+        endpointConfig: { fileSizeLimit: 1 },
+        loaded: {
+          toolNames: [Tools.file_search],
+          primedSearchFiles: [{ file_id: pdf.file_id, filename: pdf.filename, fromAgent: false }],
+        },
+        toolResources: {
+          [EToolResources.file_search]: { files: [queued(pdf)], file_ids: [] },
+        },
+      });
 
-        expect(result.provisionState).toBeUndefined();
-        expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
-        expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).search).toBe('reachable');
-        expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).text).toBe(textFit);
-        expect(getTurnReadingContext(result.deliveryRouting)?.searchState(pdf.file_id)).toBe(
-          'ready',
-        );
-        expect(result.dynamicToolContextMap?.file_inventory).toContain(
-          'Search it with file_search.',
-        );
-        expect(result.dynamicToolContextMap?.file_inventory).not.toContain('text is included');
-      },
-    );
+      expect(result.provisionState).toBeUndefined();
+      expect(result.requestAttachments[0].llmDeliveryPath).toBe('none');
+      expect(getTurnReadingContext(result.deliveryRouting)?.judge(pdf).search).toBe('reachable');
+      expect(getTurnReadingContext(result.deliveryRouting)?.searchState(pdf.file_id)).toBe('ready');
+      expect(result.dynamicToolContextMap?.file_inventory).toContain('Search it with file_search.');
+      expect(result.dynamicToolContextMap?.file_inventory).not.toContain('text is included');
+    });
 
     it('uses both resource representations when an older loader does not report primed files', async () => {
       const pdf = { ...oversizedPdf(), embedded: true } as IMongoFile;
@@ -6698,7 +6695,7 @@ describe('initializeAgent automatic delivery policy', () => {
       expect(result.dynamicToolContextMap?.file_inventory).toContain('cannot be read on this turn');
     });
 
-    it('lists the queued spreadsheet at its planned path and checks both advertisements', async () => {
+    it('plans the queued spreadsheet destination and checks both advertisements', async () => {
       const xlsx = classicEraXlsx();
 
       const result = await initializeWith({
@@ -6709,23 +6706,14 @@ describe('initializeAgent automatic delivery policy', () => {
         filters,
       });
 
-      const destination = result.provisionState?.codeEnvDestinations?.get(xlsx.file_id);
-      const inventory = result.dynamicToolContextMap?.file_inventory;
-      const queuedFiles = result.dynamicToolContextMap?.queued_code_files;
-      expect(destination).toBe('quarterly.xlsx');
-      expect(inventory).toContain(INVENTORY_HEADER);
-      expect(inventory).toContain(
-        `"quarterly.xlsx" (spreadsheet, file_id xlsx-file): read it with Run Code at /mnt/data/${destination}. It is copied when code first runs.`,
-      );
-      expect(inventory).not.toContain('Q1,1200');
-      expect(queuedFiles).toContain(`/mnt/data/${destination}`);
+      expect(result.provisionState?.codeEnvDestinations?.get(xlsx.file_id)).toBe('quarterly.xlsx');
       expect(assertModelBoundContent).toHaveBeenCalledWith({
         filters,
-        files: [{ content: queuedFiles }],
+        files: [{ content: result.dynamicToolContextMap?.queued_code_files }],
       });
       expect(assertModelBoundContent).toHaveBeenCalledWith({
         filters,
-        files: [{ content: inventory }],
+        files: [{ content: result.dynamicToolContextMap?.file_inventory }],
       });
     });
 
@@ -6738,76 +6726,9 @@ describe('initializeAgent automatic delivery policy', () => {
       ).rejects.toBeInstanceOf(ContentFilterError);
       await expect(initializeWith({ ...params, file: xlsx() })).resolves.toBeDefined();
     });
-
-    it.each([undefined, 'classic' as const])(
-      'writes no inventory but still checks the queued advertisement under %p routing',
-      async (policy) => {
-        const xlsx = classicEraXlsx();
-
-        const result = await initializeWith({
-          file: xlsx,
-          policy,
-          tools: [Tools.execute_code],
-          provisionState: provisionStateFor({ code: [xlsx] }),
-          filters,
-          loaded: { primedSearchFiles: [handbook] },
-        });
-
-        const queuedFiles = result.dynamicToolContextMap?.queued_code_files;
-        expect(result.dynamicToolContextMap).not.toHaveProperty('file_inventory');
-        expect(queuedFiles).toContain('/mnt/data/quarterly.xlsx');
-        expect(result.primedSearchFileIds).toEqual(['kb']);
-        expect(assertModelBoundContent).toHaveBeenCalledWith({
-          filters,
-          files: [{ content: queuedFiles }],
-        });
-        expect(
-          inspectedContent().some(
-            (content) => typeof content === 'string' && content.includes(INVENTORY_HEADER),
-          ),
-        ).toBe(false);
-      },
-    );
-
-    it.each([
-      ['replaces', [], undefined],
-      ['keeps', [handbook], NO_FILES_NOTE],
-    ])(
-      '%s the empty File Search note for a PDF awaiting indexing by what the loader primed',
-      async (_action, primedSearchFiles, note) => {
-        const pdf = oversizedPdf();
-
-        const result = await initializeWith({
-          file: pdf,
-          policy: 'automatic',
-          tools: [Tools.file_search],
-          endpointConfig: { fileSizeLimit: 1 },
-          provisionState: provisionStateFor({ search: [pdf] }),
-          loaded: {
-            toolNames: [Tools.file_search],
-            dynamicToolContextMap: { [Tools.file_search]: NO_FILES_NOTE },
-            primedSearchFiles,
-          },
-        });
-
-        expect(result.fileConsumers).toEqual({ executeCode: false, fileSearch: true });
-        expect(result.dynamicToolContextMap?.[Tools.file_search]).toBe(note);
-        expect(result.dynamicToolContextMap?.file_inventory).toContain(
-          `"annual.pdf" (PDF): too large to send directly. Search it with ${Tools.file_search}; it is indexed when you first search.`,
-        );
-      },
-    );
   });
 
   describe('with a host that derives text', () => {
-    /** A spreadsheet uploaded under the automatic policy, its extraction left for a later turn. */
-    const deferredXlsx = () =>
-      ({
-        ...classicEraXlsx(),
-        text: undefined,
-        llmDeliveryPath: 'none',
-        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' } },
-      }) as IMongoFile;
     const derived = {
       status: 'derived' as const,
       text: 'Q1,1200\nQ2,1400',

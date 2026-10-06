@@ -1,7 +1,12 @@
 import { Providers } from '@librechat/agents';
 import { mbToBytes, fileConfig as baseFileConfig } from 'librechat-data-provider';
 import type { AppConfig, IMongoFile } from '@librechat/data-schemas';
-import type { NativeValidationMode, DocumentResult, ServerRequest } from '~/types';
+import type {
+  NativeValidationMode,
+  DocumentRejection,
+  DocumentResult,
+  ServerRequest,
+} from '~/types';
 import { encodeAndFormatDocuments } from './document';
 
 /** Mock the validation module */
@@ -1195,6 +1200,27 @@ describe('encodeAndFormatDocuments - fileConfig integration', () => {
       }));
     };
 
+    type ServedFile = { file: IMongoFile; bytes?: Buffer; reason?: DocumentRejection['reason'] };
+
+    /** Serves the bytes each row declares and returns its files in order. */
+    const serveRows = (rows: ServedFile[]): IMongoFile[] => {
+      const contents = new Map<string, Buffer>();
+      for (const { file, bytes } of rows) {
+        if (bytes != null) {
+          contents.set(file.file_id, bytes);
+        }
+      }
+      serveContents(contents);
+      return rows.map(({ file }) => file);
+    };
+    const rejectedOf = (rows: ServedFile[]): DocumentRejection[] =>
+      rows.flatMap(({ file, reason }) =>
+        reason == null ? [] : [{ file_id: file.file_id, reason }],
+      );
+    const keptOf = (rows: ServedFile[]): IMongoFile[] =>
+      rows.filter(({ reason }) => reason == null).map(({ file }) => file);
+    const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
     type UnreadableSet = Record<'unreadable' | 'unstored' | 'empty' | 'readable', IMongoFile>;
 
     /** A failed read, a record with no stored object, a zero-byte object and a readable file. */
@@ -1250,178 +1276,178 @@ describe('encodeAndFormatDocuments - fileConfig integration', () => {
     });
 
     describe('skip', () => {
-      it('records a PDF over the configured limit as capacity, omits it and keeps the others', async () => {
-        const req = createMockRequest(1) as ServerRequest;
-        const oversized = createMockFile(2);
-        const small = createMockFile(0.01);
-        serveContents(
-          new Map([
-            [oversized.file_id, pdfBytes(mbToBytes(2))],
-            [small.file_id, pdfBytes(1024)],
-          ]),
-        );
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [oversized, small],
-          { provider: Providers.OPENAI, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result.rejected).toEqual([{ file_id: oversized.file_id, reason: 'capacity' }]);
-        expect(result.documents).toHaveLength(1);
-        expect(result.files).toEqual([small]);
-      });
-
-      it('records an encrypted Anthropic PDF as integrity and keeps a readable one', async () => {
-        const req = createMockRequest(30, Providers.ANTHROPIC) as ServerRequest;
-        const encrypted = createMockFile(0.01);
-        const readable = createMockFile(0.01);
-        const encryptedBytes = pdfBytes(1024);
-        encryptedBytes.write('/Encrypt ', 100);
-        serveContents(
-          new Map([
-            [encrypted.file_id, encryptedBytes],
-            [readable.file_id, pdfBytes(1024)],
-          ]),
-        );
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [encrypted, readable],
-          { provider: Providers.ANTHROPIC, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result.rejected).toEqual([{ file_id: encrypted.file_id, reason: 'integrity' }]);
-        expect(result.documents).toEqual([
-          expect.objectContaining({
+      it.each<{
+        name: string;
+        request: Partial<AppConfig>;
+        provider: Providers;
+        serve: () => ServedFile[];
+        document: unknown;
+      }>([
+        {
+          name: 'a PDF over the configured limit as capacity',
+          request: createMockRequest(1),
+          provider: Providers.OPENAI,
+          serve: () => [
+            { file: createMockFile(2), bytes: pdfBytes(mbToBytes(2)), reason: 'capacity' },
+            { file: createMockFile(0.01), bytes: pdfBytes(1024) },
+          ],
+          document: expect.anything(),
+        },
+        {
+          name: 'an encrypted Anthropic PDF as integrity',
+          request: createMockRequest(30, Providers.ANTHROPIC),
+          provider: Providers.ANTHROPIC,
+          serve: () => {
+            const encryptedBytes = pdfBytes(1024);
+            encryptedBytes.write('/Encrypt ', 100);
+            return [
+              { file: createMockFile(0.01), bytes: encryptedBytes, reason: 'integrity' },
+              { file: createMockFile(0.01), bytes: pdfBytes(1024) },
+            ];
+          },
+          document: expect.objectContaining({
             type: 'document',
             source: expect.objectContaining({ media_type: 'application/pdf' }),
           }),
-        ]);
-        expect(result.files).toEqual([readable]);
-      });
-
-      it('records Bedrock capacity and integrity failures with their own reasons', async () => {
-        const req = createMockRequest() as ServerRequest;
-        const largeCsv = createMockDocFile(5, 'text/csv', 'large.csv');
-        const headerless = createMockDocFile(0.01, 'application/pdf', 'broken.pdf');
-        const smallCsv = createMockDocFile(0.01, 'text/csv', 'small.csv');
-        const brokenBytes = Buffer.alloc(1024);
-        brokenBytes.write('INVALID', 0);
-        serveContents(
-          new Map([
-            [largeCsv.file_id, Buffer.alloc(mbToBytes(5))],
-            [headerless.file_id, brokenBytes],
-            [smallCsv.file_id, Buffer.from('a,b\n1,2')],
-          ]),
-        );
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [largeCsv, headerless, smallCsv],
-          { provider: Providers.BEDROCK, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result.rejected).toEqual([
-          { file_id: largeCsv.file_id, reason: 'capacity' },
-          { file_id: headerless.file_id, reason: 'integrity' },
-        ]);
-        expect(result.documents).toEqual([
-          expect.objectContaining({
+        },
+        {
+          name: 'Bedrock capacity and integrity failures with their own reasons',
+          request: createMockRequest(),
+          provider: Providers.BEDROCK,
+          serve: () => {
+            const brokenBytes = Buffer.alloc(1024);
+            brokenBytes.write('INVALID', 0);
+            return [
+              {
+                file: createMockDocFile(5, 'text/csv', 'large.csv'),
+                bytes: Buffer.alloc(mbToBytes(5)),
+                reason: 'capacity',
+              },
+              {
+                file: createMockDocFile(0.01, 'application/pdf', 'broken.pdf'),
+                bytes: brokenBytes,
+                reason: 'integrity',
+              },
+              {
+                file: createMockDocFile(0.01, 'text/csv', 'small.csv'),
+                bytes: Buffer.from('a,b\n1,2'),
+              },
+            ];
+          },
+          document: expect.objectContaining({
             type: 'document',
             document: expect.objectContaining({ format: 'csv', name: 'small_csv' }),
           }),
-        ]);
-        expect(result.files).toEqual([smallCsv]);
-      });
-
-      it('records a generic file over the configured limit as capacity', async () => {
-        const req = createMockRequest(1, Providers.ANTHROPIC) as ServerRequest;
-        const large = createMockDocFile(2, 'text/plain', 'large.txt');
-        const notes = createMockDocFile(0.01, 'text/plain', 'notes.txt');
-        serveContents(
-          new Map([
-            [large.file_id, Buffer.alloc(mbToBytes(2))],
-            [notes.file_id, Buffer.from('notes')],
-          ]),
-        );
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [large, notes],
-          { provider: Providers.ANTHROPIC, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result.rejected).toEqual([{ file_id: large.file_id, reason: 'capacity' }]);
-        expect(result.files).toEqual([notes]);
-        expect(result.documents).toHaveLength(1);
-      });
-
-      it('reports every file as unsupported when the provider has no document path', async () => {
-        const req = createMockRequest(15) as ServerRequest;
-        const pdf = createMockFile(1);
-        const text = createMockDocFile(0.01, 'text/plain', 'notes.txt');
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [pdf, text],
-          { provider: Providers.AZURE, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result).toEqual({
-          documents: [],
-          files: [],
-          rejected: [
-            { file_id: pdf.file_id, reason: 'unsupported' },
-            { file_id: text.file_id, reason: 'unsupported' },
+        },
+        {
+          name: 'a generic file over the configured limit as capacity',
+          request: createMockRequest(1, Providers.ANTHROPIC),
+          provider: Providers.ANTHROPIC,
+          serve: () => [
+            {
+              file: createMockDocFile(2, 'text/plain', 'large.txt'),
+              bytes: Buffer.alloc(mbToBytes(2)),
+              reason: 'capacity',
+            },
+            {
+              file: createMockDocFile(0.01, 'text/plain', 'notes.txt'),
+              bytes: Buffer.from('notes'),
+            },
           ],
-        });
-        expect(mockedGetFileStream).not.toHaveBeenCalled();
-      });
+          document: expect.anything(),
+        },
+      ])(
+        'records $name, omitting the failures and keeping the rest',
+        async ({ request, provider, serve, document }) => {
+          const rows = serve();
 
-      it('reports a type with no Bedrock document format as unsupported', async () => {
-        const req = createMockRequest() as ServerRequest;
-        const archive = createMockDocFile(0.01, 'application/zip', 'archive.zip');
-        const csv = createMockDocFile(0.01, 'text/csv', 'data.csv');
-        serveContents(new Map([[csv.file_id, Buffer.from('a,b\n1,2')]]));
+          const result = await encodeAndFormatDocuments(
+            request as ServerRequest,
+            serveRows(rows),
+            { provider, onValidationFailure: 'skip' },
+            mockStrategyFunctions,
+          );
+
+          expect(result.rejected).toEqual(rejectedOf(rows));
+          expect(result.documents).toEqual([document]);
+          expect(result.files).toEqual(keptOf(rows));
+        },
+      );
+
+      it.each<{
+        name: string;
+        request: Partial<AppConfig>;
+        provider: Providers;
+        serve: () => ServedFile[];
+        reads?: number;
+      }>([
+        {
+          name: 'every file when the provider has no document path',
+          request: createMockRequest(15),
+          provider: Providers.AZURE,
+          serve: () => [
+            { file: createMockFile(1), reason: 'unsupported' },
+            { file: createMockDocFile(0.01, 'text/plain', 'notes.txt'), reason: 'unsupported' },
+          ],
+          reads: 0,
+        },
+        {
+          name: 'a type with no Bedrock document format',
+          request: createMockRequest(),
+          provider: Providers.BEDROCK,
+          serve: () => [
+            {
+              file: createMockDocFile(0.01, 'application/zip', 'archive.zip'),
+              reason: 'unsupported',
+            },
+            {
+              file: createMockDocFile(0.01, 'text/csv', 'data.csv'),
+              bytes: Buffer.from('a,b\n1,2'),
+            },
+          ],
+          reads: 1,
+        },
+        {
+          name: 'a type Claude document input cannot take',
+          request: createMockRequest(30, Providers.ANTHROPIC),
+          provider: Providers.ANTHROPIC,
+          serve: () => [
+            { file: createMockDocFile(0.01, DOCX, 'report.docx'), reason: 'unsupported' },
+            {
+              file: createMockDocFile(0.01, 'text/markdown', 'readme.md'),
+              bytes: Buffer.from('# heading'),
+            },
+          ],
+          reads: 1,
+        },
+        {
+          name: 'a file no block format exists for',
+          request: createMockRequest(),
+          provider: providerWithoutBlockFormat,
+          serve: () => [
+            {
+              file: createMockDocFile(0.01, 'text/plain', 'notes.txt'),
+              bytes: Buffer.from('notes'),
+              reason: 'unsupported',
+            },
+          ],
+        },
+      ])('reports $name as unsupported', async ({ request, provider, serve, reads }) => {
+        const rows = serve();
 
         const result = await encodeAndFormatDocuments(
-          req,
-          [archive, csv],
-          { provider: Providers.BEDROCK, onValidationFailure: 'skip' },
+          request as ServerRequest,
+          serveRows(rows),
+          { provider, onValidationFailure: 'skip' },
           mockStrategyFunctions,
         );
 
-        expect(result.rejected).toEqual([{ file_id: archive.file_id, reason: 'unsupported' }]);
-        expect(result.files).toEqual([csv]);
-        expect(mockedGetFileStream).toHaveBeenCalledTimes(1);
-      });
-
-      it('reports a type Claude document input cannot take as unsupported', async () => {
-        const req = createMockRequest(30, Providers.ANTHROPIC) as ServerRequest;
-        const docx = createMockDocFile(
-          0.01,
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          'report.docx',
-        );
-        const readme = createMockDocFile(0.01, 'text/markdown', 'readme.md');
-        serveContents(new Map([[readme.file_id, Buffer.from('# heading')]]));
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [docx, readme],
-          { provider: Providers.ANTHROPIC, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result.rejected).toEqual([{ file_id: docx.file_id, reason: 'unsupported' }]);
-        expect(result.files).toEqual([readme]);
-        expect(mockedGetFileStream).toHaveBeenCalledTimes(1);
+        expect(result.rejected).toEqual(rejectedOf(rows));
+        expect(result.files).toEqual(keptOf(rows));
+        expect(result.documents).toHaveLength(keptOf(rows).length);
+        if (reads != null) {
+          expect(mockedGetFileStream).toHaveBeenCalledTimes(reads);
+        }
       });
 
       it('returns an empty rejected list when every file encodes', async () => {
@@ -1454,25 +1480,6 @@ describe('encodeAndFormatDocuments - fileConfig integration', () => {
         expect(result.documents).toEqual([expect.objectContaining({ type: 'file' })]);
       });
 
-      it('reports a file no block format exists for as unsupported', async () => {
-        const req = createMockRequest() as ServerRequest;
-        const notes = createMockDocFile(0.01, 'text/plain', 'notes.txt');
-        serveContents(new Map([[notes.file_id, Buffer.from('notes')]]));
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [notes],
-          { provider: providerWithoutBlockFormat, onValidationFailure: 'skip' },
-          mockStrategyFunctions,
-        );
-
-        expect(result).toEqual({
-          documents: [],
-          files: [],
-          rejected: [{ file_id: notes.file_id, reason: 'unsupported' }],
-        });
-      });
-
       it('still rethrows a missing storage object', async () => {
         const req = createMockRequest(15) as ServerRequest;
         const missing = createMockFile(0.01);
@@ -1496,55 +1503,63 @@ describe('encodeAndFormatDocuments - fileConfig integration', () => {
     });
 
     describe('throw', () => {
-      it.each([undefined, 'throw'] as const)(
-        'throws the unchanged PDF capacity error when the mode is %s',
-        async (onValidationFailure) => {
-          const req = createMockRequest(1) as ServerRequest;
-          const file = createMockFile(2);
-          serveContents(new Map([[file.file_id, pdfBytes(mbToBytes(2))]]));
-
+      it.each<{
+        name: string;
+        request: Partial<AppConfig>;
+        provider: Providers;
+        onValidationFailure?: NativeValidationMode;
+        serve: () => ServedFile;
+        message: string;
+      }>([
+        {
+          name: 'PDF capacity error when the mode is omitted',
+          request: createMockRequest(1),
+          provider: Providers.OPENAI,
+          serve: () => ({ file: createMockFile(2), bytes: pdfBytes(mbToBytes(2)) }),
+          message: 'PDF validation failed: PDF file size (2MB) exceeds the 1MB limit',
+        },
+        {
+          name: 'PDF capacity error when the mode is throw',
+          request: createMockRequest(1),
+          provider: Providers.OPENAI,
+          onValidationFailure: 'throw',
+          serve: () => ({ file: createMockFile(2), bytes: pdfBytes(mbToBytes(2)) }),
+          message: 'PDF validation failed: PDF file size (2MB) exceeds the 1MB limit',
+        },
+        {
+          name: 'Bedrock capacity error',
+          request: createMockRequest(),
+          provider: Providers.BEDROCK,
+          serve: () => ({
+            file: createMockDocFile(5, 'text/csv', 'large.csv'),
+            bytes: Buffer.alloc(mbToBytes(5)),
+          }),
+          message:
+            'Document validation failed: File size (5.0MB) exceeds the 4.5MB limit for Bedrock',
+        },
+        {
+          name: 'generic capacity error',
+          request: createMockRequest(1, Providers.ANTHROPIC),
+          provider: Providers.ANTHROPIC,
+          serve: () => ({
+            file: createMockDocFile(2, 'text/plain', 'large.txt'),
+            bytes: Buffer.alloc(mbToBytes(2)),
+          }),
+          message: 'File size (~2.0MB) exceeds the configured limit for anthropic',
+        },
+      ])(
+        'throws the unchanged $name',
+        async ({ request, provider, onValidationFailure, serve, message }) => {
           await expect(
             encodeAndFormatDocuments(
-              req,
-              [file],
-              { provider: Providers.OPENAI, onValidationFailure },
+              request as ServerRequest,
+              serveRows([serve()]),
+              { provider, onValidationFailure },
               mockStrategyFunctions,
             ),
-          ).rejects.toThrow('PDF validation failed: PDF file size (2MB) exceeds the 1MB limit');
+          ).rejects.toThrow(message);
         },
       );
-
-      it('throws the unchanged Bedrock capacity error', async () => {
-        const req = createMockRequest() as ServerRequest;
-        const file = createMockDocFile(5, 'text/csv', 'large.csv');
-        serveContents(new Map([[file.file_id, Buffer.alloc(mbToBytes(5))]]));
-
-        await expect(
-          encodeAndFormatDocuments(
-            req,
-            [file],
-            { provider: Providers.BEDROCK },
-            mockStrategyFunctions,
-          ),
-        ).rejects.toThrow(
-          'Document validation failed: File size (5.0MB) exceeds the 4.5MB limit for Bedrock',
-        );
-      });
-
-      it('throws the unchanged generic capacity error', async () => {
-        const req = createMockRequest(1, Providers.ANTHROPIC) as ServerRequest;
-        const file = createMockDocFile(2, 'text/plain', 'large.txt');
-        serveContents(new Map([[file.file_id, Buffer.alloc(mbToBytes(2))]]));
-
-        await expect(
-          encodeAndFormatDocuments(
-            req,
-            [file],
-            { provider: Providers.ANTHROPIC },
-            mockStrategyFunctions,
-          ),
-        ).rejects.toThrow('File size (~2.0MB) exceeds the configured limit for anthropic');
-      });
 
       it('logs and leaves out unreadable and unstored files and keeps an empty one in files', async () => {
         const files = serveUnreadableSet();
@@ -1556,47 +1571,42 @@ describe('encodeAndFormatDocuments - fileConfig integration', () => {
         expect(result.documents).toEqual([expect.objectContaining({ type: 'file' })]);
       });
 
-      it('leaves out a file no block format exists for without recording it', async () => {
-        const req = createMockRequest() as ServerRequest;
-        const notes = createMockDocFile(0.01, 'text/plain', 'notes.txt');
-        serveContents(new Map([[notes.file_id, Buffer.from('notes')]]));
-
-        const result = await encodeAndFormatDocuments(
-          req,
-          [notes],
-          { provider: providerWithoutBlockFormat },
-          mockStrategyFunctions,
-        );
-
-        expect(result).toEqual({ documents: [], files: [] });
-      });
-
-      it('leaves rejected off the result, including for files the provider cannot take', async () => {
+      it('leaves rejected off the result, leaving out files the provider cannot take', async () => {
         const req = createMockRequest(30, Providers.ANTHROPIC) as ServerRequest;
-        const docx = createMockDocFile(
-          0.01,
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          'report.docx',
-        );
+        const notes = createMockDocFile(0.01, 'text/plain', 'notes.txt');
+        const docx = createMockDocFile(0.01, DOCX, 'report.docx');
         const readme = createMockDocFile(0.01, 'text/markdown', 'readme.md');
-        serveContents(new Map([[readme.file_id, Buffer.from('# heading')]]));
+        serveContents(
+          new Map([
+            [notes.file_id, Buffer.from('notes')],
+            [readme.file_id, Buffer.from('# heading')],
+          ]),
+        );
 
+        await expect(
+          encodeAndFormatDocuments(
+            createMockRequest() as ServerRequest,
+            [notes],
+            { provider: providerWithoutBlockFormat },
+            mockStrategyFunctions,
+          ),
+        ).resolves.toEqual({ documents: [], files: [] });
         const anthropicResult = await encodeAndFormatDocuments(
           req,
           [docx, readme],
           { provider: Providers.ANTHROPIC },
           mockStrategyFunctions,
         );
-        const azureResult = await encodeAndFormatDocuments(
-          req,
-          [readme],
-          { provider: Providers.AZURE },
-          mockStrategyFunctions,
-        );
-
         expect(anthropicResult).not.toHaveProperty('rejected');
         expect(anthropicResult.files).toEqual([readme]);
-        expect(azureResult).toEqual({ documents: [], files: [] });
+        await expect(
+          encodeAndFormatDocuments(
+            req,
+            [readme],
+            { provider: Providers.AZURE },
+            mockStrategyFunctions,
+          ),
+        ).resolves.toEqual({ documents: [], files: [] });
       });
     });
   });

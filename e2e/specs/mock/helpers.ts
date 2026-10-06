@@ -437,21 +437,23 @@ export async function getRagQueries(page: Page): Promise<RagQueryRecord[]> {
   return body.queries;
 }
 
-/** Files the fake code server received via /upload (proof they reached the code env). */
-export async function getCodeProvisionedUploads(page: Page): Promise<CodeProvisionRecord[]> {
+/** The fake code server's record of what it received and ran since the last reset. */
+async function getCodeDebug(page: Page): Promise<{
+  uploads: CodeProvisionRecord[];
+  execs: CodeExecRecord[];
+}> {
   const response = await page.request.get(`${CODE_API_BASE}/__debug/uploads`);
   expect(response.ok(), 'fake code server /__debug/uploads should respond').toBeTruthy();
-  const body = (await response.json()) as { uploads: CodeProvisionRecord[] };
-  return body.uploads;
+  return response.json();
 }
 
+/** Files the fake code server received via /upload (proof they reached the code env). */
+export const getCodeProvisionedUploads = async (page: Page): Promise<CodeProvisionRecord[]> =>
+  (await getCodeDebug(page)).uploads;
+
 /** Every exec the fake code server ran since the last reset. */
-export async function getCodeExecs(page: Page): Promise<CodeExecRecord[]> {
-  const response = await page.request.get(`${CODE_API_BASE}/__debug/uploads`);
-  expect(response.ok(), 'fake code server /__debug/uploads should respond').toBeTruthy();
-  const body = (await response.json()) as { execs: CodeExecRecord[] };
-  return body.execs;
-}
+export const getCodeExecs = async (page: Page): Promise<CodeExecRecord[]> =>
+  (await getCodeDebug(page)).execs;
 
 /** Files the fake RAG server embedded via /embed (proof they reached the vector DB). */
 export async function getRagEmbedded(page: Page): Promise<RagEmbedRecord[]> {

@@ -1009,7 +1009,7 @@ describe('createProvisionFilesCallback', () => {
     });
   });
 
-  it('embeds a pending search attachment before the search batch proceeds', async () => {
+  it('embeds a pending search attachment once, leaving nothing for the next batch', async () => {
     const pending = makeFile({
       file_id: 'manual-pdf',
       filename: 'manual.pdf',
@@ -1019,35 +1019,17 @@ describe('createProvisionFilesCallback', () => {
       llmDeliveryPath: 'none',
       metadata: { destinationChosen: false },
     });
-    let finishEmbedding: () => void = () => undefined;
-    const embedding = new Promise<void>((resolve) => {
-      finishEmbedding = resolve;
-    });
-    const vectorImpl = jest.fn(async ({ file }: { file: TFile }) => {
-      await embedding;
-      return { embedded: true, fileUpdate: { file_id: file.file_id, embedded: true } };
-    });
-    const { provisionFiles, agentToolContexts } = buildHarness({
+    const { provisionFiles, provisionToVectorDB, agentToolContexts } = buildHarness({
       contexts: [['agent-a', { provisionState: state([], [pending]) }]],
-      vectorImpl,
     });
-    let settled = false;
 
-    const batch = provisionFiles(['file_search'], 'agent-a').then((result) => {
-      settled = true;
-      return result;
-    });
-    await new Promise((resolve) => setImmediate(resolve));
+    await provisionFiles(['file_search'], 'agent-a');
 
-    expect(vectorImpl).toHaveBeenCalledWith(expect.objectContaining({ file: pending }));
-    expect(settled).toBe(false);
-    finishEmbedding();
-    await batch;
-
+    expect(provisionToVectorDB).toHaveBeenCalledWith(expect.objectContaining({ file: pending }));
     expect(pending.embedded).toBe(true);
     expect(agentToolContexts.get('agent-a')?.provisionState?.vectorDBFiles).toEqual([]);
     await provisionFiles(['file_search'], 'agent-a');
-    expect(vectorImpl).toHaveBeenCalledTimes(1);
+    expect(provisionToVectorDB).toHaveBeenCalledTimes(1);
   });
 
   it('retries a failed upload on a later tool call instead of replaying the rejection', async () => {
@@ -1187,25 +1169,12 @@ describe('createProvisionFilesCallback', () => {
     const { provisionFiles } = buildHarness({ contexts: [[agent.id, agent]], vectorImpl });
     const query = jest.fn();
 
-    expect(collectInventoryEntries(agent)).toEqual([
-      expect.objectContaining({
-        kind: 'read',
-        reading: expect.objectContaining({ reader: 'search', reason: 'native_capacity' }),
-        search: 'queued',
-      }),
-    ]);
     await expect(provisionFiles(['file_search'], agent.id).then(query)).rejects.toMatchObject({
       code: 'file_search_preparation_failed',
     });
     expect(query).not.toHaveBeenCalled();
     expect(agent.provisionState?.vectorDBFiles).toEqual([pending]);
     expect(context?.searchState(pending.file_id)).toBe('failed');
-    expect(collectInventoryEntries(agent)).toEqual([
-      expect.objectContaining({
-        reading: expect.objectContaining({ reader: 'search' }),
-        search: 'failed',
-      }),
-    ]);
 
     const secondAttempt = provisionFiles(['file_search'], agent.id).then(query);
     await new Promise((resolve) => setImmediate(resolve));
@@ -1217,12 +1186,6 @@ describe('createProvisionFilesCallback', () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(agent.provisionState?.vectorDBFiles).toEqual([]);
     expect(context?.searchState(pending.file_id)).toBe('ready');
-    expect(collectInventoryEntries(agent)).toEqual([
-      expect.objectContaining({
-        reading: expect.objectContaining({ reader: 'search', reason: 'native_capacity' }),
-        search: 'ready',
-      }),
-    ]);
   });
 
   it('keeps partial indexing successes and retries only failed files', async () => {

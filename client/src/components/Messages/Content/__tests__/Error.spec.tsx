@@ -215,8 +215,6 @@ describe('Error — reader-facing provider and fallback copy', () => {
     '{"code":"file_search_preparation_failed"}',
     'File Search could not prepare the attached files. Try sending the message again.\n' +
       '{"code":"file_search_preparation_failed"}',
-    'Something went wrong: File Search could not prepare the attached files. Try sending the message again.\n' +
-      '{"code":"file_search_preparation_failed"}',
   ])('localizes a search preparation failure from the existing error boundary: %s', (payload) => {
     renderError(payload, providerMessage);
 

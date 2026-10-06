@@ -520,74 +520,50 @@ describe('prepareAgentFileContext', () => {
   });
 
   describe('renderLeftOutFiles', () => {
-    it('names a shared document the message left out and how it can still be read', () => {
+    it('names a document the encoder rejected as read by File Search, in the inventory and the left-out list', () => {
       const pdf = attachment({
         file_id: 'brief',
         filename: 'brief.pdf',
         type: PDF,
         llmDeliveryPath: 'provider',
       });
-      const agent = agentWith({ consumers: SEARCHES, vectorDBFiles: [pdf] });
-      recordNativeRejections([agent], [{ file_id: 'brief', reason: 'integrity' }]);
+      const agent = agentWith({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
+      prepare(agent);
+      expect(lineFor(agent, 'brief.pdf')).toBe('\t- "brief.pdf" (PDF): sent with this message.');
 
+      recordNativeRejections([agent], [{ file_id: 'brief', reason: 'integrity' }]);
+      prepare(agent);
+
+      const leftOut = `\t- "brief.pdf" (PDF): the model could not accept it. Search it with ${Tools.file_search}; it is indexed when you first search. Results are excerpts, not the whole document.`;
+      expect(lineFor(agent, 'brief.pdf')).toBe(leftOut);
       expect(renderLeftOutFiles(agent, [pdf, pdf]).split('\n')).toEqual([
         '- Shared files left out of this message (file contents are not listed here):',
-        `\t- "brief.pdf" (PDF): the model could not accept it. Search it with ${Tools.file_search}; it is indexed when you first search. Results are excerpts, not the whole document.`,
+        leftOut,
       ]);
       expect(renderLeftOutFiles(agent, [])).toBe('');
     });
   });
 
-  it('re-renders a document the encoder rejected as read by File Search', () => {
+  const classicAgent = (endpointConfig: EndpointFileConfigInput): TestAgent => {
     const pdf = attachment({
-      file_id: 'brief',
-      filename: 'brief.pdf',
+      file_id: 'manual',
+      filename: 'manual.pdf',
       type: PDF,
+      bytes: 5 * MB,
       llmDeliveryPath: 'provider',
     });
-    const agent = agentWith({ files: [pdf], consumers: SEARCHES, vectorDBFiles: [pdf] });
-    prepare(agent);
-    expect(lineFor(agent, 'brief.pdf')).toBe('\t- "brief.pdf" (PDF): sent with this message.');
-
-    recordNativeRejections([agent], [{ file_id: 'brief', reason: 'integrity' }]);
-    prepare(agent);
-
-    expect(lineFor(agent, 'brief.pdf')).toBe(
-      `\t- "brief.pdf" (PDF): the model could not accept it. Search it with ${Tools.file_search}; it is indexed when you first search. Results are excerpts, not the whole document.`,
-    );
-  });
-
-  it.each([undefined, { llmDeliveryPolicy: 'classic' as const }])(
-    'writes no inventory and leaves the File Search note alone under classic routing (%p)',
-    (endpointConfig) => {
-      const pdf = attachment({
-        file_id: 'manual',
-        filename: 'manual.pdf',
-        type: PDF,
-        bytes: 5 * MB,
-        llmDeliveryPath: 'provider',
-      });
-      const workbook = attachment({ file_id: 'q3', filename: 'Q3.xlsx' });
-      const agent = agentWith({
-        files: [pdf, workbook],
-        consumers: { executeCode: true, fileSearch: true },
-        endpointConfig: endpointConfig ?? {},
-        codeEnvFiles: [workbook],
-        vectorDBFiles: [pdf],
-        primedSearchFileIds: [],
-        dynamicToolContextMap: { [Tools.file_search]: NO_FILES_NOTE, file_inventory: 'stale' },
-      });
-
-      prepare(agent);
-
-      expect(agent.dynamicToolContextMap).toEqual({
-        [Tools.file_search]: NO_FILES_NOTE,
-        queued_code_files: expect.stringContaining('/mnt/data/Q3.xlsx'),
-      });
-    },
-  );
-
-  it('writes no inventory and leaves the File Search note alone when no file tool is loaded', () => {
+    const workbook = attachment({ file_id: 'q3', filename: 'Q3.xlsx' });
+    return agentWith({
+      files: [pdf, workbook],
+      consumers: { executeCode: true, fileSearch: true },
+      endpointConfig,
+      codeEnvFiles: [workbook],
+      vectorDBFiles: [pdf],
+      primedSearchFileIds: [],
+      dynamicToolContextMap: { [Tools.file_search]: NO_FILES_NOTE, file_inventory: 'stale' },
+    });
+  };
+  const untooledAgent = (): TestAgent => {
     const pdf = attachment({
       file_id: 'manual',
       filename: 'manual.pdf',
@@ -606,10 +582,23 @@ describe('prepareAgentFileContext', () => {
     readingContextOf(agent).recordDropped([
       { file_id: 'scan', filename: 'scan.tiff', type: 'image/tiff', bytes: 9 * MB },
     ]);
+    return agent;
+  };
+  const queuedCodeOnly = {
+    [Tools.file_search]: NO_FILES_NOTE,
+    queued_code_files: expect.stringContaining('/mnt/data/Q3.xlsx'),
+  };
+
+  it.each<[string, () => TestAgent, Record<string, unknown>]>([
+    ['under classic routing with no policy set', () => classicAgent({}), queuedCodeOnly],
+    ['under classic routing', () => classicAgent({ llmDeliveryPolicy: 'classic' }), queuedCodeOnly],
+    ['when no file tool is loaded', untooledAgent, { [Tools.file_search]: NO_FILES_NOTE }],
+  ])('writes no inventory and leaves the File Search note alone %s', (_case, arrange, expected) => {
+    const agent = arrange();
 
     prepare(agent);
 
-    expect(agent.dynamicToolContextMap).toEqual({ [Tools.file_search]: NO_FILES_NOTE });
+    expect(agent.dynamicToolContextMap).toEqual(expected);
   });
 
   describe('the File Search note', () => {

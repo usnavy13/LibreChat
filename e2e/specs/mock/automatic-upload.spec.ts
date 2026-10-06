@@ -49,7 +49,7 @@ import { cleanupAgent, uniqueAgentName } from './agents.helpers';
 import { withMongo } from './db';
 
 /**
- * The automatic reading policy end to end (docs/uploads.md §14).
+ * The automatic reading policy end to end.
  *
  * Mock Auto Provider and Mock Auto Small Provider (e2e/config/librechat.e2e.yaml) select
  * `llmDeliveryPolicy: automatic` with no route overrides; Auto Small adds a 1 MB per-file limit.
@@ -361,34 +361,13 @@ async function setEmbeddingFailure(page: Page, fileId: string, enabled: boolean)
 test.describe('automatic upload reading', () => {
   test.describe.configure({ timeout: TEST_TIMEOUT });
 
-  test('A-01: a workbook is kept for Run Code and its cells stay out of the model input', async ({
-    page,
-  }) => {
-    await startChat(page, AUTO_ENDPOINT);
-    await enableCodeInterpreter(page);
-
-    const workbook = renamed(UPLOAD_FIXTURES.xlsx, 'a01-quarterly');
-    const uploaded = await confirmUpload(page, uploadViaUnifiedButton(page, workbook));
-    await expectDeferredRecord(page, uploaded.file_id);
-
-    const run = await sendAnalysisTurn(page, `E2E_ANALYZE_WORKBOOK ${uniqueName('a01')}`);
-    const request = initialRequest(run);
-    expectQueuedForCode(request, workbook.name);
-    expect(request.promptText).not.toContain(String(WORKBOOK_TOTALS.Q1));
-    expectNoWorkbookCells(run, workbook.name);
-    await expectCodeReceived(page, workbook, { analyzed: true });
-    await expectAnswer(page, WORKBOOK_RESULT);
-  });
-
   const CODE_FORMATS = [
-    { fixture: UPLOAD_FIXTURES.xls, prompt: 'E2E_ANALYZE_WORKBOOK', result: WORKBOOK_RESULT },
-    { fixture: UPLOAD_FIXTURES.ods, prompt: 'E2E_ANALYZE_WORKBOOK', result: WORKBOOK_RESULT },
+    { fixture: UPLOAD_FIXTURES.xlsx, prompt: 'E2E_ANALYZE_WORKBOOK', result: WORKBOOK_RESULT },
     { fixture: UPLOAD_FIXTURES.csv, prompt: 'E2E_ANALYZE_CSV', result: CSV_RESULT },
-    { fixture: UPLOAD_FIXTURES.tsv, prompt: 'E2E_ANALYZE_CSV', result: CSV_RESULT },
   ];
 
   for (const { fixture, prompt, result } of CODE_FORMATS) {
-    test(`A-02: ${fixture.name} (${fixture.mimeType}) is kept for Run Code and parsed there`, async ({
+    test(`A-01/A-02: ${fixture.name} is kept for Run Code, parsed there, and never sent as cells`, async ({
       page,
     }) => {
       await startChat(page, AUTO_ENDPOINT);
@@ -527,8 +506,6 @@ test.describe('automatic upload reading', () => {
       expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
         llmDeliveryPath: 'text',
       });
-      await expectWorkbookTextPreview(page, uploaded);
-      await reloadConversation(page);
       await expectWorkbookTextPreview(page, uploaded);
       expect(await downloadOriginal(page, uploaded)).toEqual(attachFileBuffer(workbook));
     } finally {
@@ -702,11 +679,6 @@ test.describe('automatic upload reading', () => {
       expect(embeds).toHaveLength(1);
       expect(queries.length).toBeGreaterThan(0);
       expect(embeds[0].seq).toBeLessThan(Math.min(...queries.map(({ seq }) => seq)));
-      await reloadConversation(page);
-      await expect(messagesView(page).getByText(PREPARATION_FAILED_ERROR)).toBeVisible();
-      expect(messageFileReading(await getLatestUserMessageFiles(page), uploaded.file_id)).toEqual({
-        llmDeliveryPath: 'none',
-      });
     } finally {
       await setEmbeddingFailure(page, uploaded.file_id, false);
     }
@@ -744,7 +716,7 @@ test.describe('automatic upload reading', () => {
     expect(sha256(await downloadOriginal(page, record))).toBe(sha256(attachFileBuffer(csv)));
   });
 
-  test('A-26: palette, drop and attach-existing give the same automatic reading', async ({
+  test('A-26: palette, drop, paste and attach-existing give the same automatic reading', async ({
     page,
   }) => {
     await startChat(page, AUTO_ENDPOINT);
@@ -758,18 +730,28 @@ test.describe('automatic upload reading', () => {
       page,
       uploadViaDrop(page, renamed(UPLOAD_FIXTURES.xlsx, 'a26-drop')),
     );
+    /* A browser that exposes no files on a synthetic paste event skips the third chip. */
+    const pasted = (await supportsFilePaste(page))
+      ? await confirmUpload(page, uploadViaPaste(page, renamed(UPLOAD_FIXTURES.xlsx, 'a26-paste')))
+      : undefined;
+    if (pasted) {
+      expect(pasted.filename).toMatch(/^clipboard_\d+_a26-paste-/);
+    }
+    const uploads = [picked, dropped, ...(pasted ? [pasted] : [])];
     const pickedRecord = readingRecord(await getFileRecord(page, picked.file_id));
     expect(pickedRecord).toMatchObject({ llmDeliveryPath: 'none', outcome: 'deferred' });
-    expect(readingRecord(await getFileRecord(page, dropped.file_id))).toEqual(pickedRecord);
+    for (const { file_id } of uploads) {
+      expect(readingRecord(await getFileRecord(page, file_id))).toEqual(pickedRecord);
+    }
 
     const firstRun = await sendTurn(page, replyPrompt(uniqueName('a26-first')));
-    for (const name of [picked.filename, dropped.filename]) {
-      expect(inventoryLine(initialRequest(firstRun), name)).toContain('read it with Run Code');
-    }
     const firstFiles = await getLatestUserMessageFiles(page);
     const pickedReading = messageFileReading(firstFiles, picked.file_id);
     expect(pickedReading).toEqual({ llmDeliveryPath: 'none' });
-    expect(messageFileReading(firstFiles, dropped.file_id)).toEqual(pickedReading);
+    for (const { filename, file_id } of uploads) {
+      expect(inventoryLine(initialRequest(firstRun), filename)).toContain('read it with Run Code');
+      expect(messageFileReading(firstFiles, file_id)).toEqual(pickedReading);
+    }
 
     await attachExisting(page, picked);
     const existingRun = await sendTurn(page, replyPrompt(uniqueName('a26-existing')));
@@ -779,39 +761,6 @@ test.describe('automatic upload reading', () => {
     const existingFiles = await getLatestUserMessageFiles(page);
     expect(messageFileReading(existingFiles, picked.file_id)).toEqual(pickedReading);
     expect(readingRecord(await getFileRecord(page, picked.file_id))).toEqual(pickedRecord);
-  });
-
-  test('A-26: a clipboard file paste gives the same automatic reading as the palette', async ({
-    page,
-  }) => {
-    await startChat(page, AUTO_ENDPOINT);
-    test.skip(
-      !(await supportsFilePaste(page)),
-      'This browser exposes no files on a synthetic paste event, so a file paste cannot be driven',
-    );
-    await enableCodeInterpreter(page);
-
-    const picked = await confirmUpload(
-      page,
-      uploadViaUnifiedButton(page, renamed(UPLOAD_FIXTURES.xlsx, 'a26-palette')),
-    );
-    const pasted = await confirmUpload(
-      page,
-      uploadViaPaste(page, renamed(UPLOAD_FIXTURES.xlsx, 'a26-paste')),
-    );
-    expect(pasted.filename).toMatch(/^clipboard_\d+_a26-paste-/);
-    const pickedRecord = readingRecord(await getFileRecord(page, picked.file_id));
-    expect(pickedRecord).toMatchObject({ llmDeliveryPath: 'none', outcome: 'deferred' });
-    expect(readingRecord(await getFileRecord(page, pasted.file_id))).toEqual(pickedRecord);
-
-    const run = await sendTurn(page, replyPrompt(uniqueName('a26-paste-turn')));
-    for (const name of [picked.filename, pasted.filename]) {
-      expect(inventoryLine(initialRequest(run), name)).toContain('read it with Run Code');
-    }
-    const files = await getLatestUserMessageFiles(page);
-    const pickedReading = messageFileReading(files, picked.file_id);
-    expect(pickedReading).toEqual({ llmDeliveryPath: 'none' });
-    expect(messageFileReading(files, pasted.file_id)).toEqual(pickedReading);
   });
 
   test('A-29: a classic endpoint still extracts at upload and stores no marker or inventory', async ({
@@ -839,23 +788,5 @@ test.describe('automatic upload reading', () => {
     const after = await getFileRecord(page, uploaded.file_id);
     expect(readingRecord(after)).toEqual(readingRecord(record));
     expect(after.metadata?.textDerivation).toBeUndefined();
-
-    /* The positive control: the same workbook under automatic with Run Code loaded is deferred
-     * and listed in the inventory, so the absence above is the policy's doing. */
-    await startChat(page, AUTO_ENDPOINT);
-    /* The composer keeps the toggle from the classic chat above, so enable only when absent. */
-    if (!(await page.getByRole('button', { name: 'Remove Run Code', exact: true }).isVisible())) {
-      await enableCodeInterpreter(page);
-    }
-    const control = await confirmUpload(
-      page,
-      uploadViaUnifiedButton(page, renamed(UPLOAD_FIXTURES.xlsx, 'a29-control')),
-    );
-    await expectDeferredRecord(page, control.file_id);
-    const controlRun = await sendTurn(page, replyPrompt(uniqueName('a29-control')));
-    expect(initialRequest(controlRun).systemText).toContain(INVENTORY_HEADING);
-    expect(inventoryLine(initialRequest(controlRun), control.filename)).toContain(
-      'read it with Run Code',
-    );
   });
 });

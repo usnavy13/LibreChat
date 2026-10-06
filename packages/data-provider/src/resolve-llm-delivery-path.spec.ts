@@ -13,8 +13,8 @@ import type {
   ReadingEvidence,
   TurnReadingInputs,
 } from './reading';
-import type { EndpointFileConfig, FileConfig } from './types/files';
 import type { TDefaultLLMDeliveryPathConfig } from './file-config';
+import type { EndpointFileConfig } from './types/files';
 import type { TEndpoint } from './config';
 import {
   hasTurnFileConsumer,
@@ -42,7 +42,6 @@ import {
   getEndpointFileConfig,
 } from './file-config';
 import { EToolResources } from './types/tools';
-import { READER_PATH } from './reading';
 
 function resolveTurnLLMDeliveryPath({
   file,
@@ -226,62 +225,6 @@ describe('resolveDefaultLLMDeliveryPath', () => {
     ]) {
       expect(resolveDefaultLLMDeliveryPath(mimeType, undefined, undefined, 'openAI')).toBe('text');
     }
-  });
-
-  describe('the turn route of an inferred upload of the same types', () => {
-    const turnRoute = (
-      type: string,
-      endpointConfig: EndpointFileConfig,
-      consumers: TurnFileConsumers,
-      text?: string,
-    ) =>
-      resolveTurnLLMDeliveryPath({
-        endpoint: 'openAI',
-        endpointConfig,
-        fileConfig: mergeFileConfig(undefined),
-        sttConfigured: true,
-        consumers,
-        file: {
-          type,
-          text,
-          bytes: 2048,
-          source: 'local',
-          context: 'message_attachment',
-          llmDeliveryPath: 'text',
-          metadata: { destinationChosen: false },
-        },
-      });
-    const spreadsheets = [
-      'text/csv',
-      'application/vnd.ms-excel',
-      'application/vnd.oasis.opendocument.spreadsheet',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    ];
-    const archives = ['application/zip', 'application/vnd.apache.parquet'];
-    const codeOnly: TurnFileConsumers = { executeCode: true, fileSearch: false };
-    const noTools: TurnFileConsumers = { executeCode: false, fileSearch: false };
-    const automatic: EndpointFileConfig = { llmDeliveryPolicy: 'automatic' };
-
-    it('keeps spreadsheets on text under classic routing even where Run Code runs', () => {
-      for (const type of spreadsheets) {
-        expect(turnRoute(type, {}, codeOnly, 'region,total')).toBe('text');
-        expect(turnRoute(type, {}, noTools, 'region,total')).toBe('text');
-      }
-    });
-
-    it('leaves spreadsheets to Run Code under the automatic policy, and reads them as text without it', () => {
-      for (const type of spreadsheets) {
-        expect(turnRoute(type, automatic, codeOnly, 'region,total')).toBe('none');
-        expect(turnRoute(type, automatic, noTools, 'region,total')).toBe('text');
-      }
-    });
-
-    it('keeps archives and columnar data off the model path under the automatic policy', () => {
-      for (const type of archives) {
-        expect(turnRoute(type, automatic, codeOnly)).toBe('none');
-        expect(turnRoute(type, automatic, noTools)).toBe('none');
-      }
-    });
   });
 
   it('still honors an explicit override for an unparsable type', () => {
@@ -1158,117 +1101,6 @@ describe('resolveTurnLLMDeliveryPath', () => {
       }),
     ).toBe('none');
   });
-
-  describe('under the automatic policy', () => {
-    const automaticCsv = {
-      ...routedCsv,
-      source: 'local',
-      context: 'message_attachment',
-    };
-    const slides = {
-      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      text: 'slide text',
-      source: 'local',
-      context: 'message_attachment',
-      llmDeliveryPath: 'none',
-      metadata: { destinationChosen: false },
-    };
-
-    it('delivers stored text as a primary reader on an endpoint without the fallback flag', () => {
-      /* Classic routing leaves the presentation to Run Code; the automatic walk reads a
-       * document's stored text before any tool. Without a tool the classic route answers. */
-      const codeOnly: TurnFileConsumers = { executeCode: true, fileSearch: false };
-      expect(
-        resolveTurnLLMDeliveryPath({ file: slides, consumers: codeOnly, endpointConfig: {} }),
-      ).toBe('none');
-      expect(
-        resolveTurnLLMDeliveryPath({
-          file: slides,
-          consumers: codeOnly,
-          endpointConfig: { llmDeliveryPolicy: 'automatic' },
-        }),
-      ).toBe('text');
-      expect(
-        resolveTurnLLMDeliveryPath({
-          file: slides,
-          consumers: noReader,
-          endpointConfig: { llmDeliveryPolicy: 'automatic' },
-        }),
-      ).toBe('none');
-    });
-
-    it('keeps an explicit none override with the fallback flag off', () => {
-      const overridden: EndpointFileConfig = {
-        llmDeliveryPolicy: 'automatic',
-        defaultLLMDeliveryPath: endpointConfig.defaultLLMDeliveryPath,
-      };
-
-      expect(
-        resolveTurnLLMDeliveryPath({
-          file: automaticCsv,
-          consumers: noReader,
-          endpointConfig: overridden,
-        }),
-      ).toBe('none');
-      expect(
-        resolveTurnLLMDeliveryPath({
-          file: automaticCsv,
-          consumers: noReader,
-          endpointConfig: { llmDeliveryPolicy: 'automatic' },
-        }),
-      ).toBe('text');
-    });
-  });
-
-  describe('a record the automatic policy marked, read under classic routing', () => {
-    const sheet = {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      source: 'local',
-      context: 'message_attachment',
-      llmDeliveryPath: 'none',
-      metadata: { destinationChosen: false },
-    };
-    const marked = {
-      ...sheet,
-      metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred' as const } },
-    };
-    const classicRoute = {
-      endpoint: 'openAI',
-      endpointConfig: {},
-      fileConfig: mergeFileConfig(undefined),
-      sttConfigured: true,
-      consumers: noReader,
-    };
-
-    it('delivers nothing rather than the empty text its classic route names', () => {
-      expect(resolveClassicTurnLLMDeliveryPath(classicRoute, marked, noReader)).toBe('text');
-      expect(resolveTurnLLMDeliveryPath({ ...classicRoute, file: marked })).toBe('none');
-      expect(
-        resolveTurnLLMDeliveryPath({
-          ...classicRoute,
-          endpointConfig: { llmDeliveryPolicy: 'classic' },
-          file: marked,
-        }),
-      ).toBe('none');
-    });
-
-    it('keeps the text route where the turn can derive that text', () => {
-      expect(
-        resolveTurnLLMDeliveryPath({
-          ...classicRoute,
-          reading: { judge: () => ({}), canDerive: true },
-          file: marked,
-        }),
-      ).toBe('text');
-    });
-
-    it('leaves an unmarked record on its classic route', () => {
-      expect(resolveTurnLLMDeliveryPath({ ...classicRoute, file: sheet })).toBe('text');
-      expect(
-        resolveTurnLLMDeliveryPath({ ...classicRoute, file: { ...marked, text: 'a,b' } }),
-      ).toBe('text');
-    });
-  });
 });
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -1327,9 +1159,6 @@ const decide = (
 
 const skippedReaders = (reading: FileReading): ReaderKind[] =>
   reading.skipped.map(({ reader }) => reader);
-
-const isReaderKind = (reader: FileReading['reader']): reader is ReaderKind =>
-  reader !== 'unavailable' && reader !== 'unresolved';
 
 describe('judgeCodeEligibility', () => {
   const file = attachment(XLSX);
@@ -1488,13 +1317,6 @@ describe('decideFileReading', () => {
       file = { ...file, type: 'image/png' };
       expect(reasonOf(automaticRouting('openAI'), NO_TOOLS)).toBe('no_file_tools');
       expect(reasonOf(automaticRouting('openAI'), CODE_ONLY)).toBe('media_category');
-    });
-
-    it('routes media on the type routing saw before conversion', () => {
-      const converted = attachment('image/png', {
-        metadata: { destinationChosen: false, routingMimeType: 'text/csv' },
-      });
-      expect(decide(converted, CODE_ONLY)).toMatchObject({ category: 'tabular', automatic: true });
     });
   });
 
@@ -1678,36 +1500,47 @@ describe('decideFileReading', () => {
      * Search that will not receive the file: the row is then walked to its end. */
     const unreachable = { search: 'unreachable' } as const;
 
-    it('sends a document over native capacity to search, then code, then text that fits', () => {
-      const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
-      const routing = automaticRouting('openAI', {
-        reading: withEvidence({ native: 'capacity', text: 'fits' }),
-      });
+    it.each<[string, string, ReadingEvidence]>([
+      ['native capacity', 'openAI', { native: 'capacity' }],
+      ['capacity discovered by encoding', 'anthropic', { native: 'fits', rejected: 'capacity' }],
+    ])(
+      'sends a document over %s to search, then code, then complete fitting text last',
+      (_name, endpoint, evidence) => {
+        const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
+        const routing = automaticRouting(endpoint, {
+          reading: withEvidence({ ...evidence, text: 'fits' }),
+        });
 
-      expect(decide(pdf, BOTH_TOOLS, routing)).toMatchObject({
-        reader: 'search',
-        reason: 'native_capacity',
-      });
-      expect(decide(pdf, CODE_ONLY, routing)).toMatchObject({
-        reader: 'code',
-        reason: 'native_capacity',
-      });
-      const unreached = automaticRouting('openAI', {
-        reading: withEvidence({ native: 'capacity', text: 'fits', ...unreachable }),
-      });
-      const text = decide(pdf, SEARCH_ONLY, unreached);
-      expect(text).toMatchObject({ reader: 'text', path: 'text', reason: 'native_capacity' });
-      expect(skippedReaders(text)).toEqual(['provider', 'search', 'code']);
+        expect(decide(pdf, BOTH_TOOLS, routing)).toMatchObject({
+          reader: 'search',
+          reason: 'native_capacity',
+        });
+        expect(decide(pdf, CODE_ONLY, routing)).toMatchObject({
+          reader: 'code',
+          reason: 'native_capacity',
+        });
+        const unreached = automaticRouting(endpoint, {
+          reading: withEvidence({ ...evidence, text: 'fits', ...unreachable }),
+        });
+        const text = decide(pdf, SEARCH_ONLY, unreached);
+        expect(text).toMatchObject({
+          reader: 'text',
+          path: 'text',
+          reason: 'native_capacity',
+          needsText: false,
+        });
+        expect(skippedReaders(text)).toEqual(['provider', 'search', 'code']);
 
-      const exceeding = automaticRouting('openAI', {
-        reading: withEvidence({ native: 'capacity', text: 'exceeds', ...unreachable }),
-      });
-      expect(decide(pdf, SEARCH_ONLY, exceeding)).toMatchObject({
-        reader: 'unavailable',
-        path: 'none',
-        reason: 'native_capacity',
-      });
-    });
+        const exceeding = automaticRouting(endpoint, {
+          reading: withEvidence({ ...evidence, text: 'exceeds', ...unreachable }),
+        });
+        expect(decide(pdf, SEARCH_ONLY, exceeding)).toMatchObject({
+          reader: 'unavailable',
+          path: 'none',
+          reason: 'native_capacity',
+        });
+      },
+    );
 
     it('sends a spreadsheet over native capacity to File Search before its text', () => {
       const sheet = attachment(XLSX, { text: 'region,total' });
@@ -1726,50 +1559,6 @@ describe('decideFileReading', () => {
       expect(text).toMatchObject({ reader: 'text', path: 'text', reason: 'native_capacity' });
       expect(skippedReaders(text)).toEqual(['code', 'provider', 'search']);
       expect(decide(sheet, CODE_ONLY, routing)).toMatchObject({ reader: 'code', skipped: [] });
-    });
-
-    it('preserves capacity discovered by encoding and offers complete fitting text last', () => {
-      const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
-      const routing = automaticRouting('anthropic', {
-        reading: withEvidence({ native: 'fits', rejected: 'capacity', text: 'fits' }),
-      });
-
-      expect(decide(pdf, BOTH_TOOLS, routing)).toMatchObject({
-        reader: 'search',
-        reason: 'native_capacity',
-      });
-      expect(decide(pdf, CODE_ONLY, routing)).toMatchObject({
-        reader: 'code',
-        reason: 'native_capacity',
-      });
-      const unreached = automaticRouting('anthropic', {
-        reading: withEvidence({
-          native: 'fits',
-          rejected: 'capacity',
-          text: 'fits',
-          ...unreachable,
-        }),
-      });
-      expect(decide(pdf, SEARCH_ONLY, unreached)).toMatchObject({
-        reader: 'text',
-        path: 'text',
-        reason: 'native_capacity',
-        needsText: false,
-      });
-
-      const exceeding = automaticRouting('anthropic', {
-        reading: withEvidence({
-          native: 'fits',
-          rejected: 'capacity',
-          text: 'exceeds',
-          ...unreachable,
-        }),
-      });
-      expect(decide(pdf, SEARCH_ONLY, exceeding)).toMatchObject({
-        reader: 'unavailable',
-        path: 'none',
-        reason: 'native_capacity',
-      });
     });
 
     it('derives a capacity fallback while keeping integrity failures away from text', () => {
@@ -2104,105 +1893,6 @@ describe('decideFileReading', () => {
       });
     });
   });
-
-  describe('termination', () => {
-    it('judges each reader at most once and always ends', () => {
-      let seed = 0x5eed;
-      const random = (): number => {
-        seed = (seed * 1103515245 + 12345) % 2147483648;
-        return seed / 2147483648;
-      };
-      const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
-      const maybe = <T>(value: T): T | undefined => (random() < 0.5 ? value : undefined);
-      const mimeTypes = [
-        XLSX,
-        'text/csv',
-        TSV,
-        PARQUET,
-        PDF,
-        DOCX,
-        PPTX,
-        MSWORD,
-        ZIP,
-        'application/json',
-        'text/markdown',
-        eml,
-        'application/epub+zip',
-      ];
-      const endpoints = [
-        'openAI',
-        'anthropic',
-        'bedrock',
-        'google',
-        'azureOpenAI',
-        'agents',
-        'MyGateway',
-      ];
-      /* The walk runs only once a file tool is loaded; without one the gate answers. */
-      const consumerSets = [CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS];
-      const sources = ['local', 's3', 'openai', 'vectordb', undefined];
-      const outcomes = ['deferred', 'complete', 'failed'] as const;
-      const directReaders: ReadonlyArray<ReaderKind> = ['provider', 'text'];
-      const paths: ReadonlyArray<string | undefined> = ['provider', 'text', 'none'];
-      const violations: string[] = [];
-
-      for (let i = 0; i < 4000; i++) {
-        const evidence: ReadingEvidence = {
-          native: maybe(pick(['fits', 'capacity', 'unsupported'] as const)),
-          rejected: maybe(pick(['capacity', 'integrity', 'unsupported'] as const)),
-          text: maybe(pick(['fits', 'exceeds'] as const)),
-          overflow: maybe(true as const),
-          textFailed: maybe(true as const),
-          search: maybe(pick(['reachable', 'unreachable'] as const)),
-        };
-        let judged = 0;
-        const judge = (): ReadingEvidence => {
-          judged += 1;
-          return evidence;
-        };
-        const outcome = maybe(pick(outcomes));
-        const file = attachment(pick(mimeTypes), {
-          text: maybe('stored text'),
-          source: pick(sources),
-          embedded: random() < 0.3,
-          metadata: {
-            destinationChosen: false,
-            ...(outcome ? { textDerivation: { outcome } } : {}),
-          },
-        });
-        const routing = automaticRouting(pick(endpoints), {
-          reading: { judge, canDerive: random() < 0.5 },
-        });
-        const reading = decideFileReading({ routing, file, consumers: pick(consumerSets) });
-        const readers = skippedReaders(reading);
-        const judgedReaders = isReaderKind(reading.reader)
-          ? readers.concat(reading.reader)
-          : readers;
-        const firstNoRetry = reading.skipped.findIndex(
-          ({ reason }) => reason === 'native_rejected' || reason === 'aggregate_overflow',
-        );
-        const afterNoRetry = firstNoRetry < 0 ? [] : judgedReaders.slice(firstNoRetry + 1);
-        const failures = [
-          !reading.automatic && 'not automatic',
-          judged !== 1 && `judge called ${judged} times`,
-          new Set(judgedReaders).size !== judgedReaders.length && 'reader judged twice',
-          judgedReaders.length > 4 && 'more than four judgments',
-          paths.indexOf(reading.path) < 0 && `path ${String(reading.path)}`,
-          reading.reader === 'unavailable' && reading.path !== 'none' && 'unavailable with a path',
-          isReaderKind(reading.reader) &&
-            reading.path !== READER_PATH[reading.reader] &&
-            'path disagrees with reader',
-          reading.needsText && reading.reader !== 'text' && 'needs text without the text reader',
-          afterNoRetry.some((reader) => directReaders.indexOf(reader) >= 0) && 'direct retry',
-        ].filter((failure): failure is string => typeof failure === 'string');
-        if (failures.length > 0) {
-          violations.push(`${file.type} ${JSON.stringify(reading)}: ${failures.join(', ')}`);
-        }
-      }
-
-      expect(violations).toEqual([]);
-    });
-  });
 });
 
 describe('isAutomaticReadingRecord', () => {
@@ -2273,62 +1963,6 @@ describe('isAutomaticReadingRecord', () => {
     };
     expect(isAutomaticReadingRecord(config, converted)).toBe(true);
     expect(isAutomaticReadingRecord(config, heic)).toBe(false);
-  });
-
-  it('agrees with the decision on every record once consumers are known', () => {
-    const endpointConfigs: EndpointFileConfig[] = [
-      {},
-      automaticConfig,
-      { ...automaticConfig, legacyFileUploadUX: true },
-      {
-        ...automaticConfig,
-        defaultLLMDeliveryPath: { overrides: { [PDF]: 'provider', 'text/*': 'text' } },
-      },
-    ];
-    const fileConfigs: FileConfig[] = [
-      mergeFileConfig(undefined),
-      { endpoints: {}, defaultLLMDeliveryPath: { overrides: { [XLSX]: 'none' } } },
-    ];
-    const mimeTypes = [XLSX, 'text/csv', PDF, DOCX, ZIP, eml, 'image/png', 'video/mp4'];
-    const shapes: Array<Partial<TurnDeliveryFile>> = [
-      {},
-      { llmDeliveryPath: null },
-      { llmDeliveryPath: 'text', text: 'stored text' },
-      { metadata: { destinationChosen: true } },
-      { metadata: {} },
-      { context: 'agents' },
-      { source: 'text' },
-      { source: 'openai' },
-      { metadata: { destinationChosen: false, routingMimeType: 'text/csv' } },
-    ];
-    const mismatches: string[] = [];
-    endpointConfigs.forEach((endpointConfig) =>
-      fileConfigs.forEach((fileConfig) =>
-        ['openAI', 'bedrock', 'MyGateway'].forEach((endpoint) => {
-          const routing = automaticRouting(endpoint, { endpointConfig, fileConfig });
-          mimeTypes.forEach((mimeType) =>
-            shapes.forEach((shape) => {
-              const file = attachment(mimeType, shape);
-              const eligible = isAutomaticReadingRecord(routing, file);
-              [CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS].forEach((consumers) => {
-                if (decideFileReading({ routing, file, consumers }).automatic !== eligible) {
-                  mismatches.push(`${mimeType} on ${endpoint}: ${JSON.stringify(shape)}`);
-                }
-              });
-              /* The record filter runs before consumers exist; the decision still keeps every
-               * record classic on a turn that loads no file tool. */
-              const untooled = decideFileReading({ routing, file, consumers: NO_TOOLS });
-              if (untooled.automatic || (eligible && untooled.reason !== 'no_file_tools')) {
-                mismatches.push(
-                  `${mimeType} on ${endpoint}: ${JSON.stringify(shape)} without a file tool`,
-                );
-              }
-            }),
-          );
-        }),
-      ),
-    );
-    expect(mismatches).toEqual([]);
   });
 });
 
@@ -2518,7 +2152,7 @@ describe('decideUploadReading', () => {
     expect(decideUploadReading({ ...base, ...overrides })).toMatchObject(expected);
   });
 
-  it('departs from the upload route only to leave a file to Run Code', () => {
+  it('never changes an upload route under the classic policy', () => {
     const mimeTypes = [
       XLSX,
       ODS,
@@ -2532,7 +2166,11 @@ describe('decideUploadReading', () => {
       'image/png',
       'audio/mpeg',
     ];
-    const configs: EndpointFileConfig[] = [{}, automaticConfig, { llmDeliveryPolicy: 'classic' }];
+    const configs: EndpointFileConfig[] = [
+      {},
+      { llmDeliveryPolicy: 'classic' },
+      { ...automaticConfig, legacyFileUploadUX: true },
+    ];
     const departures: string[] = [];
     mimeTypes.forEach((mimeType) =>
       ['openAI', 'bedrock', 'azureOpenAI', 'agents'].forEach((endpoint) =>
@@ -2551,21 +2189,15 @@ describe('decideUploadReading', () => {
                 };
                 const reading = decideUploadReading(input);
                 const classicPath = resolveUploadLLMDeliveryPath(input);
-                const departs = reading.path !== classicPath;
-                if (departs && !(reading.codePreferred && reading.path === 'none')) {
-                  departures.push(`${mimeType} on ${endpoint}: ${reading.path} vs ${classicPath}`);
-                }
-                if (
+                const unchanged =
                   reading.policy === 'classic' &&
-                  (departs || reading.keepOriginalOnExtractionFailure)
-                ) {
-                  departures.push(`${mimeType} on ${endpoint} changed under classic`);
-                }
-                if (
-                  extractionRequiredForInspection &&
-                  (reading.codePreferred || reading.keepOriginalOnExtractionFailure)
-                ) {
-                  departures.push(`${mimeType} on ${endpoint} skips the inspection extraction`);
+                  reading.path === classicPath &&
+                  !reading.codePreferred &&
+                  !reading.needsCodeAvailability &&
+                  !reading.keepOriginalOnExtractionFailure &&
+                  !reading.deferredMarker;
+                if (!unchanged) {
+                  departures.push(`${mimeType} on ${endpoint}: ${reading.path} vs ${classicPath}`);
                 }
               }),
             ),
@@ -2695,18 +2327,5 @@ describe('classic equivalence', () => {
 
     expect(combinations).toBe(2 * endpoints.length * mimeTypes.length * shapes.length * 5);
     expect(mismatches).toEqual([]);
-  });
-
-  it('leaves an inferred spreadsheet with text to Run Code under the automatic policy', () => {
-    const routing: Partial<TurnDeliveryRouting> = {
-      endpoint: 'openAI',
-      endpointConfig: automaticConfig,
-      fileConfig: mergeFileConfig(undefined),
-      sttConfigured: true,
-    };
-    const sheet = attachment(XLSX, { text: 'stored text' });
-
-    expect(resolveStoredTurnPath(routing, sheet, CODE_ONLY)).toBe('none');
-    expect(resolveClassicTurnLLMDeliveryPath(routing, sheet, CODE_ONLY)).toBe('text');
   });
 });

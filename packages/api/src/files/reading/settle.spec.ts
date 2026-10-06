@@ -89,163 +89,91 @@ const pathsById = (files: readonly TurnReadingFile[]): Record<string, string | n
 
 describe('settleTurnFiles', () => {
   describe('text derivation', () => {
-    it('derives the text a reading needs, then decides again on the derived copy', async () => {
-      const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
-        async () => derivedText,
-      );
-      const { routing } = setup({ deriveText });
-      const files = [deferredWorkbook];
-
-      expect(
-        decideFileReading({ routing, file: deferredWorkbook, consumers: searchOnly }),
-      ).toMatchObject({ reader: 'text', needsText: true, automatic: true });
-
-      const [settled] = await settleTurnFiles({ routing, consumers: searchOnly, files });
-
-      expect(settled).toMatchObject({
-        file_id: 'xlsx',
-        llmDeliveryPath: 'text',
-        text: derivedText.text,
-        metadata: { destinationChosen: false, textDerivation: derivedText.textDerivation },
-      });
-      expect(decideFileReading({ routing, file: settled, consumers: searchOnly })).toMatchObject({
-        reader: 'text',
-        reason: 'code_unavailable',
-        needsText: false,
-      });
-      expect(deferredWorkbook.text).toBeUndefined();
-      expect(deferredWorkbook.metadata?.textDerivation).toEqual({ outcome: 'deferred' });
-
-      await settleTurnFiles({ routing, consumers: searchOnly, files });
-      expect(deriveText).toHaveBeenCalledTimes(1);
-      expect(deriveText).toHaveBeenCalledWith(
-        expect.objectContaining({ file_id: 'xlsx', llmDeliveryPath: 'text' }),
-        undefined,
-      );
-    });
-
-    it('derives the text the classic route needs when no file tool is loaded', async () => {
+    it.each<[string, TurnFileConsumers, string, boolean]>([
+      ['File Search', searchOnly, 'code_unavailable', true],
       /* Without Run Code or File Search the policy decides nothing, but a deferred workbook's
        * classic text route still has no text, so settle derives it as a no-tools turn reads it. */
-      const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
-        async () => derivedText,
-      );
-      const { routing } = setup({ deriveText });
+      ['no file tool', noReader, 'no_file_tools', false],
+    ])(
+      'derives the text a reading needs with %s loaded, then decides again on the derived copy',
+      async (_name, consumers, reason, automatic) => {
+        const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+          async () => derivedText,
+        );
+        const { routing } = setup({ deriveText });
+        const files = [deferredWorkbook];
 
-      expect(
-        decideFileReading({ routing, file: deferredWorkbook, consumers: noReader }),
-      ).toMatchObject({
-        reader: 'text',
-        reason: 'no_file_tools',
-        needsText: true,
-        automatic: false,
-      });
+        expect(decideFileReading({ routing, file: deferredWorkbook, consumers })).toMatchObject({
+          reader: 'text',
+          reason,
+          needsText: true,
+          automatic,
+        });
 
-      const [settled] = await settleTurnFiles({
-        routing,
-        consumers: noReader,
-        files: [deferredWorkbook],
-      });
+        const [settled] = await settleTurnFiles({ routing, consumers, files });
 
-      expect(settled).toMatchObject({ llmDeliveryPath: 'text', text: derivedText.text });
-      expect(decideFileReading({ routing, file: settled, consumers: noReader })).toMatchObject({
-        reader: 'text',
-        reason: 'no_file_tools',
-        needsText: false,
-        automatic: false,
-      });
-      expect(deriveText).toHaveBeenCalledTimes(1);
-    });
+        expect(settled).toMatchObject({
+          file_id: 'xlsx',
+          llmDeliveryPath: 'text',
+          text: derivedText.text,
+          metadata: { destinationChosen: false, textDerivation: derivedText.textDerivation },
+        });
+        expect(decideFileReading({ routing, file: settled, consumers })).toMatchObject({
+          reader: 'text',
+          reason,
+          needsText: false,
+          automatic,
+        });
+        expect(deferredWorkbook.text).toBeUndefined();
+        expect(deferredWorkbook.metadata?.textDerivation).toEqual({ outcome: 'deferred' });
 
-    it('moves on to the next reader when derivation fails', async () => {
-      const { routing, context } = setup({
-        deriveText: async () => ({
-          status: 'failed',
-          textDerivation: { outcome: 'failed', reason: 'parser' },
-          persist: true,
-        }),
-      });
+        await settleTurnFiles({ routing, consumers, files });
+        expect(deriveText).toHaveBeenCalledTimes(1);
+        expect(deriveText).toHaveBeenCalledWith(
+          expect.objectContaining({ file_id: 'xlsx', llmDeliveryPath: 'text' }),
+          undefined,
+        );
+      },
+    );
 
-      const [settled] = await settleTurnFiles({
-        routing,
-        consumers: searchOnly,
-        files: [deferredWorkbook],
-      });
+    const parserFailure: DerivedText = {
+      status: 'failed',
+      textDerivation: { outcome: 'failed', reason: 'parser' },
+      persist: true,
+    };
+    const movedToSearch = {
+      reader: 'search',
+      needsText: false,
+      skipped: expect.arrayContaining([{ reader: 'text', reason: 'text_unavailable' }]),
+    };
 
-      expect(settled.llmDeliveryPath).toBe('none');
-      expect(settled.text).toBeUndefined();
-      expect(context.judge(deferredWorkbook).textFailed).toBe(true);
-      expect(decideFileReading({ routing, file: settled, consumers: searchOnly })).toMatchObject({
-        reader: 'search',
-        needsText: false,
-        skipped: expect.arrayContaining([{ reader: 'text', reason: 'text_unavailable' }]),
-      });
-    });
+    it.each<[string, TurnFileConsumers, DerivedText, Record<string, unknown>]>([
+      ['a failed derivation, with File Search loaded', searchOnly, parserFailure, movedToSearch],
+      [
+        'a failed derivation, with no file tool loaded',
+        noReader,
+        parserFailure,
+        { reader: 'unavailable', reason: 'no_file_tools', needsText: false, automatic: false },
+      ],
+      [
+        'a skipped derivation, with File Search loaded',
+        searchOnly,
+        { status: 'skipped', reason: 'storage_unavailable' },
+        movedToSearch,
+      ],
+    ])(
+      'treats %s as unavailable text for the rest of the request',
+      async (_name, consumers, outcome, decision) => {
+        const { routing, context } = setup({ deriveText: async () => outcome });
 
-    it('leaves the file unavailable when derivation fails and no file tool is loaded', async () => {
-      const { routing, context } = setup({
-        deriveText: async () => ({
-          status: 'failed',
-          textDerivation: { outcome: 'failed', reason: 'parser' },
-          persist: true,
-        }),
-      });
+        const [settled] = await settleTurnFiles({ routing, consumers, files: [deferredWorkbook] });
 
-      const [settled] = await settleTurnFiles({
-        routing,
-        consumers: noReader,
-        files: [deferredWorkbook],
-      });
-
-      expect(settled.llmDeliveryPath).toBe('none');
-      expect(settled.text).toBeUndefined();
-      expect(context.judge(deferredWorkbook).textFailed).toBe(true);
-      expect(decideFileReading({ routing, file: settled, consumers: noReader })).toMatchObject({
-        reader: 'unavailable',
-        reason: 'no_file_tools',
-        needsText: false,
-        automatic: false,
-      });
-    });
-
-    it('treats a skipped derivation as unavailable text for the rest of the request', async () => {
-      const { routing } = setup({
-        deriveText: async () => ({ status: 'skipped', reason: 'storage_unavailable' }),
-      });
-
-      const [settled] = await settleTurnFiles({
-        routing,
-        consumers: searchOnly,
-        files: [deferredWorkbook],
-      });
-
-      expect(settled.llmDeliveryPath).toBe('none');
-      expect(decideFileReading({ routing, file: settled, consumers: searchOnly })).toMatchObject({
-        reader: 'search',
-      });
-    });
-
-    it('derives only for records the automatic policy marked when the policy is classic', async () => {
-      const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
-        async () => derivedText,
-      );
-      const { routing } = setup({ endpointConfig: {}, deriveText });
-      const unmarked = attachment({
-        file_id: 'unmarked',
-        type: XLSX,
-        llmDeliveryPath: 'none',
-      });
-
-      const [marked, plain] = await settleTurnFiles({
-        routing,
-        consumers: noReader,
-        files: [deferredWorkbook, unmarked],
-      });
-
-      expect(marked).toMatchObject({ llmDeliveryPath: 'text', text: derivedText.text });
-      expect(plain.text).toBeUndefined();
-      expect(deriveText).toHaveBeenCalledTimes(1);
-    });
+        expect(settled.llmDeliveryPath).toBe('none');
+        expect(settled.text).toBeUndefined();
+        expect(context.judge(deferredWorkbook).textFailed).toBe(true);
+        expect(decideFileReading({ routing, file: settled, consumers })).toMatchObject(decision);
+      },
+    );
 
     it('never decides or derives an unmarked record in a classic derive-only context', async () => {
       const { routing, context } = setup({

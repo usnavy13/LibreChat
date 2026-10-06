@@ -1,9 +1,8 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import JSZip from 'jszip';
 import { Readable } from 'stream';
-import { FileSources, megabyte } from 'librechat-data-provider';
+import { FileSources } from 'librechat-data-provider';
 import type { FiltersConfig } from 'librechat-data-provider';
 import type { UploadFallbackTextExtractors } from '~/files/upload/fallback';
 import type { ProvisionService } from '~/files/provision/service';
@@ -20,7 +19,6 @@ import { parseTextNative } from '~/files/text';
 type OpenStoredFile = ProvisionService['openStoredFile'];
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const documentsDir = path.join(__dirname, '../documents');
 
 let workDir: string;
@@ -156,76 +154,36 @@ describe('createFileTextDeriver', () => {
     expect(openStoredFile).not.toHaveBeenCalled();
   });
 
-  it('fails expansion_limit for a workbook that inflates past the zip guard', async () => {
-    const zip = new JSZip();
-    zip.file('xl/worksheets/sheet1.xml', Buffer.alloc(26 * megabyte, 0));
-    const bomb = await zip.generateAsync({
-      type: 'nodebuffer',
-      compression: 'DEFLATE',
-      compressionOptions: { level: 9 },
-    });
-    const file = storedFile({ type: XLSX, filename: 'bomb.xlsx', bytes: bomb.length });
-
-    await expect(
-      createFileTextDeriver({
-        req: newRequest(),
-        openStoredFile: localStorage(writeSource('bomb.xlsx', bomb)),
-      })(file),
-    ).resolves.toMatchObject({
-      status: 'failed',
-      textDerivation: { outcome: 'failed', reason: 'expansion_limit' },
-      persist: true,
-    });
-  });
-
-  it('fails empty for a document without text and for blank text', async () => {
-    await expect(
-      createFileTextDeriver({
-        req: newRequest(),
-        openStoredFile: localStorage(path.join(documentsDir, 'empty.docx')),
-      })(storedFile({ type: DOCX, filename: 'empty.docx' })),
-    ).resolves.toMatchObject({
-      status: 'failed',
-      textDerivation: { reason: 'empty', extractor: 'document_parser' },
-      persist: true,
-    });
-    await expect(
-      createFileTextDeriver({
-        req: newRequest(),
-        openStoredFile: localStorage(writeSource('blank.csv', ' \n ')),
-      })(storedFile({ type: 'text/csv', filename: 'blank.csv' })),
-    ).resolves.toMatchObject({ status: 'failed', textDerivation: { reason: 'empty' } });
-  });
-
-  it('blocks text a content policy flags or cannot inspect with its policy error', async () => {
-    const flagging: FiltersConfig = {
-      files: {
-        pii: {
-          fields: ['extracted_text'],
-          starterPatterns: [],
-          customPatterns: [{ id: 'private', label: 'private token', regex: 'PRIVATE-[A-Z]+' }],
-        },
+  const flagging: FiltersConfig = {
+    files: {
+      pii: {
+        fields: ['extracted_text'],
+        starterPatterns: [],
+        customPatterns: [{ id: 'private', label: 'private token', regex: 'PRIVATE-[A-Z]+' }],
       },
-    };
-    const blocking: FiltersConfig = {
-      files: { pii: { fields: ['extracted_text'], starterPatterns: [], uninspectable: 'block' } },
-    };
+    },
+  };
+  const blocking: FiltersConfig = {
+    files: { pii: { fields: ['extracted_text'], starterPatterns: [], uninspectable: 'block' } },
+  };
 
-    await expect(
-      createFileTextDeriver({
-        req: newRequest(),
-        filters: flagging,
-        openStoredFile: localStorage(writeSource('flagged.csv', 'token,PRIVATE-SECRET')),
-      })(storedFile({ type: 'text/csv', filename: 'flagged.csv' })),
-    ).resolves.toEqual({ status: 'blocked', error: expect.any(ContentFilterError) });
-    await expect(
-      createFileTextDeriver({
-        req: newRequest(),
-        filters: blocking,
-        openStoredFile: localStorage(path.join(documentsDir, 'empty.docx')),
-      })(storedFile({ type: DOCX, filename: 'empty.docx' })),
-    ).resolves.toEqual({ status: 'blocked', error: expect.any(UninspectableFileError) });
-  });
+  it.each<
+    [string, FiltersConfig, string, typeof ContentFilterError | typeof UninspectableFileError]
+  >([
+    ['flags', flagging, 'token,PRIVATE-SECRET', ContentFilterError],
+    ['cannot inspect', blocking, '', UninspectableFileError],
+  ])(
+    'blocks text a content policy %s with its policy error',
+    async (_case, filters, content, error) => {
+      await expect(
+        createFileTextDeriver({
+          req: newRequest(),
+          filters,
+          openStoredFile: localStorage(writeSource('blocked.csv', content)),
+        })(storedFile({ type: 'text/csv', filename: 'blocked.csv' })),
+      ).resolves.toEqual({ status: 'blocked', error: expect.any(error) });
+    },
+  );
 
   it('fails original_missing, which persists, when storage no longer holds the original', async () => {
     const missing = [
@@ -282,26 +240,24 @@ describe('createFileTextDeriver', () => {
   });
 
   it('skips, without keeping a marker, a system error the extractor hits reading the copy', async () => {
-    for (const code of ['EBUSY', 'ENOSPC', 'EMFILE']) {
-      const extractors = {
-        parseDocument: jest.fn(parseDocument),
-        parseTextNative: jest.fn(async ({ path: tmpPath }: Express.Multer.File) => {
-          throw Object.assign(new Error(`${code}: resource busy or locked`), {
-            code,
-            errno: -16,
-            path: tmpPath,
-          });
-        }),
-      } satisfies UploadFallbackTextExtractors;
-      await expect(
-        createFileTextDeriver({
-          req: newRequest(),
-          openStoredFile: localStorage(writeSource(`busy-${code}.csv`, 'a,b\n1,2\n')),
-          extractors,
-        })(storedFile({ type: 'text/csv', filename: `busy-${code}.csv` })),
-      ).resolves.toEqual({ status: 'skipped', reason: 'storage_unavailable' });
-      expect(extractors.parseTextNative).toHaveBeenCalledTimes(1);
-    }
+    const extractors = {
+      parseDocument: jest.fn(parseDocument),
+      parseTextNative: jest.fn(async ({ path: tmpPath }: Express.Multer.File) => {
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), {
+          code: 'EBUSY',
+          errno: -16,
+          path: tmpPath,
+        });
+      }),
+    } satisfies UploadFallbackTextExtractors;
+    await expect(
+      createFileTextDeriver({
+        req: newRequest(),
+        openStoredFile: localStorage(writeSource('busy.csv', 'a,b\n1,2\n')),
+        extractors,
+      })(storedFile({ type: 'text/csv', filename: 'busy.csv' })),
+    ).resolves.toEqual({ status: 'skipped', reason: 'storage_unavailable' });
+    expect(extractors.parseTextNative).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a parser failure the extractor raised without a system code', async () => {

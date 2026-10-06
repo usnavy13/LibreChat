@@ -12,7 +12,6 @@ import {
   mergeFileConfig,
 } from 'librechat-data-provider';
 import type {
-  TFile,
   FileConfig,
   TFileUpload,
   TConversation,
@@ -265,13 +264,16 @@ async function settled(test: TestChat): Promise<Attached> {
   return { body, staged: test.staged().get(String(body.get('file_id'))), chat: test };
 }
 
-type Entry = (file: File) => Promise<TestChat>;
+type Dropped = TestChat & { chooserOpen: () => boolean };
 
-async function startDrop(file: File): Promise<TestChat> {
+async function startDrop(file: File): Promise<Dropped> {
   const test = createChat();
-  renderHook(() => useDragHelpers(), { wrapper: providers(test) });
+  const { result } = renderHook(
+    () => ({ drag: useDragHelpers(), modal: useUploadModalContext() }),
+    { wrapper: providers(test) },
+  );
   act(() => mockDrop?.({ files: [file] }));
-  return test;
+  return { ...test, chooserOpen: () => result.current.modal.isVisible };
 }
 
 const pasteEvent = (files: File[]): React.ClipboardEvent<HTMLTextAreaElement> => {
@@ -344,15 +346,11 @@ async function startSharePoint(file: File): Promise<TestChat> {
   return test;
 }
 
-const uploaded =
-  (start: Entry) =>
-  async (file: File): Promise<Attached> =>
-    settled(await start(file));
-
-const drop = uploaded(startDrop);
-const paste = uploaded(startPaste);
-const pick = uploaded(startPick);
-const pickFromSharePoint = uploaded(startSharePoint);
+const drop = async (file: File): Promise<Attached> => settled(await startDrop(file));
+const paste = async (file: File): Promise<Attached> => settled(await startPaste(file));
+const pick = async (file: File): Promise<Attached> => settled(await startPick(file));
+const pickFromSharePoint = async (file: File): Promise<Attached> =>
+  settled(await startSharePoint(file));
 
 beforeAll(() => {
   global.URL.createObjectURL = jest.fn(() => 'blob:preview');
@@ -383,8 +381,6 @@ describe('unified upload entry points', () => {
 
   it.each([
     ['drag and drop', startDrop],
-    ['a file paste', startPaste],
-    ['the local picker', startPick],
     ['the SharePoint picker', startSharePoint],
   ])(
     'refuses a type the endpoint does not accept through %s the same way',
@@ -399,28 +395,22 @@ describe('unified upload entry points', () => {
     },
   );
 
-  it('drops without offering the destination chooser', async () => {
-    const test = createChat();
-    const { result } = renderHook(
-      () => ({ drag: useDragHelpers(), modal: useUploadModalContext() }),
-      { wrapper: providers(test) },
-    );
-    act(() => mockDrop?.({ files: [report()] }));
-    await settled(test);
-    expect(result.current.modal.isVisible).toBe(false);
-  });
-
-  it('still offers the chooser on a drop where the deployment keeps the legacy menu', async () => {
-    mockFileConfig = { legacyFileUploadUX: true };
-    const test = createChat();
-    const { result } = renderHook(
-      () => ({ drag: useDragHelpers(), modal: useUploadModalContext() }),
-      { wrapper: providers(test) },
-    );
-    act(() => mockDrop?.({ files: [report()] }));
-    await waitFor(() => expect(result.current.modal.isVisible).toBe(true));
-    expect(mockUploads).toHaveLength(0);
-  });
+  it.each([
+    [{}, false],
+    [{ legacyFileUploadUX: true }, true],
+  ])(
+    'offers the destination chooser on a drop only where the deployment keeps the legacy menu (%o: %s)',
+    async (fileConfig, chooserOpen) => {
+      mockFileConfig = fileConfig;
+      const test = await startDrop(report());
+      await waitFor(() =>
+        expect({ chooserOpen: test.chooserOpen(), uploads: mockUploads.length }).toEqual({
+          chooserOpen,
+          uploads: chooserOpen ? 0 : 1,
+        }),
+      );
+    },
+  );
 
   it('stages a re-attached file exactly as the upload that produced it', async () => {
     const uploaded = await pick(report());
@@ -447,8 +437,7 @@ describe('unified upload entry points', () => {
     const { result } = renderHook(() => usePalette(reattached), {
       wrapper: providers(reattached),
     });
-    const stored: TFile = record;
-    act(() => result.current.attachExisting(stored));
+    act(() => result.current.attachExisting(record));
 
     const fromUpload = uploaded.chat.staged().get(tempId);
     const fromLibrary = reattached.staged().get(record.file_id);

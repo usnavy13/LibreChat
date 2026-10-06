@@ -500,37 +500,32 @@ describe('native attachment fallback', () => {
     ).toHaveLength(1);
   });
 
-  it.each([false, true])(
-    "reserves each agent's scoped count allowance while history is count-exempt (history=%s)",
-    async (historical) => {
+  it.each([
+    ['a current attachment beside one scoped agent', false, 1, ['primary'], 'none'],
+    ['a historical attachment beside one scoped agent', true, 1, ['primary'], 'text'],
+    ['a current attachment beside two scoped agents', false, 2, ['primary', 'parallel'], 'text'],
+  ] as const)(
+    "charges each agent's own scoped count allowance, exempting history, for %s",
+    async (_name, historical, fileLimit, agentIds, path) => {
       const fixture = storedPdf('SHARED', { text: 'Fits the text budget' });
-      const scoped = storedPdf('SCOPED', { pages: 1, text: 'Scoped text' });
-      scoped.file.llmDeliveryPath = 'text';
-      const harness = setup({ [historical ? 'historical' : 'current']: [fixture], fileLimit: 1 });
-      harness.client.turnScopedAttachmentsByAgentId.set('primary', [scoped.file]);
+      const harness = setup({ [historical ? 'historical' : 'current']: [fixture], fileLimit });
+      for (const id of agentIds) {
+        const scoped = storedPdf(`${id}-SCOPED`, { pages: 1, text: 'Scoped text' }).file;
+        scoped.llmDeliveryPath = 'text';
+        harness.client.turnScopedAttachmentsByAgentId.set(id, [scoped]);
+        harness.client.turnAttachmentEndpointsByAgentId.set(id, { endpoint: Providers.ANTHROPIC });
+      }
 
       const { message, prepared } = await harness.prepare([fixture.file]);
 
-      expect(prepared?.[0].llmDeliveryPath).toBe(historical ? 'text' : 'none');
-      expect(message.fileContext != null).toBe(historical);
+      expect(prepared?.[0].llmDeliveryPath).toBe(path);
+      if (path === 'text') {
+        expect(message.fileContext).toContain(fixture.file.text);
+      } else {
+        expect(message.fileContext).toBeUndefined();
+      }
     },
   );
-
-  it('charges distinct scoped agents against their own count allowance', async () => {
-    const fixture = storedPdf('SHARED', { text: 'One shared attachment' });
-    const harness = setup({ current: [fixture], fileLimit: 2 });
-    for (const id of ['primary', 'parallel']) {
-      const scoped = storedPdf(`${id}-SCOPED`, { pages: 1, text: 'One scoped attachment' }).file;
-      scoped.llmDeliveryPath = 'text';
-      harness.client.turnScopedAttachmentsByAgentId.set(id, [scoped]);
-      harness.client.turnAttachmentEndpointsByAgentId.set(id, { endpoint: Providers.ANTHROPIC });
-    }
-
-    const { message, prepared } = await harness.prepare([fixture.file]);
-
-    expect(prepared?.[0].llmDeliveryPath).toBe('text');
-    expect(message.fileContext).toContain(fixture.file.text);
-  });
 
   it.each([
     ['equal endpoint budgets', false, 'text'],
@@ -630,26 +625,6 @@ describe('native attachment fallback', () => {
     expect(message.fileContext).toContain(fixture.file.text);
   });
 
-  it('blocks an already rejected cached fallback before its text can be injected', async () => {
-    const fixture = storedPdf('KNOWN-BLOCKED', { text: 'PRIVATE-SENTINEL' });
-    const filters: FiltersConfig = {
-      files: {
-        pii: {
-          fields: ['extracted_text'],
-          starterPatterns: [],
-          customPatterns: [{ id: 'private', label: 'private token', regex: 'PRIVATE-[A-Z]+' }],
-        },
-      },
-    };
-    const harness = setup({ current: [fixture], filters });
-    harness.context.recordRejections([{ file_id: fixture.file.file_id, reason: 'capacity' }]);
-
-    await expect(harness.prepare([fixture.file])).rejects.toBeInstanceOf(ContentFilterError);
-
-    expect(harness.client.addFileContextToMessage).not.toHaveBeenCalled();
-    expect(harness.extractText).not.toHaveBeenCalled();
-  });
-
   it('stops after real validation if the request aborts before cached fallback injection', async () => {
     const fixture = storedPdf('ABORTED', { text: 'Complete text never injected' });
     const controller = new AbortController();
@@ -670,9 +645,13 @@ describe('native attachment fallback', () => {
     expect(harness.extractText).not.toHaveBeenCalled();
   });
 
-  it.each(['cached', 'derived'] as const)(
+  it.each([
+    ['cached', { text: 'PRIVATE-SENTINEL' }, false],
+    ['derived', {}, false],
+    ['already rejected cached', { text: 'PRIVATE-SENTINEL' }, true],
+  ] as const)(
     'blocks sensitive %s fallback before injection or persistence',
-    async (kind) => {
+    async (_kind, stored, rejectedBefore) => {
       const filters: FiltersConfig = {
         files: {
           pii: {
@@ -682,11 +661,11 @@ describe('native attachment fallback', () => {
           },
         },
       };
-      const fixture = storedPdf(
-        'PRIVATE-SENTINEL',
-        kind === 'cached' ? { text: 'PRIVATE-SENTINEL' } : {},
-      );
+      const fixture = storedPdf('PRIVATE-SENTINEL', stored);
       const harness = setup({ current: [fixture], filters });
+      if (rejectedBefore) {
+        harness.context.recordRejections([{ file_id: fixture.file.file_id, reason: 'capacity' }]);
+      }
 
       await expect(harness.prepare([fixture.file])).rejects.toBeInstanceOf(ContentFilterError);
 

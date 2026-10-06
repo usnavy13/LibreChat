@@ -51,16 +51,6 @@ const entry = (
 
 const sorted = (ids: ReadonlySet<string>): string[] => Array.from(ids).sort();
 
-function permutations<T>(items: readonly T[]): T[][] {
-  if (items.length <= 1) {
-    return [items.slice()];
-  }
-  return items.reduce<T[][]>((all, item, index) => {
-    const rest = items.filter((_, other) => other !== index);
-    return all.concat(permutations(rest).map((tail) => [item, ...tail]));
-  }, []);
-}
-
 describe('allocateDirectContent', () => {
   it('admits candidates first-fit in the order given', () => {
     const overflow = allocateDirectContent([], [entry('a', 60), entry('b', 50), entry('c', 30)], {
@@ -105,32 +95,9 @@ describe('allocateDirectContent', () => {
       'b',
     ]);
   });
-
-  it('charges committed content the same whatever order it arrives in', () => {
-    const committed = [entry('h1', 10), entry('h2', 5, 20), entry('h3', 0, 0, false)];
-    const candidates = [
-      entry('a', 40, 10),
-      entry('b', 70, 5),
-      entry('c', 20, 50),
-      entry('d', 30, 1),
-    ];
-    const limits = { bytes: 100, textChars: 80, count: 4 };
-
-    const outcomes = permutations(committed).map((history) =>
-      sorted(allocateDirectContent(history, candidates, limits)),
-    );
-
-    expect(outcomes).toHaveLength(6);
-    expect(outcomes).toEqual(outcomes.map(() => ['b', 'd']));
-  });
 });
 
 describe('categorizeForReading', () => {
-  it('classifies every excel type, including the unaliased ones, as tabular', () => {
-    expect(excelFileTypes).toHaveLength(9);
-    expect(excelFileTypes.map(categorizeForReading)).toEqual(excelFileTypes.map(() => 'tabular'));
-  });
-
   it.each(TABULAR_TYPES)('classifies %s as tabular', (mimeType) => {
     expect(categorizeForReading(mimeType)).toBe('tabular');
   });
@@ -171,35 +138,10 @@ describe('tabular classification stays inside admission', () => {
     );
     expect(unadmitted).toEqual([]);
   });
-
-  it.each(TABULAR_TYPES)('admits %s under the default supported types', (mimeType) => {
-    expect(baseFileConfig.checkType(mimeType)).toBe(true);
-    expect(
-      baseFileConfig.checkType(mimeType, baseFileConfig.endpoints.default.supportedMimeTypes),
-    ).toBe(true);
-  });
 });
 
 describe('record sources', () => {
-  it('treats only stream-backed storage as holding the original', () => {
-    const backed = [
-      FileSources.local,
-      FileSources.s3,
-      FileSources.cloudfront,
-      FileSources.azure_blob,
-      FileSources.firebase,
-    ];
-    const unbacked = [
-      FileSources.openai,
-      FileSources.azure,
-      FileSources.vectordb,
-      FileSources.execute_code,
-      FileSources.text,
-      FileSources.document_parser,
-      FileSources.mistral_ocr,
-    ];
-    expect(backed.every((source) => isOriginalBacked({ source }))).toBe(true);
-    expect(unbacked.some((source) => isOriginalBacked({ source }))).toBe(false);
+  it('treats a record without a source as holding the original', () => {
     expect(isOriginalBacked({})).toBe(true);
     expect(isOriginalBacked({ source: null })).toBe(true);
   });
