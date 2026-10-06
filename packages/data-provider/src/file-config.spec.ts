@@ -10,6 +10,7 @@ import {
   getConfiguredMimeAccept,
   getDocumentFileExtension,
   bedrockDocumentMimeTypes,
+  resolveLLMDeliveryPolicy,
   isAnthropicDocumentType,
   isPermissiveMimeConfig,
   isExplicitMimeConfig,
@@ -2074,6 +2075,109 @@ describe('textFallbackWithoutTools config merging', () => {
         EModelEndpoint.openAI,
       ),
     ).toBe(false);
+  });
+});
+
+describe('llmDeliveryPolicy config merging', () => {
+  type DynamicConfig = Parameters<typeof mergeFileConfig>[0];
+  const endpointConfigFor = (dynamic: DynamicConfig, endpoint: string) =>
+    getEndpointFileConfig({ fileConfig: mergeFileConfig(dynamic), endpoint });
+  const policyFor = (dynamic: DynamicConfig, endpoint: string) =>
+    resolveLLMDeliveryPolicy(endpointConfigFor(dynamic, endpoint));
+
+  it('resolves to classic unless configured', () => {
+    expect(resolveLLMDeliveryPolicy(undefined)).toBe('classic');
+    expect(resolveLLMDeliveryPolicy(null)).toBe('classic');
+    expect(resolveLLMDeliveryPolicy({})).toBe('classic');
+    expect(endpointConfigFor(undefined, EModelEndpoint.openAI).llmDeliveryPolicy).toBeUndefined();
+    expect(policyFor(undefined, EModelEndpoint.openAI)).toBe('classic');
+    expect(policyFor({ endpoints: { default: {} } }, EModelEndpoint.openAI)).toBe('classic');
+  });
+
+  it('accepts the setting at the top level and on an endpoint', () => {
+    expect(
+      fileConfigSchema.safeParse({
+        llmDeliveryPolicy: 'automatic',
+        endpoints: { openAI: { llmDeliveryPolicy: 'classic' } },
+      }).success,
+    ).toBe(true);
+    expect(fileConfigSchema.safeParse({ llmDeliveryPolicy: 'auto' }).success).toBe(false);
+    expect(
+      fileConfigSchema.safeParse({ endpoints: { openAI: { llmDeliveryPolicy: true } } }).success,
+    ).toBe(false);
+  });
+
+  it('reaches an endpoint configured for it', () => {
+    const dynamic: DynamicConfig = {
+      endpoints: { [EModelEndpoint.openAI]: { llmDeliveryPolicy: 'automatic' } },
+    };
+    expect(policyFor(dynamic, EModelEndpoint.openAI)).toBe('automatic');
+    expect(policyFor(dynamic, EModelEndpoint.anthropic)).toBe('classic');
+  });
+
+  it('is inherited from the top level and from the default endpoint', () => {
+    expect(policyFor({ llmDeliveryPolicy: 'automatic' }, EModelEndpoint.anthropic)).toBe(
+      'automatic',
+    );
+    expect(
+      policyFor({ endpoints: { default: { llmDeliveryPolicy: 'automatic' } } }, 'MyGateway'),
+    ).toBe('automatic');
+    expect(
+      policyFor(
+        { endpoints: { default: { llmDeliveryPolicy: 'automatic' } } },
+        EModelEndpoint.bedrock,
+      ),
+    ).toBe('automatic');
+  });
+
+  it('lets an endpoint override what it would inherit, in either direction', () => {
+    const dynamic: DynamicConfig = {
+      llmDeliveryPolicy: 'automatic',
+      endpoints: {
+        [EModelEndpoint.openAI]: { llmDeliveryPolicy: 'classic' },
+        default: { llmDeliveryPolicy: 'classic' },
+        MyGateway: { llmDeliveryPolicy: 'automatic' },
+      },
+    };
+    expect(policyFor(dynamic, EModelEndpoint.openAI)).toBe('classic');
+    expect(policyFor(dynamic, EModelEndpoint.anthropic)).toBe('classic');
+    expect(policyFor(dynamic, 'MyGateway')).toBe('automatic');
+  });
+
+  it('keeps classic wherever the legacy chooser is on', () => {
+    expect(
+      resolveLLMDeliveryPolicy({ llmDeliveryPolicy: 'automatic', legacyFileUploadUX: true }),
+    ).toBe('classic');
+    expect(
+      resolveLLMDeliveryPolicy({ llmDeliveryPolicy: 'automatic', legacyFileUploadUX: false }),
+    ).toBe('automatic');
+    expect(
+      policyFor(
+        { llmDeliveryPolicy: 'automatic', legacyFileUploadUX: true },
+        EModelEndpoint.openAI,
+      ),
+    ).toBe('classic');
+
+    const dynamic: DynamicConfig = {
+      llmDeliveryPolicy: 'automatic',
+      endpoints: { [EModelEndpoint.openAI]: { legacyFileUploadUX: true } },
+    };
+    expect(policyFor(dynamic, EModelEndpoint.openAI)).toBe('classic');
+    expect(policyFor(dynamic, EModelEndpoint.anthropic)).toBe('automatic');
+  });
+
+  it('leaves the merged config unchanged when unset', () => {
+    const merged = mergeFileConfig({
+      fileTokenLimit: 5,
+      endpoints: { [EModelEndpoint.openAI]: { fileLimit: 3 }, default: { fileLimit: 4 } },
+    });
+
+    expect(baseFileConfig.endpoints.default).not.toHaveProperty('llmDeliveryPolicy');
+    expect(mergeFileConfig(undefined)).not.toHaveProperty('llmDeliveryPolicy');
+    expect(merged).not.toHaveProperty('llmDeliveryPolicy');
+    expect(merged.endpoints[EModelEndpoint.openAI]).not.toHaveProperty('llmDeliveryPolicy');
+    expect(merged.endpoints.default).not.toHaveProperty('llmDeliveryPolicy');
+    expect(merged.endpoints[EModelEndpoint.agents]).not.toHaveProperty('llmDeliveryPolicy');
   });
 });
 

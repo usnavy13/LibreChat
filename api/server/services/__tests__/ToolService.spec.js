@@ -1040,6 +1040,72 @@ describe('ToolService - Action Capability Gating', () => {
       expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(rawValue);
       errorSpy.mockRestore();
     });
+
+    it('returns the primed search files beside the file search note', async () => {
+      const primed = [{ file_id: 'file-indexed', filename: 'indexed.pdf', fromAgent: false }];
+      const toolContext = `- Note: Use the ${Tools.file_search} tool to find relevant information within:`;
+      mockPrimeSearchFiles.mockResolvedValueOnce({ files: primed, toolContext });
+      const req = createMockReq([AgentCapabilities.file_search]);
+      mockGetEndpointsConfig.mockResolvedValue(
+        createEndpointsConfig([AgentCapabilities.file_search]),
+      );
+
+      const result = await loadAgentTools({
+        req,
+        res: {},
+        agent: { id: 'agent_search', tools: [Tools.file_search] },
+        tool_resources: {
+          [EToolResources.file_search]: { file_ids: ['file-indexed'] },
+        },
+        definitionsOnly: true,
+      });
+
+      expect(result.primedSearchFiles).toEqual(primed);
+      expect(result.dynamicToolContextMap[Tools.file_search]).toBe(toolContext);
+    });
+
+    it('returns an empty primed search list when no search file is loaded', async () => {
+      const toolContext = `- Note: Semantic search is available through the ${Tools.file_search} tool but no files are currently loaded.`;
+      mockPrimeSearchFiles.mockResolvedValueOnce({ files: [], toolContext });
+      const req = createMockReq([AgentCapabilities.file_search]);
+      mockGetEndpointsConfig.mockResolvedValue(
+        createEndpointsConfig([AgentCapabilities.file_search]),
+      );
+
+      const result = await loadAgentTools({
+        req,
+        res: {},
+        agent: { id: 'agent_search', tools: [Tools.file_search] },
+        tool_resources: {
+          [EToolResources.file_search]: { file_ids: ['file-pending'] },
+        },
+        definitionsOnly: true,
+      });
+
+      expect(result.primedSearchFiles).toEqual([]);
+      expect(result.dynamicToolContextMap[Tools.file_search]).toBe(toolContext);
+    });
+
+    it('treats failed search priming as no primed search files', async () => {
+      mockPrimeSearchFiles.mockRejectedValueOnce(new Error('search priming failed'));
+      const req = createMockReq([AgentCapabilities.file_search]);
+      mockGetEndpointsConfig.mockResolvedValue(
+        createEndpointsConfig([AgentCapabilities.file_search]),
+      );
+
+      const result = await loadAgentTools({
+        req,
+        res: {},
+        agent: { id: 'agent_search', tools: [Tools.file_search] },
+        tool_resources: {
+          [EToolResources.file_search]: { file_ids: ['file-pending'] },
+        },
+        definitionsOnly: true,
+      });
+
+      expect(result.primedSearchFiles).toEqual([]);
+      expect(result.dynamicToolContextMap[Tools.file_search]).toBeUndefined();
+    });
   });
 
   describe('loadAgentTools (definitionsOnly=true) — action tool filtering', () => {
@@ -3236,15 +3302,9 @@ describe('ToolService - Action Capability Gating', () => {
         codeWorkspaces: [{ environmentId: 'personal-machine', workspaceId: 'project-a' }],
       };
       mockGetEndpointsConfig.mockResolvedValue(createEndpointsConfig(capabilities));
-      mockResolveCodeExecutionContext.mockReturnValueOnce({
-        baseUrl: 'http://attached-code.test/v1',
-        codeSessionKey: 'execute_code:stateful:attached',
-        executionProfile: 'stateful',
-        statefulSessions: true,
-        environmentType: 'attached',
-        environmentId: 'personal-machine',
-        bridgeWorkerId: 'worker-abc',
-      });
+      req.config.endpoints[EModelEndpoint.agents].statefulCodeSessions = {
+        environments: [attachedEnvironment()],
+      };
       mockCreateLaneGitRecorder.mockClear();
 
       await loadToolsForExecution({
@@ -3255,6 +3315,7 @@ describe('ToolService - Action Capability Gating', () => {
           tools: [Tools.execute_code],
           stateful_code_sessions: true,
           stateful_code_environment: 'agent-user',
+          code_environment_id: 'personal-machine',
         },
         conversationId: 'resolved-convo',
         toolNames: [AgentConstants.BASH_TOOL],
@@ -3294,15 +3355,9 @@ describe('ToolService - Action Capability Gating', () => {
         codeWorkspaces: [{ environmentId: 'personal-machine', workspaceId: 'project-a' }],
       };
       mockGetEndpointsConfig.mockResolvedValue(createEndpointsConfig(capabilities));
-      mockResolveCodeExecutionContext.mockReturnValueOnce({
-        baseUrl: 'http://attached-code.test/v1',
-        codeSessionKey: 'execute_code:stateful:attached',
-        executionProfile: 'stateful',
-        statefulSessions: true,
-        environmentType: 'attached',
-        environmentId: 'personal-machine',
-        bridgeWorkerId: 'worker-abc',
-      });
+      req.config.endpoints[EModelEndpoint.agents].statefulCodeSessions = {
+        environments: [attachedEnvironment()],
+      };
       mockCreateLaneGitRecorder.mockClear();
 
       await loadToolsForExecution({
@@ -3313,6 +3368,7 @@ describe('ToolService - Action Capability Gating', () => {
           tools: [Tools.execute_code],
           stateful_code_sessions: true,
           stateful_code_environment: 'agent-user',
+          code_environment_id: 'personal-machine',
         },
         conversationId: 'resolved-convo',
         toolNames: [AgentConstants.BASH_TOOL],
