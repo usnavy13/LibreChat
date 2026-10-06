@@ -286,7 +286,6 @@ function Conversation({
     isActiveConvo,
     isUnseen,
     conversationId,
-    chatProjectId: conversation.chatProjectId,
     isPopoverActive,
     isGenerating,
     contextMenuPosition,
@@ -330,8 +329,8 @@ function Conversation({
       className={cn(
         'group focus-visible:ring-text-primary relative flex h-12 w-full items-center rounded-lg outline-hidden focus-visible:ring-2 focus-visible:outline-hidden focus-visible:ring-inset md:h-9',
         isActiveConvo || isPopoverActive
-          ? 'bg-surface-active-alt before:bg-text-primary before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-full'
-          : 'hover:bg-surface-active-alt',
+          ? 'bg-surface-nav-selected before:bg-text-primary before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-full'
+          : 'hover:bg-surface-nav-hover',
       )}
       onPointerEnter={(event) => {
         if (event.pointerType === 'mouse') {
@@ -391,7 +390,8 @@ function Conversation({
           describedBy={projectBadgeProjectId ? projectLabelId : undefined}
         >
           {/* Status sits on the avatar so the row's trailing edge stays free for its badges
-              and menu. The ring is 34px around the 20px icon: offset by half the difference. */}
+              and menu. The ring is 2.125rem around the 1.25rem icon: offset by half the
+              difference. Both are rem so the ring follows the icon box at any UI scale. */}
           <span className="relative flex size-5 shrink-0 items-center justify-center">
             <ConversationEndpointIcon conversation={conversation} size={20} context="menu-item" />
             {isGenerating && (
@@ -399,7 +399,7 @@ function Conversation({
                 size={34}
                 strokeWidth={1.9}
                 bgOpacity={0.14}
-                className="pointer-events-none absolute -top-[7px] -left-[7px]"
+                className="pointer-events-none absolute -top-[0.4375rem] -left-[0.4375rem] size-[2.125rem]"
               />
             )}
             {isUnseen && !isGenerating && (
@@ -409,8 +409,8 @@ function Conversation({
                 className={cn(
                   'bg-status-info pointer-events-none absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2',
                   isActiveConvo || isPopoverActive
-                    ? 'ring-surface-active-alt'
-                    : 'ring-surface-primary-alt group-hover:ring-surface-active-alt',
+                    ? 'ring-surface-nav-selected'
+                    : 'ring-surface-primary-alt group-hover:ring-surface-nav-hover',
                 )}
               />
             )}

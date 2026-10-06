@@ -74,6 +74,7 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-ring-primary': 'global.color.outline.default',
     'rgb-focus-outline': 'global.color.outline.default',
     'rgb-focus-control': 'global.color.outline.default',
+    'rgb-focus-subtle': 'global.color.outline.default',
     'rgb-header-primary': 'global.color.background.default',
     'rgb-header-hover': 'global.color.background.muted',
     'rgb-header-button-hover': 'global.color.background.muted',
@@ -103,6 +104,9 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-surface-chat': 'global.color.background.default',
     'rgb-surface-code': 'click.codeblock.lightMode.color.background.default',
     'rgb-surface-code-body': 'click.codeblock.lightMode.color.background.default',
+    'rgb-surface-code-inline': 'palette.slate.200',
+    'rgb-prose-bullet': 'palette.slate.700',
+    'rgb-prose-quote-bar': 'palette.slate.700',
     'rgb-surface-qr': 'palette.neutral.0',
     'rgb-text-on-media': 'palette.neutral.0',
     'rgb-surface-inverted': 'palette.neutral.900',
@@ -125,6 +129,17 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-border-field-focus': 'click.field.color.stroke.active',
     'rgb-field-fill': 'click.field.color.background.default',
     'rgb-field-text': 'click.field.color.text.default',
+    'rgb-surface-canvas': 'global.color.background.default',
+    'rgb-surface-user-message': 'palette.slate.100',
+    'rgb-surface-card': 'click.card.secondary.color.background.default',
+    'rgb-surface-card-hover': 'click.card.secondary.color.background.hover',
+    'rgb-surface-nav-selected': 'click.sidebar.main.navigation.item.color.background.active',
+    'rgb-surface-tab-selected': 'click.sidebar.main.navigation.item.color.background.active',
+    'rgb-surface-menu': 'click.genericMenu.panel.color.background.default',
+    'rgb-surface-popover': 'click.genericMenu.panel.color.background.default',
+    'rgb-border-menu': 'click.genericMenu.panel.color.stroke.default',
+    'rgb-surface-composer': 'global.color.background.default',
+    'rgb-surface-search': 'global.color.background.default',
     'rgb-surface-disabled': 'click.button.basic.color.primary.background.disabled',
     'rgb-text-disabled': 'global.color.text.disabled',
     'rgb-border-disabled': 'click.field.color.stroke.disabled',
@@ -207,6 +222,7 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-ring-primary': 'global.color.outline.default',
     'rgb-focus-outline': 'global.color.outline.default',
     'rgb-focus-control': 'global.color.outline.default',
+    'rgb-focus-subtle': 'global.color.outline.default',
     'rgb-header-primary': 'global.color.background.default',
     'rgb-header-hover': 'global.color.background.muted',
     'rgb-header-button-hover': 'global.color.background.muted',
@@ -235,6 +251,9 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-surface-chat': 'global.color.background.default',
     'rgb-surface-code': 'click.codeblock.darkMode.color.background.default',
     'rgb-surface-code-body': 'click.codeblock.darkMode.color.background.default',
+    'rgb-surface-code-inline': 'palette.neutral.700',
+    'rgb-prose-bullet': 'palette.neutral.500',
+    'rgb-prose-quote-bar': 'palette.neutral.500',
     'rgb-surface-qr': 'palette.neutral.0',
     'rgb-text-on-media': 'palette.neutral.0',
     'rgb-surface-inverted': 'click.button.basic.color.primary.background.default',
@@ -257,6 +276,17 @@ const colorSources: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> 
     'rgb-border-field-focus': 'click.field.color.stroke.active',
     'rgb-field-fill': 'click.field.color.background.default',
     'rgb-field-text': 'click.field.color.text.default',
+    'rgb-surface-canvas': 'global.color.background.default',
+    'rgb-surface-user-message': 'palette.neutral.712',
+    'rgb-surface-card': 'click.card.secondary.color.background.default',
+    'rgb-surface-card-hover': 'click.card.secondary.color.background.hover',
+    'rgb-surface-nav-hover': 'click.sidebar.main.navigation.item.color.background.hover',
+    'rgb-surface-tab-selected': 'palette.neutral.712',
+    'rgb-surface-menu': 'click.genericMenu.panel.color.background.default',
+    'rgb-surface-popover': 'click.genericMenu.panel.color.background.default',
+    'rgb-border-menu': 'click.genericMenu.panel.color.stroke.default',
+    'rgb-surface-composer': 'click.field.color.background.default',
+    'rgb-surface-search': 'click.field.color.background.default',
     'rgb-surface-disabled': 'click.button.basic.color.primary.background.disabled',
     'rgb-text-disabled': 'global.color.text.disabled',
     'rgb-border-disabled': 'click.field.color.stroke.disabled',
@@ -336,12 +366,16 @@ const ALERT_ALPHA_REASON =
 /** Values the theme sets on purpose without a Click UI source, and why. */
 const unsourcedColors: Record<ThemeMode, Partial<Record<keyof IThemeRGB, string>>> = {
   light: {
+    'rgb-surface-nav-hover':
+      'Click UI sidebar item hover is a 0.6 alpha lch; the theme paints its composite on background.split',
     'rgb-surface-media-overlay': MEDIA_OVERLAY_REASON,
     'rgb-avatar-edge': AVATAR_EDGE_REASON,
     'rgb-alert-error-fill': ALERT_ALPHA_REASON,
     'rgb-alert-error-border': ALERT_ALPHA_REASON,
   },
   dark: {
+    'rgb-surface-nav-selected':
+      'Click UI sidebar item active is a 0.6 alpha lch; the theme paints its composite on background.split',
     'rgb-surface-overlay':
       'Click UI dark dialog.color.opaqueBackground is a gray that leaves the dialog under 3:1',
     'rgb-surface-media-overlay': MEDIA_OVERLAY_REASON,
@@ -380,6 +414,12 @@ const departures: Record<ThemeMode, Partial<Record<keyof IThemeRGB, Departure>>>
       counterpart: 'click.alert.color.background.danger',
       status: 'mismatch',
       reason: ALERT_ALPHA_REASON,
+    },
+    'rgb-surface-nav-hover': {
+      counterpart: 'click.sidebar.main.navigation.item.color.background.hover',
+      status: 'near',
+      reason:
+        'the token is lch(91.609 1.1023 265.86) at 0.6 alpha; the theme value is its composite on background.split',
     },
     'rgb-avatar-edge': {
       counterpart: 'global.color.stroke.default',
@@ -420,6 +460,18 @@ const departures: Record<ThemeMode, Partial<Record<keyof IThemeRGB, Departure>>>
       counterpart: 'global.color.stroke.intense',
       status: 'mismatch',
       reason: 'stroke.intense is 2.03:1 on white, under the 3:1 a heavy edge carries',
+    },
+    'rgb-prose-bullet': {
+      counterpart: 'global.color.stroke.intense',
+      status: 'mismatch',
+      reason:
+        'a list marker and a quote bar are the only cue of their element, so they take the 3:1 non-text floor stroke.intense (2.03:1 on white) misses',
+    },
+    'rgb-prose-quote-bar': {
+      counterpart: 'global.color.stroke.intense',
+      status: 'mismatch',
+      reason:
+        'a list marker and a quote bar are the only cue of their element, so they take the 3:1 non-text floor stroke.intense (2.03:1 on white) misses',
     },
     'rgb-border-control': {
       counterpart: 'click.field.color.stroke.default',
@@ -463,10 +515,28 @@ const departures: Record<ThemeMode, Partial<Record<keyof IThemeRGB, Departure>>>
     },
   },
   dark: {
+    'rgb-surface-nav-selected': {
+      counterpart: 'click.sidebar.main.navigation.item.color.background.active',
+      status: 'near',
+      reason:
+        'the token is lch(27.535 0 none) at 0.6 alpha; the theme value is its composite on background.split',
+    },
     'rgb-border-xheavy': {
       counterpart: 'global.color.stroke.intense',
       status: 'mismatch',
       reason: 'stroke.intense is 1.62:1 on the canvas, under the 3:1 a heavy edge carries',
+    },
+    'rgb-prose-bullet': {
+      counterpart: 'global.color.stroke.intense',
+      status: 'mismatch',
+      reason:
+        'a list marker and a quote bar are the only cue of their element, so they take the 3:1 non-text floor stroke.intense (1.62:1 on the canvas) misses',
+    },
+    'rgb-prose-quote-bar': {
+      counterpart: 'global.color.stroke.intense',
+      status: 'mismatch',
+      reason:
+        'a list marker and a quote bar are the only cue of their element, so they take the 3:1 non-text floor stroke.intense (1.62:1 on the canvas) misses',
     },
     'rgb-border-control': {
       counterpart: 'click.field.color.stroke.default',
@@ -602,6 +672,24 @@ const appearanceDecisions: Partial<Record<keyof IThemeAppearance, AppearanceDeci
     reason:
       'none: Click UI Tooltip.module.css draws its tooltip with no shadow; no token carries it',
   },
+  chromeBorderAlpha: {
+    value: '0',
+    status: 'match',
+    reason:
+      '0: Click UI IconButton, tabs.basic and chat chrome draw no stroke (iconButton.*.stroke.default is rgba(0, 0, 0, 0)); hover and selection are a fill',
+  },
+  insetBorderAlpha: {
+    value: '0',
+    status: 'match',
+    reason:
+      '0: Click UI separates a card header from its body by fill; only tables and separators draw an inner stroke',
+  },
+  destructiveStyle: {
+    value: 'soft',
+    status: 'match',
+    reason:
+      'soft: Click UI paints a danger button as a 10% tint of danger under text.danger (button.basic.color.danger.*: background rgb(255 35 35 / 0.1), hover 0.2, text #c10000)',
+  },
   fieldFillStyle: {
     value: 'fill',
     status: 'match',
@@ -636,6 +724,10 @@ const appearanceSources: Partial<Record<keyof IThemeAppearance, string>> = {
   spaceCompact: 'spaces.2',
   spaceNormal: 'spaces.3',
   menuRadius: 'click.genericMenu.panel.radii.all',
+  popoverRadius: 'click.genericMenu.panel.radii.all',
+  menuPanelRadius: 'click.genericMenu.panel.radii.all',
+  composerActionRadius: 'click.button.radii.all',
+  inlineCodeWeight: 'typography.font.weights.2',
   tooltipRadius: 'click.tooltip.radii.all',
   tooltipPaddingX: 'click.tooltip.space.x',
   tooltipPaddingY: 'click.tooltip.space.y',

@@ -63,6 +63,9 @@ export const themeColorTokens = Object.freeze([
   'rgb-surface-chat',
   'rgb-surface-code',
   'rgb-surface-code-body',
+  'rgb-surface-code-inline',
+  'rgb-prose-bullet',
+  'rgb-prose-quote-bar',
   'rgb-surface-qr',
   'rgb-surface-inverted',
   'rgb-surface-inverted-hover',
@@ -82,12 +85,25 @@ export const themeColorTokens = Object.freeze([
   'rgb-border-destructive',
   'rgb-border-control',
   'rgb-border-field-focus',
+  'rgb-focus-subtle',
   'rgb-field-fill',
   'rgb-field-text',
   'rgb-surface-tooltip',
   'rgb-text-tooltip',
   'rgb-alert-error-fill',
   'rgb-alert-error-border',
+  'rgb-surface-canvas',
+  'rgb-surface-user-message',
+  'rgb-surface-card',
+  'rgb-surface-card-hover',
+  'rgb-surface-nav-hover',
+  'rgb-surface-nav-selected',
+  'rgb-surface-tab-selected',
+  'rgb-surface-menu',
+  'rgb-surface-popover',
+  'rgb-border-menu',
+  'rgb-surface-composer',
+  'rgb-surface-search',
   'rgb-surface-disabled',
   'rgb-text-disabled',
   'rgb-border-disabled',
@@ -362,6 +378,10 @@ const appearanceValidators = {
   largeSurfaceRadius: isLength,
   /** A menu panel's, a tooltip's and a tab trigger's corner. */
   menuRadius: isLength,
+  popoverRadius: isLength,
+  menuPanelRadius: isLength,
+  composerActionRadius: isLength,
+  inlineCodeWeight: isFontWeight,
   tooltipRadius: isLength,
   /** A tooltip's padding and text size. */
   tooltipPaddingX: isLength,
@@ -468,6 +488,12 @@ const appearanceValidators = {
   tooltipShadow: isShadow,
   motionFast: isDuration,
   motionNormal: isDuration,
+  /** How much of `border-light` the outlines of controls and chips, and the hairlines inside a
+   *  stroked surface, keep: 0 draws none and leaves the box where it was. */
+  chromeBorderAlpha: isOpacity,
+  insetBorderAlpha: isOpacity,
+  /** `fill` paints a destructive action in the solid destructive surface; `soft` in a tint of it. */
+  destructiveStyle: (value: unknown) => value === 'fill' || value === 'soft',
 } satisfies Record<string, (value: unknown) => boolean>;
 
 export type ThemeAppearanceToken = keyof typeof appearanceValidators;
