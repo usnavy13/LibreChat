@@ -2043,6 +2043,7 @@ export async function initializeAgent(
       endpointType,
       skipTotalSizeLimit: true,
       preserveTextSources: true,
+      consumers: fileConsumers,
     });
     /* Only filter survivors are allocated: a file the endpoint refuses never spends the
      * request's direct-content allowance, and the reading records it as dropped. */
@@ -2091,6 +2092,7 @@ export async function initializeAgent(
         files: deferredProvisionFiles,
         endpoint: agent.endpoint ?? '',
         endpointType,
+        consumers: fileConsumers,
         /* The deferred pass charges its own list as it walks it, so a file in both sets
          * is counted there. Only what delivery spends on files the deferred pass will
          * not see is carried in. */
@@ -2236,6 +2238,7 @@ export async function initializeAgent(
         endpoint: agent.endpoint ?? '',
         endpointType: endpointFileType,
         consumedBytes: sumUniqueBytes(committedFiles),
+        consumers: fileConsumers,
       }) as unknown as TFile[];
 
       /* Dropped rather than fatal, matching the deferred candidates: these were not

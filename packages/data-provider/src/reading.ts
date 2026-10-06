@@ -30,6 +30,7 @@ export type ClassicReason =
   | 'text_only_record'
   | 'configured_route'
   | 'consumers_unknown'
+  | 'no_file_tools'
   | 'media_category';
 
 export type ReadingReason =

@@ -1,5 +1,6 @@
 import {
   getRoutingMimeType,
+  hasFileToolConsumer,
   Tools,
   EToolResources,
   isTextOnlyRecord,
@@ -432,8 +433,8 @@ export function renderLeftOutFiles(
 /**
  * Plans the agent's queued code files, then lists how the automatic policy reads each attachment
  * as `file_inventory`. The planner runs first in the same call, so the inventory restates its
- * destinations and a re-plan re-renders both. Classic routing writes no inventory and leaves the
- * File Search advert alone.
+ * destinations and a re-plan re-renders both. Classic routing, and a turn that loads no file
+ * tool, write no inventory and leave the File Search advert alone.
  */
 export function prepareAgentFileContext(
   agent: CodeFileAgent & ReadingAgent,
@@ -446,7 +447,10 @@ export function prepareAgentFileContext(
   if (agent.dynamicToolContextMap) {
     delete agent.dynamicToolContextMap[INVENTORY_KEY];
   }
-  if (resolveLLMDeliveryPolicy(agent.deliveryRouting?.endpointConfig) !== 'automatic') {
+  if (
+    resolveLLMDeliveryPolicy(agent.deliveryRouting?.endpointConfig) !== 'automatic' ||
+    !hasFileToolConsumer(agent.fileConsumers)
+  ) {
     return;
   }
   const entries = collectInventoryEntries(agent);

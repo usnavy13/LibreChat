@@ -514,10 +514,22 @@ describe('createRunFileMessageEncoder', () => {
 
   describe('under the automatic policy', () => {
     const runsCode = { executeCode: true, fileSearch: false };
+    const searches = { executeCode: false, fileSearch: true };
     const noReader = { executeCode: false, fileSearch: false };
     const attachment = {
       context: FileContext.message_attachment,
       metadata: { destinationChosen: false },
+    };
+    /**
+     * File Search is loaded but queued and registered none of the child's files, as a failed
+     * provisioning leaves it: the walk passes search by, no code tool is loaded, and a document
+     * the provider rejects falls back to its text or, without any, to unavailable.
+     */
+    const withoutSearchFiles = (
+      context: ReturnType<typeof buildTurnReadingContext>,
+    ): ReturnType<typeof buildTurnReadingContext> => {
+      context?.setSearchEvidence({ queued: [], registered: [] });
+      return context;
     };
 
     it('admits an oversized file the child reads with Run Code and never counts it', async () => {
@@ -589,21 +601,23 @@ describe('createRunFileMessageEncoder', () => {
       const brief: TFile = { ...pdf, ...attachment, text: undefined };
       const harness = setup({
         agents: {
-          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: noReader },
-          classic: { provider: 'openAI', endpoint: 'classic', fileConsumers: noReader },
+          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: searches },
+          classic: { provider: 'openAI', endpoint: 'classic', fileConsumers: searches },
         },
         fileConfig: { endpoints: { automatic: { llmDeliveryPolicy: 'automatic' } } },
       });
       const child = harness.getAgent('automatic');
       const context =
         child &&
-        buildTurnReadingContext({
-          routing: child.deliveryRouting,
-          provider: 'openAI',
-          fileTokenLimit: 100_000,
-          configuredFileSizeLimit: undefined,
-          countTokens: (text) => text.length,
-        });
+        withoutSearchFiles(
+          buildTurnReadingContext({
+            routing: child.deliveryRouting,
+            provider: 'openAI',
+            fileTokenLimit: 100_000,
+            configuredFileSizeLimit: undefined,
+            countTokens: (text) => text.length,
+          }),
+        );
       if (child == null || context == null) {
         throw new Error('expected an automatic reading context');
       }
@@ -635,7 +649,7 @@ describe('createRunFileMessageEncoder', () => {
       fileConfig: NonNullable<ServerRequest['config']>['fileConfig'] = {},
     ) => {
       const harness = setup({
-        agents: { child: { provider: 'anthropic', fileConsumers: noReader } },
+        agents: { child: { provider: 'anthropic', fileConsumers: searches } },
         fileConfig: {
           ...fileConfig,
           endpoints: {
@@ -648,13 +662,15 @@ describe('createRunFileMessageEncoder', () => {
       if (child == null) {
         throw new Error('expected a child agent');
       }
-      const context = buildTurnReadingContext({
-        routing: child.deliveryRouting,
-        provider: 'anthropic',
-        fileTokenLimit: 100_000,
-        configuredFileSizeLimit: undefined,
-        countTokens: (text) => text.length,
-      });
+      const context = withoutSearchFiles(
+        buildTurnReadingContext({
+          routing: child.deliveryRouting,
+          provider: 'anthropic',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+        }),
+      );
       child.deliveryRouting.reading = context;
       return { ...harness, context, child };
     };
@@ -710,14 +726,16 @@ describe('createRunFileMessageEncoder', () => {
         text: 'Complete derived PDF text.',
         textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 2 },
       });
-      harness.child.deliveryRouting.reading = buildTurnReadingContext({
-        routing: harness.child.deliveryRouting,
-        provider: 'anthropic',
-        fileTokenLimit: 100_000,
-        configuredFileSizeLimit: undefined,
-        countTokens: (text) => text.length,
-        deriveText,
-      });
+      harness.child.deliveryRouting.reading = withoutSearchFiles(
+        buildTurnReadingContext({
+          routing: harness.child.deliveryRouting,
+          provider: 'anthropic',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+          deriveText,
+        }),
+      );
       harness.encodeDocuments.mockResolvedValueOnce({
         documents: [],
         rejected: [{ file_id: file.file_id, reason: 'capacity' }],
@@ -749,18 +767,20 @@ describe('createRunFileMessageEncoder', () => {
     it('moves an aggregate-overflowed derived fallback to unavailable before extraction', async () => {
       const harness = capacityHarness({ fileContextCharLimit: 8 });
       const file: TFile = { ...pdf, ...attachment, text: undefined };
-      harness.child.deliveryRouting.reading = buildTurnReadingContext({
-        routing: harness.child.deliveryRouting,
-        provider: 'anthropic',
-        fileTokenLimit: 100_000,
-        configuredFileSizeLimit: undefined,
-        countTokens: (text) => text.length,
-        deriveText: async () => ({
-          status: 'derived',
-          text: 'This complete text fits per-file but exceeds the aggregate.',
-          textDerivation: { outcome: 'complete', extractor: 'document_parser' },
+      harness.child.deliveryRouting.reading = withoutSearchFiles(
+        buildTurnReadingContext({
+          routing: harness.child.deliveryRouting,
+          provider: 'anthropic',
+          fileTokenLimit: 100_000,
+          configuredFileSizeLimit: undefined,
+          countTokens: (text) => text.length,
+          deriveText: async () => ({
+            status: 'derived',
+            text: 'This complete text fits per-file but exceeds the aggregate.',
+            textDerivation: { outcome: 'complete', extractor: 'document_parser' },
+          }),
         }),
-      });
+      );
       harness.encodeDocuments.mockResolvedValueOnce({
         documents: [],
         rejected: [{ file_id: file.file_id, reason: 'capacity' }],
@@ -773,7 +793,7 @@ describe('createRunFileMessageEncoder', () => {
       expect(JSON.stringify(message.content)).not.toContain('This complete text fits');
     });
 
-    it('still fails on a document the child reads as classic, beside one it may leave out', async () => {
+    const classicBesideAutomatic = (consumers: { executeCode: boolean; fileSearch: boolean }) => {
       const brief: TFile = { ...pdf, ...attachment, text: undefined };
       const chosen: TFile = {
         ...brief,
@@ -782,20 +802,22 @@ describe('createRunFileMessageEncoder', () => {
       };
       const harness = setup({
         agents: {
-          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: noReader },
+          automatic: { provider: 'openAI', endpoint: 'automatic', fileConsumers: consumers },
         },
         fileConfig: { endpoints: { automatic: { llmDeliveryPolicy: 'automatic' } } },
       });
       const child = harness.getAgent('automatic');
       const context =
         child &&
-        buildTurnReadingContext({
-          routing: child.deliveryRouting,
-          provider: 'openAI',
-          fileTokenLimit: 100_000,
-          configuredFileSizeLimit: undefined,
-          countTokens: (text) => text.length,
-        });
+        withoutSearchFiles(
+          buildTurnReadingContext({
+            routing: child.deliveryRouting,
+            provider: 'openAI',
+            fileTokenLimit: 100_000,
+            configuredFileSizeLimit: undefined,
+            countTokens: (text) => text.length,
+          }),
+        );
       if (child == null || context == null) {
         throw new Error('expected an automatic reading context');
       }
@@ -809,24 +831,40 @@ describe('createRunFileMessageEncoder', () => {
           rejected: files.map(({ file_id }) => ({ file_id, reason: 'integrity' as const })),
         };
       });
+      const validationCalls = () =>
+        harness.encodeDocuments.mock.calls.map(([, files, params]) => [
+          files.map(({ file_id }) => file_id),
+          params.onValidationFailure,
+        ]);
+      return { brief, chosen, harness, context, validationCalls };
+    };
+
+    it('still fails on a document the child reads as classic, beside one it may leave out', async () => {
+      const { brief, chosen, harness, validationCalls } = classicBesideAutomatic(searches);
 
       await expect(harness.encode([brief, chosen], 'automatic')).rejects.toThrow(
         'PDF validation failed',
       );
-      expect(
-        harness.encodeDocuments.mock.calls.map(([, files, params]) => [
-          files.map(({ file_id }) => file_id),
-          params.onValidationFailure,
-        ]),
-      ).toEqual([
+      expect(validationCalls()).toEqual([
         [['input-pdf'], 'skip'],
         [['chosen-pdf'], 'throw'],
       ]);
     });
 
+    it('validates every document as classic, leaving none out, when the child loads no file tool', async () => {
+      const { brief, chosen, harness, context, validationCalls } = classicBesideAutomatic(noReader);
+
+      await expect(harness.encode([brief, chosen], 'automatic')).rejects.toThrow(
+        'PDF validation failed',
+      );
+      expect(validationCalls()).toEqual([[['input-pdf', 'chosen-pdf'], 'throw']]);
+      expect(context.stats().rejected).toBe(0);
+    });
+
     it('derives the text a file needs inside encode, and validates it without the text', async () => {
-      /* No reader can take the deferred workbook, so its reading needs text. Validation stays
-       * synchronous: the copy is not model-bound until its text exists, so nothing is counted. */
+      /* No file tool is loaded, so the deferred workbook keeps its classic text route, which
+       * has no text yet and needs it derived. Validation stays synchronous: the copy is not
+       * model-bound until its text exists, so nothing is counted. */
       const workbook: TFile = {
         ...pdf,
         ...attachment,
@@ -900,7 +938,7 @@ describe('createRunFileMessageEncoder', () => {
         llmDeliveryPath: 'text',
       };
       const harness = setup({
-        agents: { child: { provider: 'openAI', fileConsumers: noReader } },
+        agents: { child: { provider: 'openAI', fileConsumers: searches } },
         fileConfig: { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } },
       });
       harness.req.body = { fileTokenLimit: 10 };

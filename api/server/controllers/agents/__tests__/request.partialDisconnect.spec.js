@@ -47,7 +47,6 @@ jest.mock('@librechat/data-schemas', () => ({
 }));
 
 jest.mock('@librechat/api', () => ({
-  stripReadingNotices: jest.requireActual('@librechat/api').stripReadingNotices,
   savePrivateTextMessage: (save, _req, ...args) => save(...args),
   savePrivateTextErrorTurn: (...args) =>
     jest.requireActual('@librechat/api').savePrivateTextErrorTurn(...args),
@@ -78,8 +77,7 @@ jest.mock('@librechat/api', () => ({
     pendingRequests: 3,
     score: 1,
   })),
-  buildUserMessageFiles: jest.fn(() => []),
-  refreshUserMessageReading: jest.requireActual('@librechat/api').refreshUserMessageReading,
+  buildMessageFiles: jest.fn(() => []),
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,

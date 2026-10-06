@@ -141,7 +141,6 @@ describe('FilePreviewDialog lifecycle', () => {
               {
                 file_id: 'f1',
                 llmDeliveryPath: 'text',
-                reading: { reader: 'text', limitation: 'code_unavailable' },
               },
             ],
           } as TMessage,

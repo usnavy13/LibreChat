@@ -6613,10 +6613,12 @@ describe('AgentClient - titleConvo', () => {
       expect(() => client.admitSteerAttachments([current], 'later-steer')).not.toThrow();
     });
 
-    it('rolls back prepared native fallback copies after steer extraction fails', async () => {
+    it('rolls back prepared native fallback copies after steer extraction fails with File Search loaded but unreachable', async () => {
       const { buildTurnReadingContext } = jest.requireActual('@librechat/api');
       mockReq.config.fileConfig = { endpoints: { openAI: { llmDeliveryPolicy: 'automatic' } } };
-      mockAgent.fileConsumers = { executeCode: false, fileSearch: false };
+      /** Automatic reading needs a loaded file tool; text is the fallback once File Search
+       *  cannot reach the file. */
+      mockAgent.fileConsumers = { executeCode: false, fileSearch: true };
       mockAgent.deliveryRouting = jest.requireActual('@librechat/api').resolveTurnDeliveryRouting({
         agent: mockAgent,
         config: mockReq.config,
@@ -6628,6 +6630,7 @@ describe('AgentClient - titleConvo', () => {
         configuredFileSizeLimit: undefined,
         countTokens: (text) => text.length,
       });
+      context.setSearchEvidence({ queued: [], registered: [], preparation: new Map() });
       mockAgent.deliveryRouting.reading = context;
       const file = {
         ...makeUploadedFile('steered-pdf', 'steered.pdf', 'application/pdf'),
@@ -6833,10 +6836,9 @@ describe('AgentClient - titleConvo', () => {
         expect(reading.stats().overflow).toBe(0);
       });
 
-      it('reserves repeated historical steer copies before native fallback is extracted', async () => {
+      it('reserves repeated historical steer copies before native fallback is extracted with File Search loaded but unreachable', async () => {
         readAutomatically({ fileLimit: 10, llmDeliveryPolicy: 'automatic' });
         mockReq.config.fileConfig.fileContextCharLimit = 10;
-        mockAgent.fileConsumers = { executeCode: false, fileSearch: false };
         const reading = jest.requireActual('@librechat/api').buildTurnReadingContext({
           routing: mockAgent.deliveryRouting,
           provider: EModelEndpoint.openAI,
@@ -6849,6 +6851,9 @@ describe('AgentClient - titleConvo', () => {
             textDerivation: { outcome: 'complete', extractor: 'document_parser' },
           }),
         });
+        /** Automatic reading needs a loaded file tool; the text fallback follows once File
+         *  Search cannot reach the replayed file. */
+        reading.setSearchEvidence({ queued: [], registered: [], preparation: new Map() });
         mockAgent.deliveryRouting.reading = reading;
         const file = {
           ...historicalPdf,

@@ -220,7 +220,7 @@ describe('native validation', () => {
       ).toBe('throw');
     });
 
-    it('fails every file outside an automatic reading or without known consumers', () => {
+    it('fails every file outside an automatic reading, without known consumers or without a file tool', () => {
       const derivingClassic = routingFor('openAI', {});
       derivingClassic.reading = contextFor({
         routing: derivingClassic,
@@ -230,6 +230,7 @@ describe('native validation', () => {
         automaticAgent({ deliveryRouting: derivingClassic }),
         automaticAgent({ deliveryRouting: routingFor('openAI') }),
         automaticAgent({ fileConsumers: undefined }),
+        automaticAgent({ fileConsumers: { executeCode: false, fileSearch: false } }),
         undefined,
       ];
 
@@ -238,7 +239,13 @@ describe('native validation', () => {
         'throw',
         'throw',
         'throw',
+        'throw',
       ]);
+      expect(
+        getNativeValidationPolicy(
+          automaticAgent({ fileConsumers: { executeCode: true, fileSearch: false } }),
+        )(rejectedPdf),
+      ).toBe('skip');
     });
 
     it('allows an automatic historical attachment to use the same fallback as a request file', () => {

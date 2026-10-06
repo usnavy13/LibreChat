@@ -299,11 +299,8 @@ jest.mock('@librechat/api', () => ({
     return { text, fileIds: fileIds.sort() };
   }),
   getViolationInfo: (...args) => mockGetViolationInfo(...args),
-  /** Real, because the reading notices the final user-message save carries are under test. */
-  buildUserMessageFiles: jest.requireActual('@librechat/api').buildUserMessageFiles,
-  refreshUserMessageReading: jest.requireActual('@librechat/api').refreshUserMessageReading,
-  /** Real, because a replayed file's stale notice must not reach the new user message. */
-  stripReadingNotices: jest.requireActual('@librechat/api').stripReadingNotices,
+  /** Real, because the files the final user-message save carries are under test. */
+  buildMessageFiles: jest.requireActual('@librechat/api').buildMessageFiles,
   resolveTitleTiming: jest.fn(() => 'immediate'),
   createConvoPersistenceSignal: jest.requireActual('@librechat/api').createConvoPersistenceSignal,
   recoverTurnMessageReference: jest.requireActual('@librechat/api').recoverTurnMessageReference,
@@ -3376,7 +3373,6 @@ describe('ResumableAgentController resume metadata', () => {
       _id: 'mongo-scan',
     };
     const { text: _briefText, _id: _briefId, ...savedBrief } = brief;
-    const { _id: _scanId, ...savedScan } = scan;
 
     const routeAgent = (endpointConfig) => {
       const agent = {
@@ -3455,13 +3451,11 @@ describe('ResumableAgentController resume metadata', () => {
       return saved.files;
     };
 
-    it('keeps how the automatic policy read each request file, including a refused one', async () => {
+    it('saves the attached request files without a reading notice under the automatic policy', async () => {
       const files = await savedUserFiles(routeAgent({ llmDeliveryPolicy: 'automatic' }));
 
-      expect(files).toEqual([
-        { ...savedBrief, reading: { reader: 'provider' } },
-        { ...savedScan, reading: { reader: 'unavailable', limitation: 'not_allowed' } },
-      ]);
+      expect(files).toEqual([savedBrief]);
+      expect(files[0]).not.toHaveProperty('reading');
       expect(brief).not.toHaveProperty('reading');
     });
 
@@ -3901,7 +3895,7 @@ describe('ResumableAgentController resume metadata', () => {
       }
     }
 
-    it('persists the failed indexing notice before publishing the generation error', async () => {
+    it('persists the user message without file text and fails the turn when search preparation fails', async () => {
       const api = jest.requireActual('@librechat/api');
       const file = {
         user: 'user-123',
@@ -3957,12 +3951,8 @@ describe('ResumableAgentController resume metadata', () => {
         parentMessageId: 'prior-response',
         conversationId,
         text: 'Search the attached PDF.',
-        files: api.buildUserMessageFiles(refs, [file], agent),
+        files: api.buildMessageFiles(refs, [file]),
       };
-      expect(message.files[0].reading).toEqual({
-        reader: 'search',
-        limitation: 'too_large_direct',
-      });
       const provisionFiles = api.createProvisionFilesCallback({
         req: { user: { id: 'user-123' } },
         agentToolContexts: new Map([[agent.id, { provisionState: agent.provisionState }]]),
@@ -3985,11 +3975,9 @@ describe('ResumableAgentController resume metadata', () => {
           const saved = mockSaveMessage.mock.calls.find(
             ([, row]) => row.messageId === message.messageId,
           )?.[1];
-          expect(saved.files[0].reading).toEqual({
-            reader: 'unavailable',
-            limitation: 'not_prepared',
-          });
+          expect(saved.files[0]).toMatchObject({ file_id: file.file_id });
           expect(saved.files[0]).not.toHaveProperty('text');
+          expect(saved.files[0]).not.toHaveProperty('reading');
           expect(error).toBe(new api.FileSearchPreparationError().message);
           return true;
         },
@@ -4007,7 +3995,7 @@ describe('ResumableAgentController resume metadata', () => {
       const saved = mockSaveMessage.mock.calls.find(
         ([, row]) => row.messageId === message.messageId,
       )?.[1];
-      expect(saved.files[0].reading).toEqual({ reader: 'unavailable', limitation: 'not_prepared' });
+      expect(saved.files[0]).not.toHaveProperty('reading');
       expect(agent.provisionState.vectorDBFiles).toEqual([file]);
     });
 
@@ -4135,13 +4123,12 @@ describe('ResumableAgentController resume metadata', () => {
       );
     });
 
-    it('saves an edited resubmission that fails early without the replayed reading notice', async () => {
+    it('saves an edited resubmission that fails early with the file refs the request carried', async () => {
       const initializeClient = jest.fn().mockRejectedValue(new Error('model unavailable'));
       const replayedFile = {
         file_id: 'book',
         filename: 'book.xlsx',
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        reading: { reader: 'code' },
       };
 
       await AgentController(
@@ -4155,15 +4142,7 @@ describe('ResumableAgentController resume metadata', () => {
       const [, savedUser] = mockSaveMessage.mock.calls.find(
         ([, message]) => message?.messageId === 'user-message',
       );
-      expect(savedUser.files).toEqual([
-        {
-          file_id: 'book',
-          filename: 'book.xlsx',
-          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        },
-      ]);
-      expect(savedUser.files[0]).not.toHaveProperty('reading');
-      expect(replayedFile).toHaveProperty('reading');
+      expect(savedUser.files).toEqual([replayedFile]);
     });
 
     it('allows a follow-up to chain from the persisted failed response', async () => {

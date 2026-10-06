@@ -107,10 +107,18 @@ function storedPdf(
   };
 }
 
+/**
+ * File Search is loaded unless a test says otherwise, but has queued and registered none of the
+ * files, as a failed provisioning leaves it: the walk passes search by, no code tool is loaded,
+ * and a PDF the provider rejects falls back to its text. `queuedForSearch` makes the files
+ * reachable, so the walk ends at File Search instead. Without any file tool the automatic
+ * policy reads nothing and a provider rejection fails the turn as classic routing does.
+ */
 function setup({
   current = [],
   historical = [],
-  consumers = noTools,
+  consumers = search,
+  queuedForSearch = false,
   fileTokenLimit = 10_000,
   fileContextCharLimit = 100_000,
   fileLimit,
@@ -122,6 +130,7 @@ function setup({
   current?: StoredPdf[];
   historical?: StoredPdf[];
   consumers?: TurnFileConsumers;
+  queuedForSearch?: boolean;
   fileTokenLimit?: number;
   fileContextCharLimit?: number;
   fileLimit?: number;
@@ -180,6 +189,10 @@ function setup({
   });
   if (context == null) throw new Error('Expected automatic reading context');
   routing.reading = context;
+  context.setSearchEvidence({
+    queued: queuedForSearch ? [...historical, ...current].map(({ file }) => file.file_id) : [],
+    registered: [],
+  });
   const primary = {
     id: 'primary',
     endpoint: Providers.ANTHROPIC,
@@ -277,15 +290,19 @@ function setup({
 
 describe('native attachment fallback', () => {
   it.each([
-    ['File Search', search, 'search', 'none'],
-    ['Run Code', code, 'code', 'none'],
-    ['no tools', noTools, 'text', 'text'],
+    ['File Search', search, true, 'search', 'none'],
+    ['Run Code', code, false, 'code', 'none'],
+    ['File Search it cannot reach', search, false, 'text', 'text'],
   ] as const)(
     'recovers a real 101-page PDF initially and in a fresh history turn with %s',
-    async (_name, consumers, reader, path) => {
+    async (_name, consumers, queuedForSearch, reader, path) => {
       const fixture = storedPdf('CACHED-SENTINEL', { text: 'Complete cached attachment text' });
       for (const historical of [false, true]) {
-        const harness = setup({ [historical ? 'historical' : 'current']: [fixture], consumers });
+        const harness = setup({
+          [historical ? 'historical' : 'current']: [fixture],
+          consumers,
+          queuedForSearch,
+        });
         expect(harness.context.judge(fixture.file).native).toBe('fits');
 
         const { message, prepared } = await harness.prepare([fixture.file]);
@@ -318,6 +335,43 @@ describe('native attachment fallback', () => {
           expect(message.fileContext).toBeUndefined();
           expect(harness.extractText).not.toHaveBeenCalled();
         }
+      }
+      expect(fixture.file.llmDeliveryPath).toBe('provider');
+    },
+  );
+
+  it.each([
+    [
+      'a 101-page PDF',
+      () => storedPdf('NO-TOOLS', { text: 'Complete cached attachment text' }),
+      /100-page limit/,
+    ],
+    [
+      'a corrupt PDF',
+      () => {
+        const fixture = storedPdf('NO-TOOLS-INTEGRITY', { text: 'Cached text' });
+        fixture.original = Buffer.from('not a PDF');
+        fixture.file.bytes = fixture.original.length;
+        return fixture;
+      },
+      /missing PDF header/,
+    ],
+  ])(
+    'fails the turn on %s as classic routing does when no file tool is loaded',
+    async (_name, fixtureOf, error) => {
+      const fixture = fixtureOf();
+      for (const historical of [false, true]) {
+        const harness = setup({
+          [historical ? 'historical' : 'current']: [fixture],
+          consumers: noTools,
+        });
+
+        await expect(harness.prepare([fixture.file])).rejects.toThrow(error);
+
+        expect(harness.context.judge(fixture.file).rejected).toBeUndefined();
+        expect(harness.client.prepareTurnAttachments).not.toHaveBeenCalled();
+        expect(harness.extractText).not.toHaveBeenCalled();
+        expect(harness.deriveText).not.toHaveBeenCalled();
       }
       expect(fixture.file.llmDeliveryPath).toBe('provider');
     },
@@ -384,13 +438,17 @@ describe('native attachment fallback', () => {
     expect(harness.deriveText).not.toHaveBeenCalled();
   });
 
-  it.each([noTools, search, code])(
-    'never substitutes text for an integrity rejection (%j)',
-    async (consumers) => {
+  it.each([
+    [search, true],
+    [search, false],
+    [code, false],
+  ])(
+    'never substitutes text for an integrity rejection (%j, queued for search: %s)',
+    async (consumers, queuedForSearch) => {
       const fixture = storedPdf('INTEGRITY', { text: 'Cached text must not bypass corruption' });
       fixture.original = Buffer.from('not a PDF');
       fixture.file.bytes = fixture.original.length;
-      const harness = setup({ current: [fixture], consumers });
+      const harness = setup({ current: [fixture], consumers, queuedForSearch });
 
       const { message, prepared } = await harness.prepare([fixture.file]);
 

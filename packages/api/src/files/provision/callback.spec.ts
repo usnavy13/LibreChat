@@ -8,13 +8,13 @@ import type { ReadingAgent } from '../reading/inventory';
 import type { ProvisionToolContext } from './callback';
 import type { CodeFileAgent } from '../code/queued';
 import type { ServerRequest } from '~/types';
+import { collectInventoryEntries, prepareAgentFileContext } from '../reading/inventory';
 import { FileSearchPreparationError, createProvisionFilesCallback } from './callback';
 import { buildTurnReadingContext, getTurnReadingContext } from '../reading/turn';
 import { mergeCodeFilesIntoContext } from '~/agents/codeFilesSession';
 import { resolveTurnDeliveryRouting } from '~/agents/files/delivery';
 import { prepareQueuedCodeFileContext } from '../code/queued';
 import { createSubagentCodeRouting } from '~/code/targets';
-import { buildUserMessageFiles } from '../reading/notices';
 
 jest.mock('@librechat/data-schemas', () => ({
   logger: { error: jest.fn(), warn: jest.fn(), debug: jest.fn(), info: jest.fn() },
@@ -1169,11 +1169,10 @@ describe('createProvisionFilesCallback', () => {
     expect(agentToolContexts.get('agent-a')?.provisionState?.vectorDBFiles).toHaveLength(1);
   });
 
-  it('retains a failed search notice until a declined embedding succeeds on retry', async () => {
+  it('retains failed search readiness until a declined embedding succeeds on retry', async () => {
     const pending = searchFile({ text: 'complete cached text that was not sent' });
     const agent = searchAgent([pending]);
     const context = getTurnReadingContext(agent.deliveryRouting);
-    const refs = [{ file_id: pending.file_id }];
     let release: () => void = () => undefined;
     const retry = new Promise<void>((resolve) => {
       release = resolve;
@@ -1188,20 +1187,25 @@ describe('createProvisionFilesCallback', () => {
     const { provisionFiles } = buildHarness({ contexts: [[agent.id, agent]], vectorImpl });
     const query = jest.fn();
 
-    expect(buildUserMessageFiles(refs, [pending], agent)[0].reading).toEqual({
-      reader: 'search',
-      limitation: 'too_large_direct',
-    });
+    expect(collectInventoryEntries(agent)).toEqual([
+      expect.objectContaining({
+        kind: 'read',
+        reading: expect.objectContaining({ reader: 'search', reason: 'native_capacity' }),
+        search: 'queued',
+      }),
+    ]);
     await expect(provisionFiles(['file_search'], agent.id).then(query)).rejects.toMatchObject({
       code: 'file_search_preparation_failed',
     });
     expect(query).not.toHaveBeenCalled();
     expect(agent.provisionState?.vectorDBFiles).toEqual([pending]);
     expect(context?.searchState(pending.file_id)).toBe('failed');
-    expect(buildUserMessageFiles(refs, [pending], agent)[0].reading).toEqual({
-      reader: 'unavailable',
-      limitation: 'not_prepared',
-    });
+    expect(collectInventoryEntries(agent)).toEqual([
+      expect.objectContaining({
+        reading: expect.objectContaining({ reader: 'search' }),
+        search: 'failed',
+      }),
+    ]);
 
     const secondAttempt = provisionFiles(['file_search'], agent.id).then(query);
     await new Promise((resolve) => setImmediate(resolve));
@@ -1213,10 +1217,12 @@ describe('createProvisionFilesCallback', () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(agent.provisionState?.vectorDBFiles).toEqual([]);
     expect(context?.searchState(pending.file_id)).toBe('ready');
-    expect(buildUserMessageFiles(refs, [pending], agent)[0].reading).toEqual({
-      reader: 'search',
-      limitation: 'too_large_direct',
-    });
+    expect(collectInventoryEntries(agent)).toEqual([
+      expect.objectContaining({
+        reading: expect.objectContaining({ reader: 'search', reason: 'native_capacity' }),
+        search: 'ready',
+      }),
+    ]);
   });
 
   it('keeps partial indexing successes and retries only failed files', async () => {
@@ -1314,9 +1320,10 @@ describe('createProvisionFilesCallback', () => {
       expect.stringContaining(`file ${pending.file_id}`),
       { type: 'Error', status: 503 },
     );
-    expect(
-      JSON.stringify(buildUserMessageFiles([{ file_id: pending.file_id }], [pending], agent)),
-    ).not.toContain(secret);
+    prepareAgentFileContext(agent, [agent], 'user-1', false);
+    expect(JSON.stringify(agent.dynamicToolContextMap)).toContain('could not prepare it');
+    expect(JSON.stringify(agent.dynamicToolContextMap)).not.toContain(secret);
+    expect(JSON.stringify(collectInventoryEntries(agent))).not.toContain(secret);
     expect(agent.provisionState?.searchPreparation?.get(pending.file_id)).toBe('failed');
   });
 

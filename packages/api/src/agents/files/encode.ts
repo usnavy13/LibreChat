@@ -142,6 +142,7 @@ export function createRunFileMessageEncoder(
       endpoint,
       skipTotalSizeLimit: true,
       preserveTextSources: true,
+      consumers: agent.fileConsumers,
     });
     if (compatibleFiles.length !== sharedFiles.length) {
       throw new AgentAttachmentPolicyError();

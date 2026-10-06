@@ -13,9 +13,7 @@ const {
   getViolationInfo,
   applyForcedTemporaryRequest,
   resolveResumableRetention,
-  buildUserMessageFiles,
-  refreshUserMessageReading,
-  stripReadingNotices,
+  buildMessageFiles,
   getReferencedQuotes,
   resolveTitleTiming,
   GenerationJobManager,
@@ -780,7 +778,6 @@ function rejectMissingTriggerParentMessageId(res, generationProtocolVersion) {
  */
 const ResumableAgentController = async (req, res, next, initializeClient, addTitle) => {
   applyForcedTemporaryRequest(req);
-  req.body.files = stripReadingNotices(req.body.files);
   const startupTelemetry = getAgentStartupTelemetry(req);
   let generationProtocolVersion = negotiateNewGenerationProtocol(req);
   const {
@@ -3034,11 +3031,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         }
 
         if (req.body.files && Array.isArray(client.options.attachments)) {
-          const files = buildUserMessageFiles(
-            req.body.files,
-            client.options.attachments,
-            client.options.agent,
-          );
+          const files = buildMessageFiles(req.body.files, client.options.attachments);
           if (files.length > 0) {
             userMessage.files = files;
           }
@@ -3344,7 +3337,6 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         job.abortController.signal.removeEventListener('abort', abortTitleOnJobAbort);
         acceptsTitleEvents = false;
         resolveConvoReady();
-        refreshUserMessageReading(userMessage, req.body.files, client);
         if (!res.headersSent) {
           sendGenerationJson(
             res,

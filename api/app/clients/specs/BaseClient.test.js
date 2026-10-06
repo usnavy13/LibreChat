@@ -3070,7 +3070,7 @@ describe('BaseClient', () => {
       expect(userSave[0].files[0].file_id).toBe('file-abc');
     });
 
-    describe('reading notices', () => {
+    describe('reading policy', () => {
       const brief = {
         user: 'user-1',
         file_id: 'brief',
@@ -3097,7 +3097,6 @@ describe('BaseClient', () => {
         _id: 'mongo-scan',
       };
       const { text: _briefText, _id: _briefId, ...savedBrief } = brief;
-      const { _id: _scanId, ...savedScan } = scan;
 
       const routeAgent = (endpointConfig, deriveText) => {
         const config = { fileConfig: { endpoints: { [EModelEndpoint.openAI]: endpointConfig } } };
@@ -3141,15 +3140,13 @@ describe('BaseClient', () => {
         delete TestClient.options.agent;
       });
 
-      test('saves how the automatic policy read each request file, including a refused one', async () => {
+      test('saves the same sanitized attachments under the automatic policy, with no reading notice', async () => {
         TestClient.options.agent = routeAgent({ llmDeliveryPolicy: 'automatic' });
 
         const files = await saveUserFiles();
 
-        expect(files).toEqual([
-          { ...savedBrief, reading: { reader: 'provider' } },
-          { ...savedScan, reading: { reader: 'unavailable', limitation: 'not_allowed' } },
-        ]);
+        expect(JSON.stringify(files)).toBe(JSON.stringify([savedBrief]));
+        expect(files[0]).not.toHaveProperty('reading');
         expect(brief).not.toHaveProperty('reading');
         expect(TestClient.options.attachments).toEqual([brief]);
       });
@@ -4883,19 +4880,30 @@ describe('BaseClient native documents under a reading context', () => {
     bytes: 1800,
   };
 
+  /** Automatic reading needs a loaded file tool; text is the fallback once loaded File Search
+   *  cannot reach the file and no other reader takes it. */
+  const unreachableSearch = () => ({ queued: [], registered: [], preparation: new Map() });
+
   test.each([
-    ['search', { executeCode: false, fileSearch: true }],
-    ['code', { executeCode: true, fileSearch: false }],
-    ['text', { executeCode: false, fileSearch: false }],
+    ['search', 'search', { executeCode: false, fileSearch: true }],
+    ['code', 'code', { executeCode: true, fileSearch: false }],
+    [
+      'text once loaded File Search cannot reach it',
+      'text',
+      { executeCode: false, fileSearch: true },
+    ],
   ])(
     'continues a PDF accepted through %s on a fresh turn without reuploading',
-    async (reader, tools) => {
+    async (_label, reader, tools) => {
       jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
       jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
       const stored = { ...overPageLimit, text: 'Complete cached PDF text.' };
       const setupTurn = () => {
         const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' });
         client.options.agent.fileConsumers = tools;
+        if (reader === 'text') {
+          routing.reading.setSearchEvidence(unreachableSearch());
+        }
         client.options.agent.currentRequestAttachments = [stored];
         client.options.attachments = [stored];
         client.admitPreparedAttachments = (files, fileConsumers) =>
@@ -4938,7 +4946,7 @@ describe('BaseClient native documents under a reading context', () => {
     },
   );
 
-  test('derives a fitting capacity fallback once and persists a truthful text reading', async () => {
+  test('derives a fitting capacity fallback once when loaded File Search cannot reach the file', async () => {
     jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
     jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
     const deriveText = jest.fn(async () => ({
@@ -4947,12 +4955,13 @@ describe('BaseClient native documents under a reading context', () => {
       textDerivation: { outcome: 'complete', extractor: 'document_parser', at: 2 },
     }));
     try {
-      const { client } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
+      const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
       const file = {
         ...overPageLimit,
         metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
       };
-      client.options.agent.fileConsumers = { executeCode: false, fileSearch: false };
+      client.options.agent.fileConsumers = { executeCode: false, fileSearch: true };
+      routing.reading.setSearchEvidence(unreachableSearch());
       client.options.agent.currentRequestAttachments = [file];
       client.options.attachments = [file];
       client.admitPreparedAttachments = (files, fileConsumers) =>
@@ -4970,6 +4979,36 @@ describe('BaseClient native documents under a reading context', () => {
         llmDeliveryPath: 'text',
         text: 'Complete newly derived PDF text.',
       });
+      expect(file.text).toBeUndefined();
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  test('fails the turn without a file tool instead of deriving a fallback under the automatic policy', async () => {
+    jest.spyOn(Tokenizer, 'initEncoding').mockResolvedValue(undefined);
+    jest.spyOn(Tokenizer, 'getTokenCount').mockImplementation((text) => text.length);
+    const deriveText = jest.fn();
+    try {
+      const { client, routing } = routeBrokenPdf({ llmDeliveryPolicy: 'automatic' }, deriveText);
+      const file = {
+        ...overPageLimit,
+        metadata: { destinationChosen: false, textDerivation: { outcome: 'deferred', at: 1 } },
+      };
+      client.options.agent.fileConsumers = { executeCode: false, fileSearch: false };
+      client.options.agent.currentRequestAttachments = [file];
+      client.options.attachments = [file];
+      client.admitPreparedAttachments = (files, fileConsumers) =>
+        admitNativeFallbackAttachments(client, files, fileConsumers);
+      const message = { messageId: 'no-file-tools' };
+
+      await expect(client.processMessageAttachments(message, [file])).rejects.toThrow(
+        'PDF validation failed',
+      );
+      expect(message.documents).toBeUndefined();
+      expect(message.fileContext).toBeUndefined();
+      expect(deriveText).not.toHaveBeenCalled();
+      expect(routing.reading.stats().rejected).toBe(0);
       expect(file.text).toBeUndefined();
     } finally {
       jest.restoreAllMocks();

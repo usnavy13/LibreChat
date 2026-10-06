@@ -225,16 +225,35 @@ describe('allocateTurnAttachmentsWithHistory', () => {
       expect(turn.context.stats().overflow).toBe(0);
     });
 
-    it('leaves the overflow unavailable rather than failing the turn when no tool can read it', async () => {
-      const turn = setup({ fileConfig: { fileContextSizeLimit: 10 }, consumers: noReader });
+    it('leaves the overflow unavailable rather than failing the turn when File Search cannot reach it', async () => {
+      /* File Search queued and registered nothing, as a failed provisioning leaves it, and no
+       * code tool is loaded, so no reader is left for the overflow. */
+      const turn = setup({ fileConfig: { fileContextSizeLimit: 10 } });
+      turn.context.setSearchEvidence({ queued: [], registered: [] });
 
       const allocated = await allocate(turn, [history], current());
 
       expect(pathsById(allocated)).toEqual({ a: 'provider', b: 'none' });
       expect(
-        decideFileReading({ routing: turn.routing, file: allocated[1], consumers: noReader }),
+        decideFileReading({ routing: turn.routing, file: allocated[1], consumers: searchOnly }),
       ).toMatchObject({ reader: 'unavailable', reason: 'aggregate_overflow' });
       expect(() => assertTurnLimits(turn, [history], allocated)).not.toThrow();
+    });
+
+    it('keeps the current files on their classic route when no file tool is loaded, so the limit check still fails the turn', async () => {
+      const turn = setup({ fileConfig: { fileContextSizeLimit: 10 }, consumers: noReader });
+      const files = current();
+
+      const allocated = await allocate(turn, [history], files);
+
+      expect(pathsById(allocated)).toEqual({ a: 'provider', b: 'provider' });
+      expect(turn.context.stats().overflow).toBe(0);
+      expect(
+        decideFileReading({ routing: turn.routing, file: allocated[1], consumers: noReader }),
+      ).toMatchObject({ reader: 'provider', reason: 'no_file_tools', automatic: false });
+      expect(() => assertTurnLimits(turn, [history], allocated)).toThrow(
+        expect.objectContaining({ limitType: 'bytes' }),
+      );
     });
 
     it('moves a text reading that no longer fits the extracted-text budget', async () => {

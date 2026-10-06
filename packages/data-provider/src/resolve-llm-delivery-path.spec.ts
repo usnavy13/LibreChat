@@ -1175,16 +1175,26 @@ describe('resolveTurnLLMDeliveryPath', () => {
     };
 
     it('delivers stored text as a primary reader on an endpoint without the fallback flag', () => {
+      /* Classic routing leaves the presentation to Run Code; the automatic walk reads a
+       * document's stored text before any tool. Without a tool the classic route answers. */
+      const codeOnly: TurnFileConsumers = { executeCode: true, fileSearch: false };
       expect(
-        resolveTurnLLMDeliveryPath({ file: slides, consumers: noReader, endpointConfig: {} }),
+        resolveTurnLLMDeliveryPath({ file: slides, consumers: codeOnly, endpointConfig: {} }),
       ).toBe('none');
+      expect(
+        resolveTurnLLMDeliveryPath({
+          file: slides,
+          consumers: codeOnly,
+          endpointConfig: { llmDeliveryPolicy: 'automatic' },
+        }),
+      ).toBe('text');
       expect(
         resolveTurnLLMDeliveryPath({
           file: slides,
           consumers: noReader,
           endpointConfig: { llmDeliveryPolicy: 'automatic' },
         }),
-      ).toBe('text');
+      ).toBe('none');
     });
 
     it('keeps an explicit none override with the fallback flag off', () => {
@@ -1424,13 +1434,17 @@ describe('decideFileReading', () => {
         CODE_ONLY,
       ],
       ['consumers_unknown', automaticRouting('openAI'), eligible, undefined],
+      ['no_file_tools', automaticRouting('openAI'), eligible, NO_TOOLS],
+      ['no_file_tools', automaticRouting('bedrock'), attachment(XLSX), NO_TOOLS],
+      ['no_file_tools', automaticRouting('openAI'), attachment(PPTX, { text: 'slides' }), NO_TOOLS],
+      ['no_file_tools', automaticRouting('openAI'), attachment('audio/mpeg'), NO_TOOLS],
       [
         'media_category',
         automaticRouting('openAI'),
         attachment('image/png', { llmDeliveryPath: 'provider' }),
         CODE_ONLY,
       ],
-      ['media_category', automaticRouting('openAI'), attachment('audio/mpeg'), NO_TOOLS],
+      ['media_category', automaticRouting('openAI'), attachment('audio/mpeg'), SEARCH_ONLY],
       ['media_category', automaticRouting('google'), attachment('video/mp4'), BOTH_TOOLS],
     ];
 
@@ -1469,8 +1483,10 @@ describe('decideFileReading', () => {
       file = { ...file, source: 'local' };
       expect(reasonOf(configured)).toBe('configured_route');
       expect(reasonOf(automaticRouting('openAI'))).toBe('consumers_unknown');
+      expect(reasonOf(automaticRouting('openAI'), NO_TOOLS)).toBe('no_file_tools');
       expect(reasonOf(automaticRouting('openAI'), CODE_ONLY)).toBe('code_preferred');
       file = { ...file, type: 'image/png' };
+      expect(reasonOf(automaticRouting('openAI'), NO_TOOLS)).toBe('no_file_tools');
       expect(reasonOf(automaticRouting('openAI'), CODE_ONLY)).toBe('media_category');
     });
 
@@ -1508,7 +1524,7 @@ describe('decideFileReading', () => {
     );
 
     it('falls back to native delivery where the provider takes the type', () => {
-      const reading = decide(attachment(XLSX), NO_TOOLS, automaticRouting('bedrock'));
+      const reading = decide(attachment(XLSX), SEARCH_ONLY, automaticRouting('bedrock'));
       expect(reading).toMatchObject({
         reader: 'provider',
         path: 'provider',
@@ -1519,7 +1535,7 @@ describe('decideFileReading', () => {
 
     it('then to complete stored text', () => {
       const routing = automaticRouting('openAI', { reading: withEvidence({ text: 'fits' }) });
-      const reading = decide(attachment(XLSX, { text: 'region,total' }), NO_TOOLS, routing);
+      const reading = decide(attachment(XLSX, { text: 'region,total' }), SEARCH_ONLY, routing);
       expect(reading).toMatchObject({ reader: 'text', path: 'text', needsText: false });
       expect(reading.skipped).toEqual([
         { reader: 'code', reason: 'code_unavailable' },
@@ -1534,13 +1550,28 @@ describe('decideFileReading', () => {
     });
 
     it('reports the file unavailable when no reader can take it', () => {
-      const reading = decide(attachment(XLSX), NO_TOOLS);
+      const routing = automaticRouting('openAI', {
+        reading: withEvidence({ search: 'unreachable' }),
+      });
+      const reading = decide(attachment(XLSX), SEARCH_ONLY, routing);
       expect(reading).toMatchObject({
         reader: 'unavailable',
         path: 'none',
         reason: 'code_unavailable',
       });
       expect(skippedReaders(reading)).toEqual(['code', 'provider', 'text', 'search']);
+    });
+
+    it('keeps the classic route when no file tool is loaded', () => {
+      const reading = decide(attachment(XLSX, { text: 'region,total' }), NO_TOOLS);
+      expect(reading).toMatchObject({
+        reader: 'text',
+        path: 'text',
+        classicPath: 'text',
+        reason: 'no_file_tools',
+        automatic: false,
+        skipped: [],
+      });
     });
   });
 
@@ -1619,7 +1650,12 @@ describe('decideFileReading', () => {
     it('leaves archives and columnar data to Run Code or nothing', () => {
       expect(decide(attachment(ZIP), CODE_ONLY)).toMatchObject({ reader: 'code', path: 'none' });
       expect(decide(attachment(ZIP), SEARCH_ONLY)).toMatchObject({ reader: 'unavailable' });
-      expect(decide(attachment(ZIP), NO_TOOLS)).toMatchObject({ reader: 'unavailable' });
+      expect(decide(attachment(ZIP), NO_TOOLS)).toMatchObject({
+        reader: 'unavailable',
+        path: 'none',
+        reason: 'no_file_tools',
+        automatic: false,
+      });
       expect(decide(attachment(PARQUET), CODE_ONLY)).toMatchObject({
         reader: 'code',
         reason: 'code_preferred',
@@ -1630,11 +1666,18 @@ describe('decideFileReading', () => {
       });
       expect(decide(attachment('application/x-parquet'), NO_TOOLS)).toMatchObject({
         reader: 'unavailable',
+        path: 'none',
+        reason: 'no_file_tools',
+        automatic: false,
       });
     });
   });
 
   describe('evidence', () => {
+    /* The walk runs only with a file tool loaded, so "no tool can take it" is a loaded File
+     * Search that will not receive the file: the row is then walked to its end. */
+    const unreachable = { search: 'unreachable' } as const;
+
     it('sends a document over native capacity to search, then code, then text that fits', () => {
       const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
       const routing = automaticRouting('openAI', {
@@ -1649,14 +1692,17 @@ describe('decideFileReading', () => {
         reader: 'code',
         reason: 'native_capacity',
       });
-      const text = decide(pdf, NO_TOOLS, routing);
+      const unreached = automaticRouting('openAI', {
+        reading: withEvidence({ native: 'capacity', text: 'fits', ...unreachable }),
+      });
+      const text = decide(pdf, SEARCH_ONLY, unreached);
       expect(text).toMatchObject({ reader: 'text', path: 'text', reason: 'native_capacity' });
       expect(skippedReaders(text)).toEqual(['provider', 'search', 'code']);
 
       const exceeding = automaticRouting('openAI', {
-        reading: withEvidence({ native: 'capacity', text: 'exceeds' }),
+        reading: withEvidence({ native: 'capacity', text: 'exceeds', ...unreachable }),
       });
-      expect(decide(pdf, NO_TOOLS, exceeding)).toMatchObject({
+      expect(decide(pdf, SEARCH_ONLY, exceeding)).toMatchObject({
         reader: 'unavailable',
         path: 'none',
         reason: 'native_capacity',
@@ -1673,7 +1719,10 @@ describe('decideFileReading', () => {
       expect(searched).toMatchObject({ reader: 'search', reason: 'native_capacity' });
       expect(skippedReaders(searched)).toEqual(['code', 'provider']);
 
-      const text = decide(sheet, NO_TOOLS, routing);
+      const unreached = automaticRouting('bedrock', {
+        reading: withEvidence({ native: 'capacity', text: 'fits', ...unreachable }),
+      });
+      const text = decide(sheet, SEARCH_ONLY, unreached);
       expect(text).toMatchObject({ reader: 'text', path: 'text', reason: 'native_capacity' });
       expect(skippedReaders(text)).toEqual(['code', 'provider', 'search']);
       expect(decide(sheet, CODE_ONLY, routing)).toMatchObject({ reader: 'code', skipped: [] });
@@ -1693,7 +1742,15 @@ describe('decideFileReading', () => {
         reader: 'code',
         reason: 'native_capacity',
       });
-      expect(decide(pdf, NO_TOOLS, routing)).toMatchObject({
+      const unreached = automaticRouting('anthropic', {
+        reading: withEvidence({
+          native: 'fits',
+          rejected: 'capacity',
+          text: 'fits',
+          ...unreachable,
+        }),
+      });
+      expect(decide(pdf, SEARCH_ONLY, unreached)).toMatchObject({
         reader: 'text',
         path: 'text',
         reason: 'native_capacity',
@@ -1701,9 +1758,14 @@ describe('decideFileReading', () => {
       });
 
       const exceeding = automaticRouting('anthropic', {
-        reading: withEvidence({ native: 'fits', rejected: 'capacity', text: 'exceeds' }),
+        reading: withEvidence({
+          native: 'fits',
+          rejected: 'capacity',
+          text: 'exceeds',
+          ...unreachable,
+        }),
       });
-      expect(decide(pdf, NO_TOOLS, exceeding)).toMatchObject({
+      expect(decide(pdf, SEARCH_ONLY, exceeding)).toMatchObject({
         reader: 'unavailable',
         path: 'none',
         reason: 'native_capacity',
@@ -1713,18 +1775,18 @@ describe('decideFileReading', () => {
     it('derives a capacity fallback while keeping integrity failures away from text', () => {
       const pdf = attachment(PDF, { llmDeliveryPath: 'provider' });
       const routing = automaticRouting('anthropic', {
-        reading: withEvidence({ native: 'fits', rejected: 'capacity' }, true),
+        reading: withEvidence({ native: 'fits', rejected: 'capacity', ...unreachable }, true),
       });
-      expect(decide(pdf, NO_TOOLS, routing)).toMatchObject({
+      expect(decide(pdf, SEARCH_ONLY, routing)).toMatchObject({
         reader: 'text',
         reason: 'native_capacity',
         needsText: true,
       });
 
       const invalid = automaticRouting('anthropic', {
-        reading: withEvidence({ native: 'fits', rejected: 'integrity' }, true),
+        reading: withEvidence({ native: 'fits', rejected: 'integrity', ...unreachable }, true),
       });
-      expect(decide(pdf, NO_TOOLS, invalid)).toMatchObject({
+      expect(decide(pdf, SEARCH_ONLY, invalid)).toMatchObject({
         reader: 'unavailable',
         reason: 'native_rejected',
         needsText: false,
@@ -1735,7 +1797,7 @@ describe('decideFileReading', () => {
       const routing = automaticRouting('anthropic', {
         reading: withEvidence({ native: 'fits', rejected: 'unsupported', text: 'fits' }),
       });
-      expect(decide(attachment(PDF, { text: 'extracted' }), NO_TOOLS, routing)).toMatchObject({
+      expect(decide(attachment(PDF, { text: 'extracted' }), BOTH_TOOLS, routing)).toMatchObject({
         reader: 'text',
         reason: 'native_unsupported',
       });
@@ -1745,7 +1807,7 @@ describe('decideFileReading', () => {
       const routing = automaticRouting('anthropic', {
         reading: withEvidence({ native: 'unsupported' }),
       });
-      const reading = decide(attachment(PDF, { text: 'extracted' }), NO_TOOLS, routing);
+      const reading = decide(attachment(PDF, { text: 'extracted' }), BOTH_TOOLS, routing);
       expect(reading).toMatchObject({ reader: 'text', reason: 'native_unsupported' });
     });
 
@@ -1753,9 +1815,12 @@ describe('decideFileReading', () => {
       const routing = automaticRouting('bedrock', {
         reading: withEvidence({ rejected: 'integrity', text: 'fits' }),
       });
+      const unreached = automaticRouting('bedrock', {
+        reading: withEvidence({ rejected: 'integrity', text: 'fits', ...unreachable }),
+      });
       const pdf = attachment(PDF, { text: 'extracted' });
 
-      const unavailable = decide(pdf, NO_TOOLS, routing);
+      const unavailable = decide(pdf, SEARCH_ONLY, unreached);
       expect(unavailable).toMatchObject({ reader: 'unavailable', reason: 'native_rejected' });
       expect(skippedReaders(unavailable)).toEqual(['provider', 'search', 'code']);
       expect(decide(pdf, SEARCH_ONLY, routing)).toMatchObject({
@@ -1763,7 +1828,7 @@ describe('decideFileReading', () => {
         reason: 'native_rejected',
       });
 
-      const sheet = decide(attachment(XLSX, { text: 'region,total' }), NO_TOOLS, routing);
+      const sheet = decide(attachment(XLSX, { text: 'region,total' }), SEARCH_ONLY, unreached);
       expect(sheet.reader).toBe('unavailable');
       expect(skippedReaders(sheet)).toEqual(['code', 'provider', 'search']);
     });
@@ -1775,7 +1840,10 @@ describe('decideFileReading', () => {
       const coded = decide(docx, CODE_ONLY, routing);
       expect(coded).toMatchObject({ reader: 'code', reason: 'text_exceeds' });
       expect(coded.skipped).toContainEqual({ reader: 'text', reason: 'text_exceeds' });
-      expect(decide(docx, NO_TOOLS, routing)).toMatchObject({
+      const unreached = automaticRouting('openAI', {
+        reading: withEvidence({ text: 'exceeds', ...unreachable }),
+      });
+      expect(decide(docx, SEARCH_ONLY, unreached)).toMatchObject({
         reader: 'unavailable',
         path: 'none',
       });
@@ -1789,9 +1857,12 @@ describe('decideFileReading', () => {
       const routing = automaticRouting('openAI', {
         reading: withEvidence({ overflow: true, text: 'fits' }),
       });
+      const unreached = automaticRouting('openAI', {
+        reading: withEvidence({ overflow: true, text: 'fits', ...unreachable }),
+      });
       const pdf = attachment(PDF, { llmDeliveryPath: 'provider', text: 'extracted' });
 
-      const unavailable = decide(pdf, NO_TOOLS, routing);
+      const unavailable = decide(pdf, SEARCH_ONLY, unreached);
       expect(unavailable).toMatchObject({ reader: 'unavailable', path: 'none' });
       expect(unavailable.skipped[0]).toEqual({ reader: 'provider', reason: 'aggregate_overflow' });
       expect(skippedReaders(unavailable)).toEqual(['provider', 'search', 'code']);
@@ -1807,8 +1878,11 @@ describe('decideFileReading', () => {
 
     it('names the limit the file hit rather than a reader that was missing', () => {
       const exceeds = automaticRouting('openAI', { reading: withEvidence({ text: 'exceeds' }) });
+      const unreached = automaticRouting('openAI', {
+        reading: withEvidence({ text: 'exceeds', ...unreachable }),
+      });
 
-      const largeCsv = decide(attachment('text/csv', { text: 'long' }), NO_TOOLS, exceeds);
+      const largeCsv = decide(attachment('text/csv', { text: 'long' }), SEARCH_ONLY, unreached);
       expect(largeCsv).toMatchObject({ reader: 'unavailable', reason: 'text_exceeds' });
       expect(skippedReaders(largeCsv)).toEqual(['code', 'provider', 'text', 'search']);
 
@@ -1818,15 +1892,16 @@ describe('decideFileReading', () => {
     });
 
     it('names the preferred reader that was missing when no limit was hit', () => {
-      expect(decide(attachment(PARQUET), NO_TOOLS)).toMatchObject({
+      const unreached = automaticRouting('openAI', { reading: withEvidence(unreachable) });
+      expect(decide(attachment(PARQUET), SEARCH_ONLY)).toMatchObject({
         reader: 'unavailable',
         reason: 'code_unavailable',
       });
-      expect(decide(attachment(PPTX), NO_TOOLS)).toMatchObject({
+      expect(decide(attachment(PPTX), SEARCH_ONLY, unreached)).toMatchObject({
         reader: 'unavailable',
         reason: 'text_unavailable',
       });
-      expect(decide(attachment(DOCX, { text: 'parsed' }), NO_TOOLS)).toMatchObject({
+      expect(decide(attachment(DOCX, { text: 'parsed' }), BOTH_TOOLS)).toMatchObject({
         reader: 'text',
         reason: 'native_unsupported',
       });
@@ -1862,15 +1937,36 @@ describe('decideFileReading', () => {
     const deriving = (evidence: ReadingEvidence = {}) =>
       automaticRouting('openAI', { reading: withEvidence(evidence, true) });
 
+    const unreachable = { search: 'unreachable' } as const;
+
     it('asks for text when a deriver is wired and code cannot read the file', () => {
-      expect(decide(deferred, NO_TOOLS, deriving())).toMatchObject({
+      expect(decide(deferred, SEARCH_ONLY, deriving(unreachable))).toMatchObject({
         reader: 'text',
         path: 'text',
         needsText: true,
+        automatic: true,
       });
       expect(decide(deferred, CODE_ONLY, deriving())).toMatchObject({
         reader: 'code',
         needsText: false,
+      });
+    });
+
+    it('derives the text its classic route names when no file tool is loaded', () => {
+      expect(decide(deferred, NO_TOOLS, deriving())).toMatchObject({
+        reader: 'text',
+        path: 'text',
+        classicPath: 'text',
+        needsText: true,
+        automatic: false,
+        reason: 'no_file_tools',
+      });
+      expect(decide(deferred, NO_TOOLS, automaticRouting('openAI'))).toMatchObject({
+        path: 'none',
+        classicPath: 'text',
+        reader: 'unavailable',
+        needsText: false,
+        reason: 'no_file_tools',
       });
     });
 
@@ -1880,26 +1976,41 @@ describe('decideFileReading', () => {
         metadata: { destinationChosen: false, textDerivation: { outcome: 'failed' as const } },
       };
       const unreadable = [
-        decide(deferred, NO_TOOLS, automaticRouting('openAI', { reading: withEvidence() })),
-        decide(deferred, NO_TOOLS, automaticRouting('openAI')),
-        decide({ ...deferred, source: 'openai' }, NO_TOOLS, deriving()),
-        decide({ ...deferred, type: PPTX }, NO_TOOLS, deriving()),
-        decide(failed, NO_TOOLS, deriving()),
-        decide(deferred, NO_TOOLS, deriving({ textFailed: true })),
+        decide(
+          deferred,
+          SEARCH_ONLY,
+          automaticRouting('openAI', { reading: withEvidence(unreachable) }),
+        ),
+        decide({ ...deferred, source: 'openai' }, SEARCH_ONLY, deriving(unreachable)),
+        decide({ ...deferred, type: PPTX }, SEARCH_ONLY, deriving(unreachable)),
+        decide(failed, SEARCH_ONLY, deriving(unreachable)),
+        decide(deferred, SEARCH_ONLY, deriving({ textFailed: true, ...unreachable })),
       ];
       unreadable.forEach((reading) => {
         expect(reading).toMatchObject({ reader: 'unavailable', needsText: false });
         expect(reading.skipped).toContainEqual({ reader: 'text', reason: 'text_unavailable' });
       });
+
+      /* With no reading inputs at all, File Search is reachable and takes the file; text is
+       * still passed over rather than asked for. */
+      const bare = decide(deferred, SEARCH_ONLY, automaticRouting('openAI'));
+      expect(bare).toMatchObject({ reader: 'search', needsText: false });
+      expect(bare.skipped).toContainEqual({ reader: 'text', reason: 'text_unavailable' });
       expect(decide(deferred, SEARCH_ONLY, deriving({ textFailed: true }))).toMatchObject({
         reader: 'search',
       });
     });
 
     it('uses stored text rather than deriving it again', () => {
+      expect(decide({ ...deferred, text: 'region,total' }, SEARCH_ONLY, deriving())).toMatchObject({
+        reader: 'text',
+        needsText: false,
+        automatic: true,
+      });
       expect(decide({ ...deferred, text: 'region,total' }, NO_TOOLS, deriving())).toMatchObject({
         reader: 'text',
         needsText: false,
+        automatic: false,
       });
     });
   });
@@ -1957,12 +2068,27 @@ describe('decideFileReading', () => {
     it('reads a classic-era spreadsheet with Run Code when it runs, and as text when not', () => {
       const sheet = attachment(XLSX, { llmDeliveryPath: 'text', text: 'region,total' });
       expect(decide(sheet, CODE_ONLY)).toMatchObject({ path: 'none', classicPath: 'text' });
-      expect(decide(sheet, NO_TOOLS)).toMatchObject({ path: 'text', classicPath: 'text' });
+      expect(decide(sheet, SEARCH_ONLY)).toMatchObject({
+        path: 'text',
+        classicPath: 'text',
+        automatic: true,
+      });
+      expect(decide(sheet, NO_TOOLS)).toMatchObject({
+        path: 'text',
+        classicPath: 'text',
+        automatic: false,
+        reason: 'no_file_tools',
+      });
     });
 
     it('reads stored text as a primary reader without the fallback flag', () => {
       const slides = attachment(PPTX, { text: 'slide text' });
-      expect(decide(slides, NO_TOOLS)).toMatchObject({ path: 'text', classicPath: 'none' });
+      expect(decide(slides, BOTH_TOOLS)).toMatchObject({ path: 'text', classicPath: 'none' });
+      expect(decide(slides, NO_TOOLS)).toMatchObject({
+        path: 'none',
+        classicPath: 'none',
+        reason: 'no_file_tools',
+      });
     });
 
     it('keeps an explicit none override with the flag off', () => {
@@ -2012,7 +2138,8 @@ describe('decideFileReading', () => {
         'agents',
         'MyGateway',
       ];
-      const consumerSets = [NO_TOOLS, CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS];
+      /* The walk runs only once a file tool is loaded; without one the gate answers. */
+      const consumerSets = [CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS];
       const sources = ['local', 's3', 'openai', 'vectordb', undefined];
       const outcomes = ['deferred', 'complete', 'failed'] as const;
       const directReaders: ReadonlyArray<ReaderKind> = ['provider', 'text'];
@@ -2183,11 +2310,19 @@ describe('isAutomaticReadingRecord', () => {
             shapes.forEach((shape) => {
               const file = attachment(mimeType, shape);
               const eligible = isAutomaticReadingRecord(routing, file);
-              [NO_TOOLS, CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS].forEach((consumers) => {
+              [CODE_ONLY, SEARCH_ONLY, BOTH_TOOLS].forEach((consumers) => {
                 if (decideFileReading({ routing, file, consumers }).automatic !== eligible) {
                   mismatches.push(`${mimeType} on ${endpoint}: ${JSON.stringify(shape)}`);
                 }
               });
+              /* The record filter runs before consumers exist; the decision still keeps every
+               * record classic on a turn that loads no file tool. */
+              const untooled = decideFileReading({ routing, file, consumers: NO_TOOLS });
+              if (untooled.automatic || (eligible && untooled.reason !== 'no_file_tools')) {
+                mismatches.push(
+                  `${mimeType} on ${endpoint}: ${JSON.stringify(shape)} without a file tool`,
+                );
+              }
             }),
           );
         }),

@@ -97,10 +97,10 @@ describe('settleTurnFiles', () => {
       const files = [deferredWorkbook];
 
       expect(
-        decideFileReading({ routing, file: deferredWorkbook, consumers: noReader }),
-      ).toMatchObject({ reader: 'text', needsText: true });
+        decideFileReading({ routing, file: deferredWorkbook, consumers: searchOnly }),
+      ).toMatchObject({ reader: 'text', needsText: true, automatic: true });
 
-      const [settled] = await settleTurnFiles({ routing, consumers: noReader, files });
+      const [settled] = await settleTurnFiles({ routing, consumers: searchOnly, files });
 
       expect(settled).toMatchObject({
         file_id: 'xlsx',
@@ -108,7 +108,7 @@ describe('settleTurnFiles', () => {
         text: derivedText.text,
         metadata: { destinationChosen: false, textDerivation: derivedText.textDerivation },
       });
-      expect(decideFileReading({ routing, file: settled, consumers: noReader })).toMatchObject({
+      expect(decideFileReading({ routing, file: settled, consumers: searchOnly })).toMatchObject({
         reader: 'text',
         reason: 'code_unavailable',
         needsText: false,
@@ -116,7 +116,7 @@ describe('settleTurnFiles', () => {
       expect(deferredWorkbook.text).toBeUndefined();
       expect(deferredWorkbook.metadata?.textDerivation).toEqual({ outcome: 'deferred' });
 
-      await settleTurnFiles({ routing, consumers: noReader, files });
+      await settleTurnFiles({ routing, consumers: searchOnly, files });
       expect(deriveText).toHaveBeenCalledTimes(1);
       expect(deriveText).toHaveBeenCalledWith(
         expect.objectContaining({ file_id: 'xlsx', llmDeliveryPath: 'text' }),
@@ -124,7 +124,65 @@ describe('settleTurnFiles', () => {
       );
     });
 
+    it('derives the text the classic route needs when no file tool is loaded', async () => {
+      /* Without Run Code or File Search the policy decides nothing, but a deferred workbook's
+       * classic text route still has no text, so settle derives it as a no-tools turn reads it. */
+      const deriveText = jest.fn<ReturnType<FileTextDeriver>, Parameters<FileTextDeriver>>(
+        async () => derivedText,
+      );
+      const { routing } = setup({ deriveText });
+
+      expect(
+        decideFileReading({ routing, file: deferredWorkbook, consumers: noReader }),
+      ).toMatchObject({
+        reader: 'text',
+        reason: 'no_file_tools',
+        needsText: true,
+        automatic: false,
+      });
+
+      const [settled] = await settleTurnFiles({
+        routing,
+        consumers: noReader,
+        files: [deferredWorkbook],
+      });
+
+      expect(settled).toMatchObject({ llmDeliveryPath: 'text', text: derivedText.text });
+      expect(decideFileReading({ routing, file: settled, consumers: noReader })).toMatchObject({
+        reader: 'text',
+        reason: 'no_file_tools',
+        needsText: false,
+        automatic: false,
+      });
+      expect(deriveText).toHaveBeenCalledTimes(1);
+    });
+
     it('moves on to the next reader when derivation fails', async () => {
+      const { routing, context } = setup({
+        deriveText: async () => ({
+          status: 'failed',
+          textDerivation: { outcome: 'failed', reason: 'parser' },
+          persist: true,
+        }),
+      });
+
+      const [settled] = await settleTurnFiles({
+        routing,
+        consumers: searchOnly,
+        files: [deferredWorkbook],
+      });
+
+      expect(settled.llmDeliveryPath).toBe('none');
+      expect(settled.text).toBeUndefined();
+      expect(context.judge(deferredWorkbook).textFailed).toBe(true);
+      expect(decideFileReading({ routing, file: settled, consumers: searchOnly })).toMatchObject({
+        reader: 'search',
+        needsText: false,
+        skipped: expect.arrayContaining([{ reader: 'text', reason: 'text_unavailable' }]),
+      });
+    });
+
+    it('leaves the file unavailable when derivation fails and no file tool is loaded', async () => {
       const { routing, context } = setup({
         deriveText: async () => ({
           status: 'failed',
@@ -144,7 +202,9 @@ describe('settleTurnFiles', () => {
       expect(context.judge(deferredWorkbook).textFailed).toBe(true);
       expect(decideFileReading({ routing, file: settled, consumers: noReader })).toMatchObject({
         reader: 'unavailable',
+        reason: 'no_file_tools',
         needsText: false,
+        automatic: false,
       });
     });
 
@@ -261,8 +321,27 @@ describe('settleTurnFiles', () => {
       );
     });
 
-    it('leaves the overflow unavailable when no other reader can take it', async () => {
-      const { routing } = setup();
+    it('leaves the overflow unavailable when File Search is loaded but cannot reach it', async () => {
+      /* File Search queued and registered nothing, as a failed provisioning leaves it, and no
+       * code tool is loaded, so the walk past the overflow finds no reader. */
+      const { routing, context } = setup();
+      context.setSearchEvidence({ queued: [], registered: [] });
+
+      const settled = await settleTurnFiles({
+        routing,
+        consumers: searchOnly,
+        files: pdfs,
+        allocation: byteBudget(['a', 'b', 'c'], 10 * MB),
+      });
+
+      expect(settled[2].llmDeliveryPath).toBe('none');
+      expect(decideFileReading({ routing, file: settled[2], consumers: searchOnly })).toMatchObject(
+        { reader: 'unavailable', reason: 'aggregate_overflow' },
+      );
+    });
+
+    it('allocates nothing when no file tool is loaded, keeping every file on its classic route', async () => {
+      const { routing, context } = setup();
 
       const settled = await settleTurnFiles({
         routing,
@@ -271,10 +350,12 @@ describe('settleTurnFiles', () => {
         allocation: byteBudget(['a', 'b', 'c'], 10 * MB),
       });
 
-      expect(settled[2].llmDeliveryPath).toBe('none');
+      expect(pathsById(settled)).toEqual({ a: 'provider', b: 'provider', c: 'provider' });
+      expect(context.stats().overflow).toBe(0);
       expect(decideFileReading({ routing, file: settled[2], consumers: noReader })).toMatchObject({
-        reader: 'unavailable',
-        reason: 'aggregate_overflow',
+        reader: 'provider',
+        reason: 'no_file_tools',
+        automatic: false,
       });
     });
 
@@ -398,7 +479,7 @@ describe('settleTurnFiles', () => {
 
       const settled = await settleTurnFiles({
         routing,
-        consumers: noReader,
+        consumers: searchOnly,
         files: [pasted, ...pdfs],
         allocation: byteBudget(['pasted', 'a', 'b', 'c'], 12 * MB),
       });

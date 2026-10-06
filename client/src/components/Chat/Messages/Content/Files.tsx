@@ -4,30 +4,21 @@ import FileContainer from '~/components/Chat/Input/Files/FileContainer';
 import { usesImagePreview, hydrateFileDeliveryMetadata } from '~/utils';
 import { useFileMapContext, useShareContext } from '~/Providers';
 import FilePreviewDialog from './FilePreviewDialog';
-import { useReadingCaption } from './reading';
 import Image from './Image';
-
-type MessageFile = NonNullable<TMessage['files']>[number];
-
-/** An image nothing read keeps its chip, so it shows the notice instead of a preview. */
-const showsImagePreview = (file: MessageFile): boolean =>
-  usesImagePreview(file) && file.reading?.reader !== 'unavailable';
 
 const Files = ({ message }: { message?: TMessage }) => {
   const fileMap = useFileMapContext();
   const { shareId } = useShareContext();
-  const captionReading = useReadingCaption();
   const files = useMemo(
     () => hydrateFileDeliveryMetadata(message?.files, undefined, shareId ? undefined : fileMap),
     [message?.files, fileMap, shareId],
   );
-  const { imageFiles, otherFiles } = useMemo(() => {
-    const images: MessageFile[] = [];
-    const others: MessageFile[] = [];
-    for (const file of files ?? []) {
-      (showsImagePreview(file) ? images : others).push(file);
-    }
-    return { imageFiles: images, otherFiles: others };
+  const imageFiles = useMemo(() => {
+    return files?.filter(usesImagePreview) || [];
+  }, [files]);
+
+  const otherFiles = useMemo(() => {
+    return files?.filter((file) => !usesImagePreview(file)) || [];
   }, [files]);
 
   const [selectedFile, setSelectedFile] = useState<Partial<TFile> | null>(null);
@@ -41,18 +32,13 @@ const Files = ({ message }: { message?: TMessage }) => {
   return (
     <>
       {otherFiles.length > 0 &&
-        otherFiles.map((file) => {
-          const caption = captionReading(file);
-          return (
-            <FileContainer
-              key={file.file_id}
-              file={file as TFile}
-              subtitle={caption?.text}
-              ariaLabel={caption?.label}
-              onClick={() => setSelectedFile(file)}
-            />
-          );
-        })}
+        otherFiles.map((file) => (
+          <FileContainer
+            key={file.file_id}
+            file={file as TFile}
+            onClick={() => setSelectedFile(file)}
+          />
+        ))}
       {imageFiles.length > 0 &&
         imageFiles.map((file) => (
           <Image

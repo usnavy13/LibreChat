@@ -70,19 +70,6 @@ import { useAuthContext } from '~/hooks';
  * refetch so a send can't fork from an outdated tail. */
 const STALE_SEND_REVALIDATION_MS = 5_000;
 
-type MessageFiles = NonNullable<TMessage['files']>;
-
-/** `reading` is the server's notice for the turn that saved a message, so a replayed file
- * drops it: the optimistic bubble shows the default subtitle until this turn's notice arrives. */
-const withoutReadingNotices = (files: MessageFiles): MessageFiles =>
-  files.map((file) => {
-    if (file.reading == null) {
-      return file;
-    }
-    const { reading: _reading, ...rest } = file;
-    return rest;
-  });
-
 const logChatRequest = (request: Record<string, unknown>) => {
   logger.log('=====================================\nAsk function called with:');
   logger.dir({
@@ -702,7 +689,7 @@ export default function useChatFunctions({
       submissionFiles.length > 0;
 
     if (setFiles && reuseFiles === true) {
-      currentMsg.files = withoutReadingNotices(submissionFiles);
+      currentMsg.files = [...submissionFiles];
       /** Queued override files were consumed just like composer files, so mark their identities
        * as submitted before later draft cleanup can classify the restored paste as unsent. */
       const submittedFileIds: (string | undefined)[] = [];

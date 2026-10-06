@@ -61,10 +61,11 @@ interface AgentSetup {
 
 type TestAgent = CodeFileAgent & ReadingAgent & { deliveryRouting: TurnDeliveryRouting };
 
+/** A file tool is loaded unless a test says otherwise: the inventory is written only then. */
 function agentWith({
   provider = 'openAI',
   files = [],
-  consumers = NO_READER,
+  consumers = SEARCHES,
   endpointConfig = AUTOMATIC,
   codeEnvFiles,
   vectorDBFiles = [],
@@ -585,6 +586,31 @@ describe('prepareAgentFileContext', () => {
       });
     },
   );
+
+  it('writes no inventory and leaves the File Search note alone when no file tool is loaded', () => {
+    const pdf = attachment({
+      file_id: 'manual',
+      filename: 'manual.pdf',
+      type: PDF,
+      bytes: 5 * MB,
+      llmDeliveryPath: 'provider',
+    });
+    const workbook = attachment({ file_id: 'q3', filename: 'Q3.xlsx' });
+    const agent = agentWith({
+      files: [pdf, workbook],
+      consumers: NO_READER,
+      reading: { configuredFileSizeLimit: MB },
+      primedSearchFileIds: [],
+      dynamicToolContextMap: { [Tools.file_search]: NO_FILES_NOTE, file_inventory: 'stale' },
+    });
+    readingContextOf(agent).recordDropped([
+      { file_id: 'scan', filename: 'scan.tiff', type: 'image/tiff', bytes: 9 * MB },
+    ]);
+
+    prepare(agent);
+
+    expect(agent.dynamicToolContextMap).toEqual({ [Tools.file_search]: NO_FILES_NOTE });
+  });
 
   describe('the File Search note', () => {
     const oversized = () =>
